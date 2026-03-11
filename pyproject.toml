@@ -1,0 +1,73 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+[project]
+name        = "rpimocap"
+version     = "0.1.0"
+description = "Raspberry Pi multi-camera 3D motion capture from synchronous stereo video"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+
+keywords = [
+    "motion capture", "stereo vision", "3D reconstruction",
+    "voxel carving", "camera calibration", "neuroscience",
+    "raspberry pi", "pose estimation",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "scipy>=1.11",
+    "h5py>=3.9",
+    "scikit-image>=0.21",
+]
+
+[project.optional-dependencies]
+mediapipe = ["mediapipe>=0.10"]
+dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
+all       = ["rpimocap[mediapipe,dev]"]
+
+# ---------------------------------------------------------------------------
+[project.scripts]
+rpimocap-calibrate = "rpimocap.cli.calibrate:main"
+rpimocap-autocalib = "rpimocap.cli.autocalib:main"
+rpimocap-run       = "rpimocap.cli.pipeline:main"
+
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rpimocap*"]
+
+[tool.setuptools.package-data]
+"rpimocap.viewer" = ["assets/*.html"]
+
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+addopts      = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]    # line length handled by formatter
+
+[tool.mypy]
+python_version         = "3.10"
+ignore_missing_imports = true

@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>reconstruct3d — 3D Viewer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #080c12;
+    --panel: #0d1420;
+    --border: #1a2540;
+    --accent: #00c8ff;
+    --accent2: #ff4e8a;
+    --accent3: #39ff82;
+    --text: #c8d8f0;
+    --text-dim: #4a6080;
+    --mono: 'Space Mono', monospace;
+    --sans: 'DM Sans', sans-serif;
+  }
+
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--sans); }
+
+  #viewport { position: absolute; inset: 0; }
+
+  /* ── Panels ── */
+  .panel {
+    position: absolute;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    backdrop-filter: blur(8px);
+  }
+
+  /* ── Top bar ── */
+  #topbar {
+    top: 16px; left: 16px; right: 16px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 20px;
+    border-radius: 6px;
+    background: rgba(13, 20, 32, 0.92);
+  }
+  #logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+  #logo span { color: var(--text-dim); }
+  #file-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .topbtn {
+    display: flex; align-items: center; gap: 6px;
+    background: none; border: 1px solid var(--border);
+    color: var(--text); font-family: var(--mono); font-size: 11px;
+    padding: 5px 12px; border-radius: 4px; cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .topbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .topbtn.active { border-color: var(--accent); color: var(--accent); background: rgba(0,200,255,0.07); }
+
+  /* ── Side panel ── */
+  #sidepanel {
+    top: 76px; left: 16px; width: 240px;
+    padding: 14px;
+    display: flex; flex-direction: column; gap: 14px;
+    max-height: calc(100vh - 92px);
+    overflow-y: auto;
+  }
+  .section-title {
+    font-family: var(--mono); font-size: 10px;
+    color: var(--text-dim); letter-spacing: 0.15em;
+    text-transform: uppercase; margin-bottom: 6px;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .row label { font-size: 12px; color: var(--text); }
+  .row span  { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+
+  /* Toggle */
+  .toggle {
+    position: relative; width: 32px; height: 17px; cursor: pointer;
+  }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute; inset: 0;
+    background: var(--border); border-radius: 17px;
+    transition: background .2s;
+  }
+  .toggle input:checked ~ .toggle-track { background: var(--accent); }
+  .toggle-thumb {
+    position: absolute; top: 2px; left: 2px;
+    width: 13px; height: 13px; background: #fff;
+    border-radius: 50%; transition: transform .2s;
+    pointer-events: none;
+  }
+  .toggle input:checked ~ .toggle-thumb { transform: translateX(15px); }
+
+  /* Sliders */
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 3px; background: var(--border);
+    border-radius: 2px; outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px;
+    background: var(--accent); border-radius: 50%;
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .slider-row { display: flex; align-items: center; gap: 8px; }
+  .slider-row input[type=range] { flex: 1; }
+  .slider-row .val { font-family: var(--mono); font-size: 10px; color: var(--accent); width: 36px; text-align: right; }
+
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+
+  /* Stats */
+  .stat-table { width: 100%; border-collapse: collapse; }
+  .stat-table td { font-size: 11px; padding: 2px 0; vertical-align: middle; }
+  .stat-table td:first-child { color: var(--text-dim); font-family: var(--mono); }
+  .stat-table td:last-child { color: var(--accent); font-family: var(--mono); text-align: right; }
+
+  /* Landmark list */
+  #lm-list { max-height: 180px; overflow-y: auto; }
+  .lm-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; cursor: pointer;
+    font-size: 11px; font-family: var(--mono);
+    color: var(--text-dim); transition: color .15s;
+  }
+  .lm-item:hover { color: var(--text); }
+  .lm-item.selected { color: var(--accent); }
+  .lm-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ── Timeline ── */
+  #timeline {
+    position: absolute; bottom: 16px; left: 16px; right: 16px;
+    height: 56px;
+    padding: 8px 16px 4px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  #tl-controls { display: flex; align-items: center; gap: 10px; }
+  #play-btn {
+    background: none; border: 1px solid var(--accent); border-radius: 50%;
+    width: 30px; height: 30px; cursor: pointer; color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; transition: background .15s;
+    flex-shrink: 0;
+  }
+  #play-btn:hover { background: rgba(0,200,255,0.12); }
+  #scrubber { flex: 1; }
+  #frame-display {
+    font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+    white-space: nowrap; min-width: 80px; text-align: right;
+  }
+  #speed-btn {
+    background: none; border: 1px solid var(--border);
+    color: var(--text-dim); font-family: var(--mono); font-size: 10px;
+    padding: 4px 8px; border-radius: 3px; cursor: pointer;
+  }
+
+  /* ── Drop zone ── */
+  #dropzone {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; z-index: 100;
+    background: var(--bg);
+  }
+  #dropzone .dz-icon { font-size: 48px; opacity: 0.3; }
+  #dropzone h2 { font-family: var(--mono); font-size: 18px; color: var(--accent); letter-spacing: 0.05em; }
+  #dropzone p { font-size: 13px; color: var(--text-dim); text-align: center; max-width: 320px; line-height: 1.6; }
+  #dropzone .dz-or { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  #file-input { display: none; }
+  .dz-btn {
+    padding: 10px 24px; background: none;
+    border: 1px solid var(--accent); color: var(--accent);
+    font-family: var(--mono); font-size: 12px; border-radius: 4px;
+    cursor: pointer; transition: background .15s;
+  }
+  .dz-btn:hover { background: rgba(0,200,255,0.1); }
+  #dropzone.drag-over { background: rgba(0,200,255,0.04); }
+
+  /* ── Overlay notifications ── */
+  #notif { position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); }
+  .notif-pill {
+    background: rgba(0,200,255,0.15); border: 1px solid var(--accent);
+    color: var(--accent); font-family: var(--mono); font-size: 11px;
+    padding: 6px 14px; border-radius: 20px;
+    animation: fadeout 2s forwards;
+  }
+  @keyframes fadeout { 0%{opacity:1} 70%{opacity:1} 100%{opacity:0;display:none} }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ── Drop zone ── -->
+<div id="dropzone">
+  <div class="dz-icon">🧬</div>
+  <h2>reconstruct3d viewer</h2>
+  <p>Load a <code>viewer_data.json</code> file produced by the pipeline to visualise the 3D skeleton and volumetric hull.</p>
+  <div class="dz-or">drag & drop or</div>
+  <button class="dz-btn" onclick="document.getElementById('file-input').click()">Choose file</button>
+  <input type="file" id="file-input" accept=".json">
+  <p style="font-size:11px;color:var(--text-dim);margin-top:8px;">
+    Orbit: left drag · Zoom: scroll · Pan: right drag
+  </p>
+</div>
+
+<!-- ── 3D viewport ── -->
+<canvas id="viewport" style="display:none"></canvas>
+
+<!-- ── Top bar ── -->
+<div id="topbar" style="display:none">
+  <div id="logo">reconstruct<span>3d</span></div>
+  <div id="file-label">—</div>
+  <button class="topbtn active" id="btn-skeleton" onclick="toggleLayer('skeleton')">⬡ Skeleton</button>
+  <button class="topbtn active" id="btn-volume"   onclick="toggleLayer('volume')">⬡ Volume</button>
+  <button class="topbtn active" id="btn-floor"    onclick="toggleLayer('floor')">⬡ Floor</button>
+  <button class="topbtn"        id="btn-axes"     onclick="toggleLayer('axes')">⬡ Axes</button>
+</div>
+
+<!-- ── Side panel ── -->
+<div id="sidepanel" class="panel" style="display:none">
+
+  <div>
+    <div class="section-title">Scene info</div>
+    <table class="stat-table" id="info-table">
+      <tr><td>Frames</td><td id="si-frames">—</td></tr>
+      <tr><td>FPS</td><td id="si-fps">—</td></tr>
+      <tr><td>Landmarks</td><td id="si-lm">—</td></tr>
+      <tr><td>Volume pts</td><td id="si-vol">—</td></tr>
+    </table>
+  </div>
+
+  <hr class="sep">
+
+  <div>
+    <div class="section-title">Visual</div>
+    <div class="row"><label>Joint size</label></div>
+    <div class="slider-row">
+      <input type="range" id="sl-joint" min="1" max="20" value="5" oninput="setJointSize(+this.value)">
+      <span class="val" id="vl-joint">5</span>
+    </div>
+    <div class="row" style="margin-top:8px"><label>Bone opacity</label></div>
+    <div class="slider-row">
+      <input type="range" id="sl-bone" min="0" max="100" value="80" oninput="setBoneOpacity(+this.value/100)">
+      <span class="val" id="vl-bone">80%</span>
+    </div>
+    <div class="row" style="margin-top:8px"><label>Volume opacity</label></div>
+    <div class="slider-row">
+      <input type="range" id="sl-vol" min="0" max="100" value="30" oninput="setVolOpacity(+this.value/100)">
+      <span class="val" id="vl-vol">30%</span>
+    </div>
+    <div class="row" style="margin-top:8px"><label>Volume pt size</label></div>
+    <div class="slider-row">
+      <input type="range" id="sl-vsize" min="1" max="20" value="4" oninput="setVolSize(+this.value)">
+      <span class="val" id="vl-vsize">4</span>
+    </div>
+  </div>
+
+  <hr class="sep">
+
+  <div>
+    <div class="section-title">Landmarks</div>
+    <div id="lm-list"></div>
+  </div>
+
+  <hr class="sep">
+
+  <div>
+    <div class="section-title">Frame info</div>
+    <table class="stat-table" id="frame-stats">
+      <tr><td>Detected</td><td id="fi-det">—</td></tr>
+      <tr><td>Vol pts</td><td id="fi-vol">—</td></tr>
+    </table>
+  </div>
+
+</div>
+
+<!-- ── Timeline ── -->
+<div id="timeline" class="panel" style="display:none">
+  <div id="tl-controls">
+    <button id="play-btn" onclick="togglePlay()">▶</button>
+    <input type="range" id="scrubber" min="0" max="0" value="0"
+           oninput="seekFrame(+this.value)">
+    <span id="frame-display">0 / 0</span>
+    <button id="speed-btn" onclick="cycleSpeed()">1×</button>
+  </div>
+</div>
+
+<div id="notif"></div>
+
+<!-- Three.js via CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Globals ──────────────────────────────────────────────────────────────────
+let renderer, scene, camera, controls;
+let data = null;
+let currentFrame = 0;
+let playing = false;
+let playSpeed = 1;
+let lastTimestamp = 0;
+let frameInterval = 1000 / 30;
+
+const layers = { skeleton: true, volume: true, floor: true, axes: false };
+
+// Scene objects
+let jointMeshes = {};    // name → Mesh
+let boneMeshes = [];     // line segments
+let volumePoints = null; // Points
+let floorMesh = null;
+let axesHelper = null;
+let skeletonGroup = null;
+let volumeGroup = null;
+
+// Materials (shared across frames)
+let jointMat, boneMat, volumeMat;
+let jointSize = 5, boneOpacity = 0.8, volOpacity = 0.3, volSize = 4;
+
+// Colour palette for landmarks (HSL spread)
+const lmColors = [];
+
+// ── Renderer setup ────────────────────────────────────────────────────────────
+function initRenderer() {
+  const canvas = document.getElementById('viewport');
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x080c12);
+  renderer.shadowMap.enabled = true;
+
+  scene = new THREE.Scene();
+
+  const aspect = window.innerWidth / window.innerHeight;
+  camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 50000);
+  camera.position.set(0, -800, 600);
+
+  controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 50;
+  controls.maxDistance = 10000;
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0x223355, 1.2);
+  scene.add(ambient);
+  const dirLight = new THREE.DirectionalLight(0x88ccff, 1.0);
+  dirLight.position.set(0, -1, 2);
+  scene.add(dirLight);
+  const fillLight = new THREE.DirectionalLight(0xff4488, 0.3);
+  fillLight.position.set(1, 0, -1);
+  scene.add(fillLight);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  renderer.setAnimationLoop(animLoop);
+}
+
+// ── Animation loop ────────────────────────────────────────────────────────────
+function animLoop(timestamp) {
+  if (playing && data) {
+    const dt = timestamp - lastTimestamp;
+    if (dt >= frameInterval / playSpeed) {
+      lastTimestamp = timestamp;
+      seekFrame((currentFrame + 1) % data.frames.length);
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+window.loadData = function(d) {
+  data = d;
+  setupScene();
+  buildLandmarkList();
+  updateUI();
+  showViewer();
+  seekFrame(0);
+};
+
+function setupScene() {
+  scene.clear();
+
+  const nLm = data.keypoint_names.length;
+  for (let i = 0; i < nLm; i++) {
+    const h = (i / nLm) * 360;
+    lmColors[i] = new THREE.Color(`hsl(${h},100%,65%)`);
+  }
+
+  // Materials
+  jointMat = new THREE.MeshStandardMaterial({ vertexColors: false, roughness: 0.3, metalness: 0.5 });
+  boneMat  = new THREE.LineBasicMaterial({ color: 0x00c8ff, transparent: true, opacity: boneOpacity });
+  volumeMat = new THREE.PointsMaterial({
+    color: 0x39ff82, size: volSize, sizeAttenuation: true,
+    transparent: true, opacity: volOpacity,
+  });
+
+  skeletonGroup = new THREE.Group();
+  volumeGroup   = new THREE.Group();
+  scene.add(skeletonGroup);
+  scene.add(volumeGroup);
+
+  // Create joint spheres
+  const sphGeo = new THREE.SphereGeometry(1, 8, 6);
+  jointMeshes = {};
+  data.keypoint_names.forEach((name, i) => {
+    const mat = new THREE.MeshStandardMaterial({
+      color: lmColors[i], roughness: 0.3, metalness: 0.6,
+      emissive: lmColors[i], emissiveIntensity: 0.2,
+    });
+    const mesh = new THREE.Mesh(sphGeo, mat);
+    mesh.scale.setScalar(jointSize);
+    mesh.visible = false;
+    jointMeshes[name] = mesh;
+    skeletonGroup.add(mesh);
+  });
+
+  // Bone line
+  const boneGeo = new THREE.BufferGeometry();
+  const boneVerts = new Float32Array(data.edges.length * 6);
+  boneGeo.setAttribute('position', new THREE.BufferAttribute(boneVerts, 3));
+  const boneLine = new THREE.LineSegments(boneGeo, boneMat);
+  boneLine.name = 'bones';
+  skeletonGroup.add(boneLine);
+
+  // Volume points (populated per-frame)
+  const volGeo = new THREE.BufferGeometry();
+  volumePoints = new THREE.Points(volGeo, volumeMat);
+  volumeGroup.add(volumePoints);
+
+  // Floor grid
+  buildFloor();
+
+  // Axes
+  axesHelper = new THREE.AxesHelper(200);
+  axesHelper.visible = false;
+  scene.add(axesHelper);
+
+  // Ambient lighting
+  const al = new THREE.AmbientLight(0x223355, 1.2);
+  scene.add(al);
+  const dl = new THREE.DirectionalLight(0x88ccff, 0.8);
+  dl.position.set(0, -1, 2).normalize();
+  scene.add(dl);
+
+  // Camera to world centre
+  const b = data.bounds;
+  const cx = (b.x[0] + b.x[1]) / 2;
+  const cy = (b.y[0] + b.y[1]) / 2;
+  const cz = (b.z[0] + b.z[1]) / 2;
+  const span = Math.max(b.x[1]-b.x[0], b.y[1]-b.y[0], b.z[1]-b.z[0]);
+  controls.target.set(cx, cy, cz);
+  camera.position.set(cx, cy - span * 1.5, cz + span * 0.7);
+  camera.lookAt(cx, cy, cz);
+
+  // FPS
+  frameInterval = 1000 / (data.fps || 30);
+}
+
+function buildFloor() {
+  const b = data.bounds;
+  const w = b.x[1] - b.x[0];
+  const d = b.y[1] - b.y[0];
+  const z = b.z[0];
+  const cx = (b.x[0] + b.x[1]) / 2;
+  const cy = (b.y[0] + b.y[1]) / 2;
+
+  const gridHelper = new THREE.GridHelper(Math.max(w, d) * 1.1, 20, 0x1a2540, 0x1a2540);
+  gridHelper.position.set(cx, cy, z);
+  gridHelper.rotation.x = Math.PI / 2;
+  gridHelper.name = 'floor';
+  floorMesh = gridHelper;
+  scene.add(floorMesh);
+}
+
+// ── Frame display ─────────────────────────────────────────────────────────────
+window.seekFrame = function(idx) {
+  if (!data) return;
+  currentFrame = Math.max(0, Math.min(idx, data.frames.length - 1));
+  displayFrame(currentFrame);
+  document.getElementById('scrubber').value = currentFrame;
+  document.getElementById('frame-display').textContent =
+    `${currentFrame} / ${data.frames.length - 1}`;
+};
+
+function displayFrame(idx) {
+  const frame = data.frames[idx];
+  const nameIdx = {};
+  data.keypoint_names.forEach((n, i) => nameIdx[n] = i);
+
+  // Update joints
+  let nDet = 0;
+  data.keypoint_names.forEach((name) => {
+    const mesh = jointMeshes[name];
+    const kp = frame.kp[name];
+    if (kp && kp[3] > 0.1) {
+      // kp = [x, y, z, conf]  — reconstruction is in mm, scene in mm
+      mesh.position.set(kp[0], kp[1], kp[2]);
+      mesh.visible = layers.skeleton;
+      nDet++;
+    } else {
+      mesh.visible = false;
+    }
+  });
+
+  // Update bones
+  const bones = scene.getObjectByName('bones');
+  const posArr = bones.geometry.attributes.position.array;
+  data.edges.forEach((e, i) => {
+    const a = data.keypoint_names[e[0]];
+    const b = data.keypoint_names[e[1]];
+    const ka = frame.kp[a];
+    const kb = frame.kp[b];
+    const off = i * 6;
+    if (ka && kb && ka[3] > 0.1 && kb[3] > 0.1 && layers.skeleton) {
+      posArr[off]   = ka[0]; posArr[off+1] = ka[1]; posArr[off+2] = ka[2];
+      posArr[off+3] = kb[0]; posArr[off+4] = kb[1]; posArr[off+5] = kb[2];
+    } else {
+      posArr.fill(0, off, off + 6);
+    }
+  });
+  bones.geometry.attributes.position.needsUpdate = true;
+  bones.visible = layers.skeleton;
+
+  // Update volume
+  if (frame.vol && frame.vol.length > 0 && layers.volume) {
+    const flat = new Float32Array(frame.vol.length * 3);
+    frame.vol.forEach((p, i) => { flat[i*3]=p[0]; flat[i*3+1]=p[1]; flat[i*3+2]=p[2]; });
+    volumePoints.geometry.setAttribute('position', new THREE.BufferAttribute(flat, 3));
+    volumePoints.geometry.computeBoundingSphere();
+    volumePoints.visible = true;
+    document.getElementById('fi-vol').textContent = frame.vol.length;
+  } else {
+    volumePoints.visible = false;
+    document.getElementById('fi-vol').textContent = '—';
+  }
+
+  // Frame stats
+  document.getElementById('fi-det').textContent = `${nDet} / ${data.keypoint_names.length}`;
+}
+
+// ── Playback ──────────────────────────────────────────────────────────────────
+window.togglePlay = function() {
+  if (!data) return;
+  playing = !playing;
+  document.getElementById('play-btn').textContent = playing ? '⏸' : '▶';
+  lastTimestamp = performance.now();
+};
+
+const speeds = [0.25, 0.5, 1, 2, 4];
+let speedIdx = 2;
+window.cycleSpeed = function() {
+  speedIdx = (speedIdx + 1) % speeds.length;
+  playSpeed = speeds[speedIdx];
+  document.getElementById('speed-btn').textContent = playSpeed + '×';
+};
+
+// ── Layer toggles ─────────────────────────────────────────────────────────────
+window.toggleLayer = function(name) {
+  layers[name] = !layers[name];
+  const btn = document.getElementById('btn-' + name);
+  btn.classList.toggle('active', layers[name]);
+
+  if (name === 'skeleton') skeletonGroup.visible = layers[name];
+  if (name === 'volume')   volumeGroup.visible   = layers[name];
+  if (name === 'floor')    floorMesh && (floorMesh.visible = layers[name]);
+  if (name === 'axes')     axesHelper.visible = layers[name];
+
+  if (data) displayFrame(currentFrame);
+};
+
+// ── Visual parameter controls ─────────────────────────────────────────────────
+window.setJointSize = function(v) {
+  jointSize = v;
+  document.getElementById('vl-joint').textContent = v;
+  Object.values(jointMeshes).forEach(m => m.scale.setScalar(v));
+};
+window.setBoneOpacity = function(v) {
+  boneOpacity = v;
+  document.getElementById('vl-bone').textContent = Math.round(v*100) + '%';
+  if (boneMat) boneMat.opacity = v;
+};
+window.setVolOpacity = function(v) {
+  volOpacity = v;
+  document.getElementById('vl-vol').textContent = Math.round(v*100) + '%';
+  if (volumeMat) volumeMat.opacity = v;
+};
+window.setVolSize = function(v) {
+  volSize = v;
+  document.getElementById('vl-vsize').textContent = v;
+  if (volumeMat) volumeMat.size = v;
+};
+
+// ── Landmark list ─────────────────────────────────────────────────────────────
+function buildLandmarkList() {
+  const list = document.getElementById('lm-list');
+  list.innerHTML = '';
+  data.keypoint_names.forEach((name, i) => {
+    const col = '#' + lmColors[i].getHexString();
+    const div = document.createElement('div');
+    div.className = 'lm-item';
+    div.innerHTML = `<span class="lm-dot" style="background:${col}"></span>${name}`;
+    list.appendChild(div);
+  });
+}
+
+function updateUI() {
+  document.getElementById('si-frames').textContent = data.frames.length;
+  document.getElementById('si-fps').textContent = data.fps?.toFixed(2) ?? '—';
+  document.getElementById('si-lm').textContent = data.keypoint_names.length;
+  const hasVol = data.frames.some(f => f.vol?.length > 0);
+  document.getElementById('si-vol').textContent = hasVol ? '✓' : '—';
+  document.getElementById('scrubber').max = data.frames.length - 1;
+}
+
+// ── Show/hide UI ──────────────────────────────────────────────────────────────
+function showViewer() {
+  document.getElementById('dropzone').style.display = 'none';
+  document.getElementById('viewport').style.display = 'block';
+  document.getElementById('topbar').style.display = 'flex';
+  document.getElementById('sidepanel').style.display = 'flex';
+  document.getElementById('timeline').style.display = 'flex';
+}
+
+function notify(msg) {
+  const el = document.getElementById('notif');
+  el.innerHTML = `<div class="notif-pill">${msg}</div>`;
+  setTimeout(() => el.innerHTML = '', 2500);
+}
+
+// ── File loading ──────────────────────────────────────────────────────────────
+function handleFile(file) {
+  if (!file?.name.endsWith('.json')) { notify('Please load a .json file'); return; }
+  document.getElementById('file-label').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const d = JSON.parse(e.target.result);
+      loadData(d);
+      notify(`Loaded ${d.frames.length} frames`);
+    } catch(err) {
+      notify('JSON parse error: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('file-input').addEventListener('change', e => {
+  handleFile(e.target.files[0]);
+});
+
+const dz = document.getElementById('dropzone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.classList.remove('drag-over');
+  handleFile(e.dataTransfer.files[0]);
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (!data) return;
+  if (e.code === 'Space') { e.preventDefault(); window.togglePlay(); }
+  if (e.code === 'ArrowRight') seekFrame(currentFrame + 1);
+  if (e.code === 'ArrowLeft')  seekFrame(currentFrame - 1);
+  if (e.code === 'Home')       seekFrame(0);
+  if (e.code === 'End')        seekFrame(data.frames.length - 1);
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+initRenderer();
+
+// Try auto-loading from ./data/viewer_data.json
+fetch('./data/viewer_data.json')
+  .then(r => r.ok ? r.json() : Promise.reject('not found'))
+  .then(d => {
+    document.getElementById('file-label').textContent = 'viewer_data.json';
+    loadData(d);
+  })
+  .catch(() => {/* manual load via UI */});
+</script>
+</body>
+</html>
