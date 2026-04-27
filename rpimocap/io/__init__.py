@@ -12,6 +12,7 @@ CSV         Detection statistics
 """
 
 from rpimocap.io.export import (
+    TiffCapture,
     write_ply_pointcloud,
     write_ply_mesh,
     write_ply_skeleton_frame,

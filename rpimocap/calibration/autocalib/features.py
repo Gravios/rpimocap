@@ -40,17 +40,6 @@ import numpy as np
 
 @dataclass
 class FundamentalEstimate:
-    """A single robust fundamental matrix estimate from one stereo frame pair.
-
-        Attributes
-        ----------
-        frame_idx     : source frame index in the video stream
-        F             : (3, 3) fundamental matrix (rank-2, unit Frobenius norm)
-        pts0, pts1    : (N, 2) RANSAC inlier pixel coordinates
-        n_inliers     : number of RANSAC inliers
-        inlier_ratio  : inliers / total matches after ratio test
-        mean_sampson  : mean symmetric Sampson distance of inliers in pixels
-        """
     frame_idx: int
     F: np.ndarray              # (3, 3) fundamental matrix
     pts0: np.ndarray           # (N, 2) inlier points in camera 0

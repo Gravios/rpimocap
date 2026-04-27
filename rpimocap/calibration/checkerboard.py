@@ -198,7 +198,6 @@ def validate_epipolar(corners0, corners1, F, max_dist: float = 2.0):
     lines0 = (F.T @ pts1h.T).T
 
     def dist(pts, lines):
-        """Compute signed line-to-point distance for each row."""
         return np.abs((pts * lines[:, :2]).sum(1) + lines[:, 2]) / \
                np.sqrt(lines[:, 0]**2 + lines[:, 1]**2)
 
@@ -215,7 +214,6 @@ def validate_epipolar(corners0, corners1, F, max_dist: float = 2.0):
 # --------------------------------------------------------------------------- #
 
 def main():
-    """Entry point for the ``rpimocap-calibrate`` command-line tool."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cam0", required=True,

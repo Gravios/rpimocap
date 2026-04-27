@@ -48,6 +48,7 @@ all       = ["rpimocap[mediapipe,dev]"]
 rpimocap-calibrate = "rpimocap.cli.calibrate:main"
 rpimocap-autocalib = "rpimocap.cli.autocalib:main"
 rpimocap-run       = "rpimocap.cli.pipeline:main"
+rpimocap-align     = "rpimocap.cli.align:main"
 
 # ---------------------------------------------------------------------------
 [tool.setuptools.packages.find]

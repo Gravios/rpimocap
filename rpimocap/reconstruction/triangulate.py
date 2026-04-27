@@ -26,22 +26,12 @@ import numpy as np
 
 @dataclass
 class Point3D:
-    """A single triangulated 3D landmark.
-
-        Attributes
-        ----------
-        name                : landmark name matching the detector's keypoint_names
-        xyz                 : (3,) world coordinates in calibration units (mm)
-        confidence          : minimum per-camera detection confidence [0, 1]
-        reprojection_error  : mean symmetric reprojection error in pixels
-        """
     name: str
     xyz: np.ndarray        # (3,) world coordinates (same units as calibration)
     confidence: float = 1.0
     reprojection_error: float = 0.0
 
     def as_list(self) -> list:
-        """Return xyz as a plain Python list [x, y, z]."""
         return self.xyz.tolist()
 
 

@@ -75,7 +75,6 @@ import numpy as np
 
 
 def parse_bounds(s: str):
-    """Parse ``"xmin,xmax,ymin,ymax,zmin,zmax"`` into a nested tuple of float pairs."""
     vals = [float(x) for x in s.split(",")]
     if len(vals) != 6:
         raise ValueError("--bounds expects 6 comma-separated values")
@@ -177,7 +176,6 @@ def compare_with_checkerboard(result, npz_path: str):
 
 
 def main():
-    """Entry point for the ``rpimocap-autocalib`` command-line tool."""
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -233,10 +231,12 @@ def main():
     arena_bounds = parse_bounds(args.bounds) if args.bounds else None
 
     # ── Open videos ──────────────────────────────────────────────────────────
-    cap0 = cv2.VideoCapture(args.cam0)
-    cap1 = cv2.VideoCapture(args.cam1)
-    if not cap0.isOpened() or not cap1.isOpened():
-        print("ERROR: could not open one or both video files")
+    from rpimocap.cli.pipeline import open_video
+    try:
+        cap0 = open_video(args.cam0)
+        cap1 = open_video(args.cam1)
+    except IOError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
     w  = int(cap0.get(cv2.CAP_PROP_FRAME_WIDTH))

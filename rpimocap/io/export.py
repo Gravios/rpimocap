@@ -346,3 +346,131 @@ def write_stats_csv(
                 f"{s['max_repr_err']:.4f}",
             ])
     print(f"  Saved stats → {path}")
+
+
+
+# =========================================================================== #
+#  TIFF stack reader — streaming, memory-friendly for 50 GB+ files            #
+# =========================================================================== #
+
+class TiffCapture:
+    """Stream a multi-frame TIFF stack one frame at a time (cv2.VideoCapture-compatible).
+
+    Uses ``tifffile.TiffFile`` page access so only one decompressed frame is
+    ever in RAM regardless of file size.  uint16 dtype is normalised using a
+    percentile range sampled from the first and last pages only.
+
+    Parameters
+    ----------
+    path : str or Path — path to a .tif / .tiff file
+    """
+
+    def __init__(self, path: str) -> None:
+        import tifffile
+        import cv2 as _cv2
+        self._path  = str(path)
+        self._cv2   = _cv2
+        self._tf    = tifffile.TiffFile(str(path))
+        self._pages = self._tf.pages
+        self._series = self._tf.series[0] if self._tf.series else None
+
+        page0 = self._pages[0]
+        if self._series is not None:
+            shape = self._series.shape
+            axes  = self._series.axes.upper()
+        else:
+            shape = (len(self._pages), page0.shape[0], page0.shape[1])
+            axes  = "ZHW"
+
+        def _ax(cands):
+            for c in cands:
+                if c in axes: return axes.index(c)
+            return None
+
+        i_n = _ax("ZQTF"); i_h = _ax("YH"); i_w = _ax("XW")
+        if i_n is None or i_h is None or i_w is None:
+            if len(shape) == 2:
+                self._n, self._h, self._w = 1, shape[0], shape[1]
+            elif len(shape) == 3:
+                self._n, self._h, self._w = shape[0], shape[1], shape[2]
+            else:
+                self._n, self._h, self._w = shape[0], shape[1], shape[2]
+        else:
+            self._n = shape[i_n]; self._h = shape[i_h]; self._w = shape[i_w]
+
+        self._pages_per_frame = max(1, len(self._pages) // self._n)
+        self._dtype = page0.dtype
+
+        if self._dtype == np.uint8:
+            self._lo, self._hi = 0.0, 255.0
+        elif np.issubdtype(self._dtype, np.unsignedinteger):
+            s = np.concatenate([self._pages[0].asarray().ravel(),
+                                 self._pages[-1].asarray().ravel()])
+            self._lo = float(np.percentile(s, 0.1))
+            hi = float(np.percentile(s, 99.9))
+            self._hi = hi if hi > self._lo else float(np.iinfo(self._dtype).max)
+        else:
+            self._lo, self._hi = 0.0, 1.0
+
+        self._pos = 0; self._fps = 25.0; self._opened = True
+
+    def _read_raw(self, idx: int) -> np.ndarray:
+        if self._series is not None:
+            try:
+                import zarr as _zarr
+                z = _zarr.open(self._series.aszarr(), mode="r")
+                return np.asarray(z[idx])
+            except Exception:
+                pass
+        start = idx * self._pages_per_frame
+        pages = [self._pages[i].asarray()
+                 for i in range(start, min(start + self._pages_per_frame,
+                                           len(self._pages)))]
+        return pages[0] if len(pages) == 1 else np.stack(pages, axis=-1)
+
+    def _to_bgr(self, raw: np.ndarray) -> np.ndarray:
+        cv2 = self._cv2
+        if raw.dtype != np.uint8:
+            raw = np.clip((raw.astype(np.float32) - self._lo)
+                          / max(self._hi - self._lo, 1.0) * 255.0,
+                          0, 255).astype(np.uint8)
+        if raw.ndim == 2: return cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
+        c = raw.shape[2]
+        if c == 1: return cv2.cvtColor(raw[:,:,0], cv2.COLOR_GRAY2BGR)
+        if c == 3: return cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
+        if c == 4: return cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR)
+        return cv2.cvtColor(raw[:,:,:3], cv2.COLOR_RGB2BGR)
+
+    def isOpened(self) -> bool: return self._opened
+
+    def get(self, prop_id: int) -> float:
+        cv2 = self._cv2
+        if prop_id == cv2.CAP_PROP_FRAME_COUNT:  return float(self._n)
+        if prop_id == cv2.CAP_PROP_FPS:          return self._fps
+        if prop_id == cv2.CAP_PROP_FRAME_WIDTH:  return float(self._w)
+        if prop_id == cv2.CAP_PROP_FRAME_HEIGHT: return float(self._h)
+        if prop_id == cv2.CAP_PROP_POS_FRAMES:   return float(self._pos)
+        return 0.0
+
+    def set(self, prop_id: int, value: float) -> bool:
+        cv2 = self._cv2
+        if prop_id == cv2.CAP_PROP_POS_FRAMES:
+            self._pos = max(0, min(int(value), self._n - 1)); return True
+        if prop_id == cv2.CAP_PROP_FPS:
+            self._fps = float(value); return True
+        return False
+
+    def read(self):
+        if self._pos >= self._n: return False, None
+        try:
+            bgr = self._to_bgr(self._read_raw(self._pos))
+        except Exception as e:
+            print(f"  TiffCapture frame {self._pos} error: {e}")
+            return False, None
+        self._pos += 1
+        return True, bgr
+
+    def release(self) -> None:
+        try: self._tf.close()
+        except Exception: pass
+        self._opened = False

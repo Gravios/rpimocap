@@ -33,41 +33,22 @@ import numpy as np
 
 @dataclass
 class Keypoint2D:
-    """A single 2D keypoint detection in pixel space.
-
-        Attributes
-        ----------
-        name       : landmark identifier (e.g. ``"nose"``, ``"left_shoulder"``)
-        x, y       : pixel coordinates
-        confidence : detector confidence in [0, 1] (visibility for MediaPipe,
-                     likelihood for DLC/SLEAP, 1.0 for the centroid detector)
-        """
     name: str
     x: float
     y: float
     confidence: float = 1.0
 
     def as_array(self) -> np.ndarray:
-        """Return (x, y) as a (2,) float64 NumPy array."""
         return np.array([self.x, self.y], dtype=np.float64)
 
 
 @dataclass
 class Pose2DResult:
-    """Detection result for a single frame from a single camera.
-
-        Attributes
-        ----------
-        frame_idx : index of the source video frame
-        detected  : True if at least one keypoint was found
-        keypoints : list of Keypoint2D, may be empty if detected is False
-        """
     frame_idx: int
     detected: bool
     keypoints: list[Keypoint2D] = field(default_factory=list)
 
     def by_name(self) -> dict[str, Keypoint2D]:
-        """Return a ``{name: Keypoint2D}`` dict for O(1) lookup by landmark name."""
         return {kp.name: kp for kp in self.keypoints}
 
 
@@ -96,13 +77,6 @@ class PoseDetector2D(ABC):
 
     def detect_batch(self, frames: list[np.ndarray],
                      start_idx: int = 0) -> list[Pose2DResult]:
-        """Run detection on a list of BGR frames, returning one result per frame.
-
-            Parameters
-            ----------
-            frames    : list of BGR uint8 arrays
-            start_idx : frame index assigned to the first element
-            """
         return [self.detect(f, start_idx + i) for i, f in enumerate(frames)]
 
     def close(self):
@@ -194,16 +168,13 @@ class MediaPipePoseDetector(PoseDetector2D):
 
     @property
     def keypoint_names(self):
-        """Return the 33 MediaPipe BlazePose landmark names in order."""
         return self._NAMES
 
     @property
     def skeleton_edges(self):
-        """Return MediaPipe BlazePose skeleton connectivity (33 joints, 32 edges)."""
         return self._EDGES
 
     def detect(self, frame: np.ndarray, frame_idx: int) -> Pose2DResult:
-        """Run MediaPipe BlazePose on one BGR frame and return a Pose2DResult."""
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = self._pose.process(rgb)
@@ -221,7 +192,6 @@ class MediaPipePoseDetector(PoseDetector2D):
         return Pose2DResult(frame_idx, True, kps)
 
     def close(self):
-        """Release any resources held by the detector (e.g. GPU handles, file handles)."""
         self._pose.close()
 
 
@@ -264,16 +234,13 @@ class CentroidPoseDetector(PoseDetector2D):
 
     @property
     def keypoint_names(self):
-        """Return the three centroid-detector landmark names: centroid, head, tail."""
         return self._NAMES
 
     @property
     def skeleton_edges(self):
-        """Return the two body-axis edges: head→centroid and centroid→tail."""
         return self._EDGES
 
     def detect(self, frame: np.ndarray, frame_idx: int) -> Pose2DResult:
-        """Run MOG2 background subtraction and return centroid + head/tail axis points."""
         fg = self._bg.apply(frame)
         k = self._morph_ksize
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
@@ -438,14 +405,10 @@ class CSVPoseDetector(PoseDetector2D):
 
     @property
     def keypoint_names(self) -> list[str]:
-        """Return landmark names as loaded from the CSV header."""
-        """Return landmark names as loaded from the CSV header."""
         return self._names
 
     @property
     def skeleton_edges(self) -> list[tuple[str, str]]:
-        """Return skeleton edges provided at construction time (default: empty)."""
-        """Return skeleton edges provided at construction time (default: empty)."""
         return self._edges
 
     def set_edges(self, edges: list[tuple[str, str]]):
@@ -453,6 +416,5 @@ class CSVPoseDetector(PoseDetector2D):
         self._edges = edges
 
     def detect(self, frame: np.ndarray, frame_idx: int) -> Pose2DResult:
-        """Look up pre-computed keypoints for frame_idx from the loaded CSV."""
         kps = self._frames.get(frame_idx, [])
         return Pose2DResult(frame_idx, bool(kps), kps)

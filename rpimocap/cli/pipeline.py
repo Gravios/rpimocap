@@ -76,16 +76,19 @@ def parse_bounds(s: str):
     return ((xmin, xmax), (ymin, ymax), (zmin, zmax))
 
 
-def open_video(path: str) -> cv2.VideoCapture:
-    """Open a video file and return a cv2.VideoCapture, raising IOError on failure."""
-    cap = cv2.VideoCapture(path)
+def open_video(path: str):
+    """Open a video file, routing .tif/.tiff through TiffCapture for 50GB+ support."""
+    if Path(path).suffix.lower() in (".tif", ".tiff"):
+        from rpimocap.io.export import TiffCapture
+        cap = TiffCapture(path)
+    else:
+        cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {path}")
     return cap
 
 
 def remap_frame(frame: np.ndarray, mapx: np.ndarray, mapy: np.ndarray) -> np.ndarray:
-    """Apply a pre-computed undistort+rectify map pair to a single BGR frame."""
     return cv2.remap(frame, mapx, mapy, cv2.INTER_LINEAR)
 
 
@@ -148,11 +151,6 @@ def build_detector(args):
 
 
 def run(args):
-    """Execute the full reconstruction pipeline from parsed CLI arguments.
-
-    Runs the frame loop, optional voxel carving, pose triangulation,
-    temporal smoothing, and all export stages.
-    """
     from rpimocap.detection.detectors import CentroidPoseDetector
     from rpimocap.reconstruction.triangulate import (triangulate_keypoints, smooth_trajectory,
                               fill_trajectory_gaps, trajectory_stats)
@@ -375,7 +373,6 @@ def run(args):
 # --------------------------------------------------------------------------- #
 
 def main():
-    """Entry point for the ``rpimocap-run`` command-line tool."""
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -1,0 +1,67 @@
+name: rpimocap
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ── Python ──────────────────────────────────────────────────────────────
+  - python=3.11          # 3.11 recommended; 3.10 minimum, 3.12 works
+
+  # ── Core scientific stack (conda builds preferred — faster, MKL-linked) ─
+  - numpy>=1.24
+  - scipy>=1.11
+  - scikit-image>=0.21
+  - h5py>=3.9
+  - tifffile>=2023.7     # multi-frame TIFF stack reading (streaming)
+  - zarr>=2.16           # fast page access for BigTIFF / OME-TIFF
+
+  # ── OpenCV ───────────────────────────────────────────────────────────────
+  # Use conda-forge opencv — includes all codecs and avoids pip wheel issues
+  - opencv>=4.8
+
+  # ── Raspberry Pi camera / hardware sync (Pi only) ────────────────────────
+  # libcamera python bindings are not on conda — install via apt on the Pi:
+  #   sudo apt install python3-libcamera python3-kms++
+  # Leave these out of the conda env to keep it cross-platform.
+
+  # ── GUI (arena_aligner.py) ───────────────────────────────────────────────
+  - pyqt6>=6.8           # Qt6 GUI (arena_aligner.py)
+
+  # ── Dev tools ────────────────────────────────────────────────────────────
+  - pytest>=7.4
+  - pytest-cov
+  - ruff
+  - mypy
+
+  # ── Pip-only packages ────────────────────────────────────────────────────
+  - pip
+  - pip:
+    # opencv-python not needed when using conda opencv above
+    # mediapipe — no conda package, pip only
+    - mediapipe>=0.10
+
+    # rpimocap itself — editable install from the unpacked tarball
+    # Run after activating the env:
+    #   pip install -e .
+    # (listed here as a reminder, not auto-installed by conda)
+
+# ── Usage ───────────────────────────────────────────────────────────────────
+# Create:
+#   conda env create -f environment.yml
+#
+# Activate:
+#   conda activate rpimocap
+#
+# Install rpimocap (from unpacked tarball directory):
+#   pip install -e .
+#
+# Verify:
+#   python -m pytest tests/
+#   rpimocap-autocalib --help
+#
+# Update env after changes to this file:
+#   conda env update -f environment.yml --prune
+#
+# Remove:
+#   conda env remove -n rpimocap

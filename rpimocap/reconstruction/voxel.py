@@ -44,12 +44,10 @@ class VoxelGrid:
 
     @property
     def n_occupied(self) -> int:
-        """Total number of occupied (True) voxels in the grid."""
         return int(self.occupancy.sum())
 
     @property
     def bounds_mm(self) -> tuple:
-        """World-space bounding box as ((xmin, xmax), (ymin, ymax), (zmin, zmax))."""
         nx, ny, nz = self.shape
         hi = self.origin + np.array([nx, ny, nz]) * self.voxel_size
         return (
@@ -142,18 +140,6 @@ def make_bg_subtractor(
     var_threshold: float = 40.0,
     detect_shadows: bool = False,
 ) -> cv2.BackgroundSubtractorMOG2:
-    """Create a configured MOG2 background subtractor.
-
-        Parameters
-        ----------
-        history          : number of frames used to build the background model
-        var_threshold    : Mahalanobis distance threshold for foreground/background
-        detect_shadows   : if True, shadows are labelled 127 instead of 255
-
-        Returns
-        -------
-        cv2.BackgroundSubtractorMOG2
-        """
     return cv2.createBackgroundSubtractorMOG2(
         history=history,
         varThreshold=var_threshold,
@@ -253,7 +239,6 @@ def carve_frame(
         px1 = project_points_batch(P1, chunk)
 
         def in_mask(px, mask):
-            """Return True for projected pixel coordinates that fall within the foreground mask."""
             xi = np.clip(np.round(px[:, 0]).astype(np.int32), 0, mask.shape[1] - 1)
             yi = np.clip(np.round(px[:, 1]).astype(np.int32), 0, mask.shape[0] - 1)
             in_bounds = (
@@ -365,7 +350,6 @@ def _laplacian_smooth(verts: np.ndarray, faces: np.ndarray, n: int) -> np.ndarra
 # --------------------------------------------------------------------------- #
 
 def main():
-    """CLI entry point: carve a single pair of masks from the command line."""
     ap = argparse.ArgumentParser(
         description="Preview silhouette extraction from two video sources"
     )

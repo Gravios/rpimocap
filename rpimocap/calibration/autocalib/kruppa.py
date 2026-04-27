@@ -60,21 +60,6 @@ from rpimocap.calibration.autocalib.features import FundamentalEstimate
 
 @dataclass
 class KruppaResult:
-    """Focal length estimation result from the Kruppa pipeline.
-
-        Attributes
-        ----------
-        f_px                  : final focal length estimate in pixels
-        cx_px, cy_px          : principal point (assumed image centre)
-        K                     : (3, 3) intrinsic matrix
-        f_search_vals         : focal length values from the 1D cost scan
-        f_search_costs        : corresponding essential-constraint costs
-        f_kruppa              : focal length after Kruppa solve only
-        f_metric              : focal length after arena metric refinement (or None)
-        n_estimates_used      : number of F estimates included in the solve
-        mean_essential_residual : mean ||2EEtE - tr(EEt)E||_F / ||E||^3 at final f
-        scale_factor          : 3D trajectory scale correction applied (or None)
-        """
     f_px: float             # Estimated focal length in pixels
     cx_px: float
     cy_px: float
@@ -90,15 +75,6 @@ class KruppaResult:
 
 @dataclass
 class EssentialDecomposition:
-    """Decomposed essential matrix with triangulated 3D points.
-
-        Attributes
-        ----------
-        R            : (3, 3) rotation matrix from cam0 to cam1
-        t            : (3,) unit translation vector from cam0 to cam1
-        pts3d        : (N, 3) triangulated world points
-        frame_indices: source frame indices of the triangulated points
-        """
     R: np.ndarray           # (3,3) rotation
     t: np.ndarray           # (3,) unit translation vector
     pts3d: np.ndarray       # (N,3) triangulated points
@@ -110,16 +86,6 @@ class EssentialDecomposition:
 # --------------------------------------------------------------------------- #
 
 def make_K(f: float, cx: float, cy: float) -> np.ndarray:
-    """Build a (3, 3) pinhole camera intrinsic matrix.
-
-        Assumes zero skew and equal horizontal/vertical focal lengths.
-
-        Parameters
-        ----------
-        f  : focal length in pixels
-        cx : principal point x coordinate in pixels
-        cy : principal point y coordinate in pixels
-        """
     return np.array([[f, 0, cx],
                      [0, f, cy],
                      [0, 0, 1.0]], dtype=np.float64)
@@ -462,7 +428,6 @@ def bundle_refine_focal(
     cx, cy = w / 2.0, h / 2.0
 
     def reprojection_cost(log_f):
-        """Compute mean reprojection error over all frame pairs at exp(log_f)."""
         f = math.exp(log_f)
         K = make_K(f, cx, cy)
         Kt = K.T

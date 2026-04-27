@@ -53,8 +53,8 @@ def _svg_line_chart(
     ypad = (ymax - ymin) * 0.08
     ymin -= ypad; ymax += ypad
 
-    def tx(v): return pad['l'] + (v - xmin) / (xmax - xmin) * W  # Map data x-coord → SVG pixel x
-    def ty(v): return pad['t'] + H - (v - ymin) / (ymax - ymin) * H  # Map data y-coord → SVG pixel y (inverted axis)
+    def tx(v): return pad['l'] + (v - xmin) / (xmax - xmin) * W
+    def ty(v): return pad['t'] + H - (v - ymin) / (ymax - ymin) * H
 
     pts = " ".join(f"{tx(x):.1f},{ty(y):.1f}" for x, y in zip(xs_a, ys_a))
 
@@ -67,7 +67,6 @@ def _svg_line_chart(
     yticks = np.linspace(ymin, ymax, 5)
 
     def fmt(v, rng):
-        """Format a float for SVG text display."""
         if rng > 1000: return f"{v:.0f}"
         if rng > 10: return f"{v:.1f}"
         return f"{v:.3f}"
@@ -140,8 +139,8 @@ def _svg_scatter(
     ymin, ymax = ys_a.min(), ys_a.max()
     if xmax == xmin: xmax += 1
     if ymax == ymin: ymax += 1
-    def tx(v): return pad['l'] + (v - xmin)/(xmax - xmin)*W  # Map data x-coord → SVG pixel x
-    def ty(v): return pad['t'] + H - (v - ymin)/(ymax - ymin)*H  # Map data y-coord → SVG pixel y (inverted axis)
+    def tx(v): return pad['l'] + (v - xmin)/(xmax - xmin)*W
+    def ty(v): return pad['t'] + H - (v - ymin)/(ymax - ymin)*H
 
     dots = ""
     for i, (x, y) in enumerate(zip(xs_a, ys_a)):
