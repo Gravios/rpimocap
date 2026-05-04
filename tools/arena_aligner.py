@@ -356,6 +356,23 @@ class CornerTab(QWidget):
         bot.addWidget(rem_btn)
         root.addLayout(bot)
 
+        # Bounds bar
+        bounds_row = QHBoxLayout()
+        bounds_lbl = QLabel("--bounds:")
+        bounds_lbl.setStyleSheet("color:#606060;")
+        bounds_row.addWidget(bounds_lbl)
+        self._bounds_edit = QLineEdit()
+        self._bounds_edit.setReadOnly(True)
+        self._bounds_edit.setPlaceholderText("computed from corner annotations")
+        self._bounds_edit.setStyleSheet(
+            "font-family: monospace; color:#204080; background:#f0f4ff;")
+        bounds_row.addWidget(self._bounds_edit, stretch=1)
+        copy_btn = QPushButton("Copy")
+        copy_btn.setFixedWidth(54)
+        copy_btn.clicked.connect(self._copy_bounds)
+        bounds_row.addWidget(copy_btn)
+        root.addLayout(bounds_row)
+
     # -- preset -----------------------------------------------------------
 
     def _fill_preset(self, corners: list):
@@ -479,6 +496,32 @@ class CornerTab(QWidget):
         else:
             self._rmse_lbl.setText(
                 f"Add {3 - n} more point{'s' if 3-n > 1 else ''} for RMSE preview")
+        self._update_bounds()
+
+    def _update_bounds(self):
+        """Recompute --bounds string from current arena_xyz annotations."""
+        if not self.points:
+            self._bounds_edit.setText("")
+            return
+        import numpy as np
+        pts = np.stack([p.arena_xyz for p in self.points])
+        xmin, xmax = pts[:,0].min(), pts[:,0].max()
+        ymin, ymax = pts[:,1].min(), pts[:,1].max()
+        zmin, zmax = pts[:,2].min(), pts[:,2].max()
+        self._bounds_edit.setText(
+            f"{xmin:.0f},{xmax:.0f},{ymin:.0f},{ymax:.0f},{zmin:.0f},{zmax:.0f}")
+
+    def _copy_bounds(self):
+        """Copy the --bounds string to the clipboard."""
+        txt = self._bounds_edit.text()
+        if txt:
+            QApplication.clipboard().setText(txt)
+            # Brief visual confirmation
+            self._bounds_edit.setStyleSheet(
+                "font-family:monospace; color:white; background:#206020;")
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(600, lambda: self._bounds_edit.setStyleSheet(
+                "font-family:monospace; color:#204080; background:#f0f4ff;"))
 
 
 # --------------------------------------------------------------------------- #
