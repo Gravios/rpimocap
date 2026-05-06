@@ -12,7 +12,7 @@ Usage
         --calib         autocalib_refined.npz \\
         --h5            segment-output/reconstruction.h5 \\
         --bayer-pattern RGGB \\
-        --out           segment-output/preview.mp4
+        --out           segment-output/preview.avi
 
 Options
 -------
@@ -170,10 +170,12 @@ def main() -> None:
     vis.add_argument("--line-width", type=int,   default=2)
     vis.add_argument("--alpha",      type=float, default=0.85,
                      help="Overlay opacity 0-1 (default: 0.85)")
-    vis.add_argument("--codec",      default="mp4v",
+    vis.add_argument("--codec",      default="XVID",
                      help="FourCC codec (default: mp4v)")
 
     seq = ap.add_argument_group("Sequence")
+    vis.add_argument("--to-mp4", action="store_true",
+                     help="After writing AVI, convert to H264 MP4 via ffmpeg")
     seq.add_argument("--start-frame", type=int, default=0)
     seq.add_argument("--end-frame",   type=int, default=None)
 
@@ -296,6 +298,26 @@ def main() -> None:
     cap0.release()
     cap1.release()
     print(f"Done → {out_path}")
+
+    # Optionally convert AVI → H264 MP4 via ffmpeg
+    if args.to_mp4 and out_path.suffix.lower() == ".avi":
+        import subprocess, shutil
+        if shutil.which("ffmpeg"):
+            mp4_path = out_path.with_suffix(".mp4")
+            print(f"Converting → {mp4_path} ...")
+            result = subprocess.run([
+                "ffmpeg", "-y", "-i", str(out_path),
+                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                "-movflags", "+faststart",
+                str(mp4_path)
+            ], capture_output=True)
+            if result.returncode == 0:
+                print(f"MP4 written → {mp4_path}")
+            else:
+                print("ffmpeg conversion failed:")
+                print(result.stderr.decode()[-500:])
+        else:
+            print("ffmpeg not found — skipping MP4 conversion")
 
 
 if __name__ == "__main__":
