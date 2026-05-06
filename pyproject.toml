@@ -50,6 +50,7 @@ rpimocap-autocalib = "rpimocap.cli.autocalib:main"
 rpimocap-run       = "rpimocap.cli.pipeline:main"
 rpimocap-align     = "rpimocap.cli.align:main"
 rpimocap-segment   = "rpimocap.cli.segment:main"
+rpimocap-preview   = "rpimocap.cli.preview:main"
 
 # ---------------------------------------------------------------------------
 [tool.setuptools.packages.find]
