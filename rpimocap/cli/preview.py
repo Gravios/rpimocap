@@ -157,6 +157,10 @@ def main() -> None:
                     help="Output .mp4 path")
     io.add_argument("--bayer-pattern", default="RGGB",
                     choices=["RGGB","BGGR","GRBG","GBRG"])
+    io.add_argument("--align-points", default=None, metavar="CSV",
+                    help="Alignment CSV used when generating the h5. Required "
+                         "when coordinates are in arena space -- the inverse "
+                         "transform is applied before reprojection into pixels.")
 
     view = ap.add_argument_group("Layout")
     grp = view.add_mutually_exclusive_group()
@@ -198,6 +202,28 @@ def main() -> None:
     T    = cal["T"].ravel()
     P0   = cal.get("P0", K0 @ np.hstack([np.eye(3),  np.zeros((3, 1))]))
     P1   = cal.get("P1", K1 @ np.hstack([R, T.reshape(3, 1)]))
+
+    # ── Inverse arena alignment (arena mm → calibration world frame) ──────
+    # Coordinates stored in h5 are in arena space if --align-points was used
+    # during rpimocap-segment/run.  We must invert the Kabsch transform to get
+    # back to calibration world frame (camera 0 optical centre as origin)
+    # before projecting through P0/P1.
+    inv_R = np.eye(3)
+    inv_t = np.zeros(3)
+    if args.align_points:
+        from rpimocap.reconstruction.align import load_align_csv, kabsch_align
+        try:
+            align_pts    = load_align_csv(args.align_points)
+            align_result = kabsch_align(align_pts)
+            # Inverse of R @ x + t  is  R.T @ (x - t)
+            inv_R = align_result.R.T
+            inv_t = -align_result.R.T @ align_result.t
+            print(f"  Arena alignment loaded: {args.align_points}")
+            print(f"  RMSE = {align_result.rmse_mm:.2f} mm  "
+                  f"(inverse applied before reprojection)")
+        except Exception as e:
+            print(f"  WARNING: could not load alignment ({e}) — "
+                  f"reprojection may be offset")
 
     # ── Load h5 ────────────────────────────────────────────────────────────
     print(f"Loading {args.h5} ...")
@@ -298,8 +324,10 @@ def main() -> None:
             xyz = xyz_seq[frame_idx]
             if np.any(np.isnan(xyz)):
                 continue
-            u0, v0 = _project(P0, xyz)
-            u1, v1 = _project(P1, xyz)
+            # Invert arena alignment → calibration world frame
+            xyz_cal = inv_R @ xyz + inv_t
+            u0, v0 = _project(P0, xyz_cal)
+            u1, v1 = _project(P1, xyz_cal)
             # Scale for undistorted → same image coords
             kp0[name] = (u0, v0)
             kp1[name] = (u1, v1)
