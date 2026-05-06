@@ -162,6 +162,36 @@ class OpticalFlowTracker:
             fg = self._det.detect(frame, cam)
             regions = self._lbl.label(fg)
             if regions:
+                # If we have labels from a previous detection, try to
+                # match orientation by checking if the nose region is
+                # closer to the previous nose position.  This prevents
+                # the spine from flipping between frames.
+                if (self._tracked_pts is not None
+                        and len(self._tracked_pts) > 0
+                        and "nose" in self._labels):
+                    prev_nose_idx = (self._labels.index("nose")
+                                     if "nose" in self._labels else 0)
+                    prev_nose = self._tracked_pts[prev_nose_idx]
+                    # Find current nose
+                    cur_nose_idx = next((i for i, r in enumerate(regions)
+                                         if r.label == "nose"), None)
+                    # Find current tail_tip
+                    cur_tail_idx = next((i for i, r in enumerate(regions)
+                                         if r.label == "tail_tip"), None)
+                    if cur_nose_idx is not None and cur_tail_idx is not None:
+                        d_nose = np.linalg.norm(
+                            np.array([regions[cur_nose_idx].cx,
+                                      regions[cur_nose_idx].cy]) - prev_nose)
+                        d_tail = np.linalg.norm(
+                            np.array([regions[cur_tail_idx].cx,
+                                      regions[cur_tail_idx].cy]) - prev_nose)
+                        if d_tail < d_nose:
+                            # Orientation is flipped — reverse spine labels
+                            _SPINE = ["nose","head","neck","back",
+                                      "rump","tail_base","tail_tip"]
+                            label_map = dict(zip(_SPINE, reversed(_SPINE)))
+                            for r in regions:
+                                r.label = label_map.get(r.label, r.label)
                 self._tracked_pts = np.array(
                     [[r.cx, r.cy] for r in regions], dtype=np.float32)
                 self._labels = [r.label for r in regions]

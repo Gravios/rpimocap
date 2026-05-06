@@ -856,10 +856,12 @@ class EpipolarMatcher:
             X = triangulate_dlt(self.P0, self.P1,
                                   (pts0[0,0], pts0[0,1]),
                                   (pts1[0,0], pts1[0,1]))
+            # Always use cam0 label as canonical name.
+            # Epipolar-matched pairs may have different labels when the
+            # geometric labeller determines spine orientation differently
+            # between cameras (common when the animal faces across the
+            # baseline).  The cam0 label is used as ground truth.
             label = r0.label
-            # If both have the same label use it; else concatenate
-            if r0.label != r1.label:
-                label = f"{r0.label}_{r1.label}"
             result[label] = X[:3]
         return result
 

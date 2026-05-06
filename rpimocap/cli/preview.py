@@ -126,12 +126,19 @@ def _load_h5(path: str) -> tuple[dict[str, np.ndarray], float, int]:
     """
     import h5py
     with h5py.File(path, "r") as f:
+        # fps and n_frames are stored at root level by write_hdf5
         fps      = float(f.attrs.get("fps", 25.0))
         skel     = f["skeleton"]
-        n_frames = int(skel.attrs.get("n_frames", 0))
         xyz_dict = {}
         for name in skel.keys():
-            xyz_dict[name] = skel[name]["xyz"][:]   # (n_frames, 3)
+            arr = skel[name]["xyz"][:]        # (n_frames, 3)
+            xyz_dict[name] = arr
+        # derive n_frames from the data — attrs location varies
+        n_frames = (int(f.attrs["n_frames"])
+                    if "n_frames" in f.attrs
+                    else int(skel.attrs.get("n_frames", 0))
+                    if "n_frames" in skel.attrs
+                    else max((v.shape[0] for v in xyz_dict.values()), default=0))
     return xyz_dict, fps, n_frames
 
 
