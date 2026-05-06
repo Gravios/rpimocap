@@ -30,3 +30,5 @@ __all__ = [
     "CentroidPoseDetector",
     "CSVPoseDetector",
 ]
+
+from rpimocap.detection import segment, tracker

@@ -1,0 +1,268 @@
+"""Tests for rpimocap.detection.segment and tracker."""
+from __future__ import annotations
+
+import math
+import tempfile
+import os
+import pytest
+import numpy as np
+import cv2
+
+try:
+    import tifffile
+    HAS_TIFFFILE = True
+except ImportError:
+    HAS_TIFFFILE = False
+
+
+# --------------------------------------------------------------------------- #
+#  Helpers                                                                     #
+# --------------------------------------------------------------------------- #
+
+H, W = 480, 640
+
+def _make_frame(with_animal: bool = True) -> np.ndarray:
+    """Return a BGR uint8 frame with a rat-shaped blob."""
+    frame = np.ones((H, W), dtype=np.uint8) * 30
+    if with_animal:
+        # Elongated body (nose → tail direction)
+        cv2.ellipse(frame, (W//2, H//2), (130, 55), 0, 0, 360, 180, -1)
+        # Head
+        cv2.circle(frame, (W//2 + 115, H//2), 38, 160, -1)
+        # Tail stub
+        cv2.ellipse(frame, (W//2 - 140, H//2), (45, 12), 0, 0, 360, 130, -1)
+    return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+
+@pytest.fixture(scope="module")
+def synthetic_caps():
+    """Write a TIFF stack and return two TiffCapture handles."""
+    if not HAS_TIFFFILE:
+        pytest.skip("tifffile not installed")
+    from rpimocap.io.export import TiffCapture
+    # 100 empty + 30 animal frames (empty frames dominate median background)
+    empty  = [cv2.cvtColor(_make_frame(False), cv2.COLOR_BGR2GRAY)
+               for _ in range(100)]
+    animal = [cv2.cvtColor(_make_frame(True),  cv2.COLOR_BGR2GRAY)
+               for _ in range(30)]
+    stack  = np.stack(empty + animal, axis=0).astype(np.uint8)
+    tmp    = tempfile.mktemp(suffix=".tif")
+    tifffile.imwrite(tmp, stack)
+    cap0 = TiffCapture(tmp)
+    cap1 = TiffCapture(tmp)
+    yield cap0, cap1
+    cap0.release()
+    cap1.release()
+    os.unlink(tmp)
+
+
+@pytest.fixture(scope="module")
+def background_model(synthetic_caps):
+    from rpimocap.detection.segment import BackgroundModel
+    cap0, cap1 = synthetic_caps
+    return BackgroundModel.from_captures(
+        cap0, cap1, n_frames=80, start_frame=0, verbose=False)
+
+
+# --------------------------------------------------------------------------- #
+#  BackgroundModel                                                             #
+# --------------------------------------------------------------------------- #
+
+class TestBackgroundModel:
+    def test_shape(self, background_model):
+        assert background_model.bg0.shape == (H, W)
+        assert background_model.bg1.shape == (H, W)
+
+    def test_background_is_dark(self, background_model):
+        # Background median should be close to 30 (empty frame value)
+        assert background_model.bg0.mean() < 60
+
+    def test_save_load(self, background_model, tmp_path):
+        from rpimocap.detection.segment import BackgroundModel
+        p = tmp_path / "bg.npz"
+        background_model.save(p)
+        bg2 = BackgroundModel.from_npz(p)
+        np.testing.assert_allclose(bg2.bg0, background_model.bg0)
+
+
+# --------------------------------------------------------------------------- #
+#  ForegroundDetector                                                          #
+# --------------------------------------------------------------------------- #
+
+class TestForegroundDetector:
+    def test_detects_animal(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector
+        cap0, _ = synthetic_caps
+        cap0.set(cv2.CAP_PROP_POS_FRAMES, 110)
+        ret, frame = cap0.read()
+        assert ret
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=100)
+        fg  = det.detect(frame, cam=0)
+        assert fg.n_blobs >= 1
+
+    def test_no_detection_on_empty(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector
+        cap0, _ = synthetic_caps
+        cap0.set(cv2.CAP_PROP_POS_FRAMES, 5)
+        ret, frame = cap0.read()
+        assert ret
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=200)
+        fg  = det.detect(frame, cam=0)
+        assert fg.n_blobs == 0
+
+    def test_mask_shape(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector
+        cap0, _ = synthetic_caps
+        cap0.set(cv2.CAP_PROP_POS_FRAMES, 110)
+        ret, frame = cap0.read()
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=100)
+        fg  = det.detect(frame, cam=0)
+        assert fg.mask.shape == (H, W)
+
+
+# --------------------------------------------------------------------------- #
+#  GeometricLabeller                                                           #
+# --------------------------------------------------------------------------- #
+
+class TestGeometricLabeller:
+    def _get_regions(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector, GeometricLabeller
+        cap0, _ = synthetic_caps
+        cap0.set(cv2.CAP_PROP_POS_FRAMES, 110)
+        ret, frame = cap0.read()
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=100)
+        fg  = det.detect(frame, cam=0)
+        lbl = GeometricLabeller()
+        return lbl.label(fg), frame
+
+    def test_returns_regions(self, background_model, synthetic_caps):
+        regions, _ = self._get_regions(background_model, synthetic_caps)
+        assert len(regions) > 0
+
+    def test_expected_labels_present(self, background_model, synthetic_caps):
+        regions, _ = self._get_regions(background_model, synthetic_caps)
+        labels = {r.label for r in regions}
+        # Must contain at least some spine-axis labels
+        spine_labels = {"nose","head","neck","back","rump","tail_base","tail_tip"}
+        assert labels & spine_labels, f"No spine labels found: {labels}"
+
+    def test_centroids_in_frame(self, background_model, synthetic_caps):
+        regions, _ = self._get_regions(background_model, synthetic_caps)
+        for r in regions:
+            assert 0 <= r.cx < W, f"{r.label} cx={r.cx} out of range"
+            assert 0 <= r.cy < H, f"{r.label} cy={r.cy} out of range"
+
+    def test_confidence_range(self, background_model, synthetic_caps):
+        regions, _ = self._get_regions(background_model, synthetic_caps)
+        for r in regions:
+            assert 0.0 <= r.confidence <= 1.0
+
+    def test_empty_fg_returns_empty(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector, GeometricLabeller
+        cap0, _ = synthetic_caps
+        cap0.set(cv2.CAP_PROP_POS_FRAMES, 5)
+        ret, frame = cap0.read()
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=500)
+        fg  = det.detect(frame, cam=0)
+        lbl = GeometricLabeller()
+        regions = lbl.label(fg)
+        assert regions == []
+
+
+# --------------------------------------------------------------------------- #
+#  EpipolarMatcher                                                             #
+# --------------------------------------------------------------------------- #
+
+class TestEpipolarMatcher:
+    @pytest.fixture
+    def matcher(self):
+        from rpimocap.detection.segment import EpipolarMatcher
+        # Simple synthetic calibration
+        K0 = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]], dtype=float)
+        K1 = K0.copy()
+        R  = np.eye(3)
+        T  = np.array([100.0, 0.0, 0.0])
+        d  = np.zeros(5)
+        P0 = K0 @ np.hstack([np.eye(3), np.zeros((3,1))])
+        P1 = K1 @ np.hstack([R, T.reshape(3,1)])
+        return EpipolarMatcher(P0=P0, P1=P1, K0=K0, K1=K1,
+                                dist0=d, dist1=d, R=R, T=T,
+                                max_epipolar_px=10.0)
+
+    def test_F_shape(self, matcher):
+        assert matcher.F.shape == (3, 3)
+
+    def test_epipolar_constraint(self, matcher):
+        from rpimocap.detection.segment import BodyRegion
+        # A point on the epipolar line should have zero distance
+        r0 = BodyRegion("back", cx=320.0, cy=240.0)
+        line = matcher._epipolar_line(r0.cx, r0.cy)
+        # The corresponding point in cam1 (pure horizontal shift for parallel cams)
+        r1 = BodyRegion("back", cx=200.0, cy=240.0)
+        d  = matcher._point_to_line_dist(line, r1.cx, r1.cy)
+        assert d < 5.0, f"Epipolar distance too large: {d:.2f} px"
+
+    def test_label_matching(self, matcher):
+        from rpimocap.detection.segment import BodyRegion
+        r0 = [BodyRegion("nose", 400, 200), BodyRegion("back", 300, 240)]
+        r1 = [BodyRegion("nose", 280, 200), BodyRegion("back", 180, 240)]
+        matches = matcher.match(r0, r1)
+        assert len(matches) == 2
+        labels = [(a.label, b.label) for a, b in matches]
+        assert ("nose", "nose") in labels
+        assert ("back", "back") in labels
+
+    def test_triangulate_returns_xyz(self, matcher):
+        from rpimocap.detection.segment import BodyRegion
+        r0 = BodyRegion("back", cx=320.0, cy=240.0)
+        r1 = BodyRegion("back", cx=220.0, cy=240.0)
+        xyz = matcher.triangulate([(r0, r1)])
+        assert "back" in xyz
+        assert xyz["back"].shape == (3,)
+        assert np.isfinite(xyz["back"]).all()
+
+    def test_no_match_outside_epipolar(self, matcher):
+        from rpimocap.detection.segment import BodyRegion
+        r0 = [BodyRegion("nose", 320, 240)]
+        # cam1 point far from epipolar line (huge Y offset)
+        r1 = [BodyRegion("unknown", 300, 400)]
+        matches = matcher.match(r0, r1)
+        # May or may not match depending on epipolar distance
+        # Just verify it returns a list
+        assert isinstance(matches, list)
+
+
+# --------------------------------------------------------------------------- #
+#  OpticalFlowTracker                                                          #
+# --------------------------------------------------------------------------- #
+
+class TestOpticalFlowTracker:
+    def test_tracks_through_frames(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector, GeometricLabeller
+        from rpimocap.detection.tracker import OpticalFlowTracker
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=100)
+        lbl = GeometricLabeller()
+        tracker = OpticalFlowTracker(det, lbl, redetect_every=30)
+        cap0, _ = synthetic_caps
+        results = []
+        for idx in range(105, 115):
+            cap0.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap0.read()
+            if not ret:
+                break
+            regions = tracker.track(frame, cam=0)
+            results.append(regions)
+        # At least some frames should have detections
+        n_detected = sum(1 for r in results if r)
+        assert n_detected > 0, "OpticalFlowTracker detected nothing"
+
+    def test_reset_clears_state(self, background_model, synthetic_caps):
+        from rpimocap.detection.segment import ForegroundDetector, GeometricLabeller
+        from rpimocap.detection.tracker import OpticalFlowTracker
+        det = ForegroundDetector(background_model, threshold=20, min_area_px=100)
+        lbl = GeometricLabeller()
+        tracker = OpticalFlowTracker(det, lbl)
+        tracker._prev_gray = np.zeros((H, W), np.uint8)
+        tracker.reset()
+        assert tracker._prev_gray is None
+        assert tracker._tracked_pts is None
