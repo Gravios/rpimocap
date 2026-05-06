@@ -803,8 +803,13 @@ class ArenaAligner(QMainWindow):
         self.setWindowTitle("rpimocap — Arena Aligner")
 
         # ── Video ─────────────────────────────────────────────────────────
-        self.cap0 = cv2.VideoCapture(cam0_path)
-        self.cap1 = cv2.VideoCapture(cam1_path)
+        def _open(path):
+            if Path(path).suffix.lower() in (".tif", ".tiff"):
+                from rpimocap.io.export import TiffCapture
+                return TiffCapture(path)
+            return cv2.VideoCapture(path)
+        self.cap0 = _open(cam0_path)
+        self.cap1 = _open(cam1_path)
         if not self.cap0.isOpened():
             raise IOError(f"Cannot open cam0: {cam0_path}")
         if not self.cap1.isOpened():
