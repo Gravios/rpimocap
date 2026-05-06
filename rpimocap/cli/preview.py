@@ -12,7 +12,7 @@ Usage
         --calib         autocalib_refined.npz \\
         --h5            segment-output/reconstruction.h5 \\
         --bayer-pattern RGGB \\
-        --out           segment-output/preview.avi
+        --out           segment-output/preview.mp4   (H264 via ffmpeg if available)
 
 Options
 -------
@@ -174,8 +174,8 @@ def main() -> None:
                      help="FourCC codec (default: mp4v)")
 
     seq = ap.add_argument_group("Sequence")
-    vis.add_argument("--to-mp4", action="store_true",
-                     help="After writing AVI, convert to H264 MP4 via ffmpeg")
+    vis.add_argument("--no-ffmpeg", action="store_true",
+                     help="Force MJPG AVI output even if ffmpeg is available")
     seq.add_argument("--start-frame", type=int, default=0)
     seq.add_argument("--end-frame",   type=int, default=None)
 
@@ -219,15 +219,45 @@ def main() -> None:
     line_w = max(1, int(args.line_width * args.scale))
 
     # ── Output writer ──────────────────────────────────────────────────────
+    import shutil, subprocess as _sp
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc   = cv2.VideoWriter_fourcc(*args.codec)
     canvas_w = out_w * 2 if args.layout == "sbs" else out_w
-    writer   = cv2.VideoWriter(str(out_path), fourcc, fps,
-                                (canvas_w, out_h))
-    if not writer.isOpened():
-        print(f"ERROR: could not open VideoWriter for {out_path}")
-        sys.exit(1)
+
+    use_ffmpeg = shutil.which("ffmpeg") is not None and not args.no_ffmpeg
+    if use_ffmpeg:
+        # Pipe raw BGR frames to ffmpeg → H264 MP4 (no container issues)
+        out_path = out_path.with_suffix(".mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo",
+            "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-s", f"{canvas_w}x{out_h}",
+            "-r", str(fps),
+            "-i", "pipe:0",
+            "-vcodec", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        writer_proc = _sp.Popen(cmd, stdin=_sp.PIPE,
+                                 stderr=_sp.DEVNULL)
+        writer = None
+        print(f"  Using ffmpeg pipe → {out_path}")
+    else:
+        # Fallback: MJPG AVI via OpenCV
+        out_path = out_path.with_suffix(".avi")
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps,
+                                  (canvas_w, out_h))
+        writer_proc = None
+        if not writer.isOpened():
+            print(f"ERROR: could not open VideoWriter for {out_path}")
+            sys.exit(1)
+        print(f"  Using MJPG AVI → {out_path}")
 
     # ── Distortion maps (precomputed for speed) ────────────────────────────
     map0x, map0y = cv2.initUndistortRectifyMap(
@@ -289,35 +319,22 @@ def main() -> None:
         else:
             canvas = f1s
 
-        writer.write(canvas)
+        if use_ffmpeg:
+            writer_proc.stdin.write(canvas.tobytes())
+        else:
+            writer.write(canvas)
 
         if (fi + 1) % 500 == 0:
             print(f"  {fi + 1}/{n_out}  ({100*(fi+1)/n_out:.0f}%)")
 
-    writer.release()
+    if use_ffmpeg:
+        writer_proc.stdin.close()
+        writer_proc.wait()
+    else:
+        writer.release()
     cap0.release()
     cap1.release()
     print(f"Done → {out_path}")
-
-    # Optionally convert AVI → H264 MP4 via ffmpeg
-    if args.to_mp4 and out_path.suffix.lower() == ".avi":
-        import subprocess, shutil
-        if shutil.which("ffmpeg"):
-            mp4_path = out_path.with_suffix(".mp4")
-            print(f"Converting → {mp4_path} ...")
-            result = subprocess.run([
-                "ffmpeg", "-y", "-i", str(out_path),
-                "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                "-movflags", "+faststart",
-                str(mp4_path)
-            ], capture_output=True)
-            if result.returncode == 0:
-                print(f"MP4 written → {mp4_path}")
-            else:
-                print("ffmpeg conversion failed:")
-                print(result.stderr.decode()[-500:])
-        else:
-            print("ffmpeg not found — skipping MP4 conversion")
 
 
 if __name__ == "__main__":
