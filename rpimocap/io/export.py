@@ -365,7 +365,7 @@ class TiffCapture:
     path : str or Path — path to a .tif / .tiff file
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, bayer_pattern: str = "RGGB") -> None:
         import tifffile
         import cv2 as _cv2
         self._path  = str(path)
@@ -413,6 +413,9 @@ class TiffCapture:
             self._lo, self._hi = 0.0, 1.0
 
         self._pos = 0; self._fps = 25.0; self._opened = True
+        # Bayer demosaic pattern — set to match your sensor/libcamera config
+        # IMX477 common values: RGGB, BGGR, GRBG, GBRG
+        self._bayer_pattern = bayer_pattern.upper()
 
     def _read_raw(self, idx: int) -> np.ndarray:
         if self._series is not None:
@@ -428,18 +431,52 @@ class TiffCapture:
                                            len(self._pages)))]
         return pages[0] if len(pages) == 1 else np.stack(pages, axis=-1)
 
+    # Bayer pattern → OpenCV conversion code
+    _BAYER_CODES = {
+        "RGGB": "COLOR_BayerBG2BGR",   # OpenCV uses opposite-corner naming
+        "BGGR": "COLOR_BayerRG2BGR",
+        "GRBG": "COLOR_BayerGB2BGR",
+        "GBRG": "COLOR_BayerGR2BGR",
+    }
+
     def _to_bgr(self, raw: np.ndarray) -> np.ndarray:
+        """Convert a raw frame array to BGR uint8, demosaicing if single-channel."""
         cv2 = self._cv2
-        if raw.dtype != np.uint8:
+
+        # Normalise dtype → uint8 (preserve 16-bit range for demosaic quality)
+        if raw.dtype == np.uint16:
+            # Demosaic in 16-bit then scale, for better colour accuracy
+            if raw.ndim == 2:
+                code = getattr(cv2, self._BAYER_CODES.get(
+                    self._bayer_pattern, "COLOR_BayerBG2BGR"))
+                bgr16 = cv2.cvtColor(raw, code)
+                lo, hi = self._lo, self._hi
+                bgr = np.clip((bgr16.astype(np.float32) - lo)
+                              / max(hi - lo, 1.0) * 255.0,
+                              0, 255).astype(np.uint8)
+                return bgr
+            # Multi-channel uint16 — scale then convert
             raw = np.clip((raw.astype(np.float32) - self._lo)
                           / max(self._hi - self._lo, 1.0) * 255.0,
                           0, 255).astype(np.uint8)
-        if raw.ndim == 2: return cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
+        elif raw.dtype != np.uint8:
+            raw = np.clip((raw.astype(np.float32) - self._lo)
+                          / max(self._hi - self._lo, 1.0) * 255.0,
+                          0, 255).astype(np.uint8)
+
+        # Single-channel → Bayer demosaic
+        if raw.ndim == 2:
+            code = getattr(cv2, self._BAYER_CODES.get(
+                self._bayer_pattern, "COLOR_BayerBG2BGR"))
+            return cv2.cvtColor(raw, code)
         c = raw.shape[2]
-        if c == 1: return cv2.cvtColor(raw[:,:,0], cv2.COLOR_GRAY2BGR)
+        if c == 1:
+            code = getattr(cv2, self._BAYER_CODES.get(
+                self._bayer_pattern, "COLOR_BayerBG2BGR"))
+            return cv2.cvtColor(raw[:, :, 0], code)
         if c == 3: return cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
         if c == 4: return cv2.cvtColor(raw, cv2.COLOR_RGBA2BGR)
-        return cv2.cvtColor(raw[:,:,:3], cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(raw[:, :, :3], cv2.COLOR_RGB2BGR)
 
     def isOpened(self) -> bool: return self._opened
 

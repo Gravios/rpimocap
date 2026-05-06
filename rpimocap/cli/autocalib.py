@@ -219,6 +219,9 @@ def main():
                      help="Focal length search lower bound as ×diagonal (default: 0.4)")
     opt.add_argument("--f-max-factor", type=float, default=3.5,
                      help="Focal length search upper bound as ×diagonal (default: 3.5)")
+    opt.add_argument("--bayer-pattern", default="RGGB",
+                    choices=["RGGB","BGGR","GRBG","GBRG"],
+                    help="Bayer CFA pattern for raw TIFF stacks (default: RGGB)")
     opt.add_argument("--quiet", action="store_true")
 
     args = ap.parse_args()
@@ -233,8 +236,8 @@ def main():
     # ── Open videos ──────────────────────────────────────────────────────────
     from rpimocap.cli.pipeline import open_video
     try:
-        cap0 = open_video(args.cam0)
-        cap1 = open_video(args.cam1)
+        cap0 = open_video(args.cam0, bayer_pattern=args.bayer_pattern)
+        cap1 = open_video(args.cam1, bayer_pattern=args.bayer_pattern)
     except IOError as e:
         print(f"ERROR: {e}")
         sys.exit(1)

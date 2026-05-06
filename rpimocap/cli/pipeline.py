@@ -76,11 +76,20 @@ def parse_bounds(s: str):
     return ((xmin, xmax), (ymin, ymax), (zmin, zmax))
 
 
-def open_video(path: str):
-    """Open a video file, routing .tif/.tiff through TiffCapture for 50GB+ support."""
+def open_video(path: str, bayer_pattern: str = "RGGB"):
+    """Open a video file, routing .tif/.tiff through TiffCapture for 50GB+ support.
+
+    Parameters
+    ----------
+    path          : video file or multi-frame TIFF stack
+    bayer_pattern : Bayer CFA pattern for single-channel (raw) TIFFs.
+                    IMX477 default is RGGB.  Ignored for non-TIFF files
+                    and for TIFFs that already contain RGB data.
+                    Valid values: RGGB, BGGR, GRBG, GBRG
+    """
     if Path(path).suffix.lower() in (".tif", ".tiff"):
         from rpimocap.io.export import TiffCapture
-        cap = TiffCapture(path)
+        cap = TiffCapture(path, bayer_pattern=bayer_pattern)
     else:
         cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -210,8 +219,8 @@ def run(args):
 
     # ── Video capture ──────────────────────────────────────────────────────
     print("\n── Opening video streams ────────────────────────────")
-    cap0 = open_video(args.cam0)
-    cap1 = open_video(args.cam1)
+    cap0 = open_video(args.cam0, bayer_pattern=args.bayer_pattern)
+    cap1 = open_video(args.cam1, bayer_pattern=args.bayer_pattern)
     fps = cap0.get(cv2.CAP_PROP_FPS) or args.fps
     total_frames = int(cap0.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"  FPS: {fps:.2f}  |  Total frames: {total_frames}")
@@ -400,6 +409,10 @@ def main():
 
     # Inputs
     io = ap.add_argument_group("Input / Output")
+    io.add_argument("--bayer-pattern", default="RGGB",
+                    choices=["RGGB","BGGR","GRBG","GBRG"],
+                    help="Bayer CFA pattern for raw single-channel TIFF stacks "
+                         "(IMX477 default: RGGB). Ignored for RGB TIFFs and video files.")
     io.add_argument("--cam0", required=True, help="Camera 0 video file")
     io.add_argument("--cam1", required=True, help="Camera 1 video file")
     io.add_argument("--calib", required=True, help="calibration.npz from calibrate.py")

@@ -294,12 +294,16 @@ class CameraCanvas(QLabel):
         self._zoom_at(pos.x(), pos.y(), f)
 
     def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
+        # Ctrl+double-click resets view; plain double-click is ignored
+        if (e.button() == Qt.MouseButton.LeftButton and
+                e.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self.reset_view()
 
     def mousePressEvent(self, e):
         pos = e.position(); dx, dy = pos.x(), pos.y()
-        if e.button() == Qt.MouseButton.MiddleButton:
+        ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if e.button() == Qt.MouseButton.LeftButton and ctrl:
+            # Ctrl+left-drag → pan
             self._state = _MS.PANNING; self._pan_last = pos
             self.setCursor(Qt.CursorShape.ClosedHandCursor); return
         if e.button() != Qt.MouseButton.LeftButton: return
@@ -340,8 +344,6 @@ class CameraCanvas(QLabel):
             self.setCursor(cur); self._repaint()
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.MouseButton.MiddleButton:
-            self._state = _MS.IDLE; self.setCursor(Qt.CursorShape.CrossCursor); return
         if e.button() != Qt.MouseButton.LeftButton: return
         pos = e.position(); vx, vy = self._d2v(pos.x(), pos.y())
         if self._state == _MS.DRAG_CROSS:
@@ -801,16 +803,19 @@ class EdgeTab(QWidget):
 # ---------------------------------------------------------------------------
 class ArenaAligner(QMainWindow):
     def __init__(self, cam0_path, cam1_path, calib_path, out_path,
-                 load_existing=None, load_edges=None):
+                 load_existing=None, load_edges=None,
+                 bayer_pattern: str = "RGGB"):
         super().__init__()
         self.setWindowTitle("rpimocap -- Arena Aligner")
+        self._bayer_pattern = bayer_pattern.upper()
 
         def _open(path):
             if Path(path).suffix.lower() in (".tif",".tiff"):
                 from rpimocap.io.export import TiffCapture
-                return TiffCapture(path)
+                return TiffCapture(path, bayer_pattern=self._bayer_pattern)
             return cv2.VideoCapture(path)
 
+        self._cam0_path = cam0_path; self._cam1_path = cam1_path
         self.cap0 = _open(cam0_path); self.cap1 = _open(cam1_path)
         if not self.cap0.isOpened(): raise IOError(f"Cannot open cam0: {cam0_path}")
         if not self.cap1.isOpened(): raise IOError(f"Cannot open cam1: {cam1_path}")
@@ -868,7 +873,7 @@ class ArenaAligner(QMainWindow):
         root.setContentsMargins(6,6,6,6)
         cam_row = QHBoxLayout()
         hints = [
-            "Camera 0  | wheel: zoom  | MMB: pan  | dbl-click: reset  | "
+            "Camera 0  | wheel: zoom  | Ctrl+drag: pan  | Ctrl+dbl-click: reset  | "
             "zoom OUT to extrapolate past image edge",
             "Camera 1"]
         for canvas,hint in [(self.canvas0,hints[0]),(self.canvas1,hints[1])]:
@@ -878,7 +883,16 @@ class ArenaAligner(QMainWindow):
             col.addWidget(lbl); col.addWidget(canvas)
             cam_row.addLayout(col)
         root.addLayout(cam_row)
-        scrub = QHBoxLayout(); scrub.addWidget(QLabel("Frame:"))
+        scrub = QHBoxLayout()
+        scrub.addWidget(QLabel("Bayer:"))
+        self._bayer_combo = __import__("PyQt6.QtWidgets", fromlist=["QComboBox"]).QComboBox()
+        for pat in ["RGGB","BGGR","GRBG","GBRG"]:
+            self._bayer_combo.addItem(pat)
+        self._bayer_combo.setCurrentText(self._bayer_pattern)
+        self._bayer_combo.setFixedWidth(70)
+        self._bayer_combo.currentTextChanged.connect(self._on_bayer_changed)
+        scrub.addWidget(self._bayer_combo)
+        scrub.addWidget(QLabel("Frame:"))
         self._frame_lbl = QLabel("0"); self._frame_lbl.setFixedWidth(55)
         scrub.addWidget(self._frame_lbl)
         self._slider = QSlider(Qt.Orientation.Horizontal)
@@ -1027,6 +1041,20 @@ class ArenaAligner(QMainWindow):
             f"  k3={result['dist1'][4]:+.4f}\n\n"
             f"Saved to:\n{out}"))
 
+    def _on_bayer_changed(self, pattern: str):
+        """Reopen captures with new Bayer pattern and redraw current frame."""
+        self._bayer_pattern = pattern
+        from rpimocap.io.export import TiffCapture
+        for attr, path in [("cap0", self._cam0_path), ("cap1", self._cam1_path)]:
+            cap = getattr(self, attr)
+            if isinstance(cap, TiffCapture):
+                pos = int(cap.get(__import__("cv2").CAP_PROP_POS_FRAMES))
+                cap.release()
+                new_cap = TiffCapture(path, bayer_pattern=pattern)
+                new_cap.set(__import__("cv2").CAP_PROP_POS_FRAMES, pos)
+                setattr(self, attr, new_cap)
+        self._seek(self._fidx)
+
     def closeEvent(self,e):
         self.cap0.release(); self.cap1.release(); super().closeEvent(e)
 
@@ -1041,11 +1069,15 @@ def main():
     ap.add_argument("--out",default="align_points.csv")
     ap.add_argument("--load",default=None,metavar="CSV")
     ap.add_argument("--load-edges",default=None,metavar="CSV")
+    ap.add_argument("--bayer-pattern", default="RGGB",
+                    choices=["RGGB","BGGR","GRBG","GBRG"],
+                    help="Bayer CFA pattern for raw TIFF stacks (default: RGGB)")
     args=ap.parse_args()
     app=QApplication(sys.argv); app.setStyle("Fusion")
     win=ArenaAligner(cam0_path=args.cam0,cam1_path=args.cam1,
                      calib_path=args.calib,out_path=args.out,
-                     load_existing=args.load,load_edges=args.load_edges)
+                     load_existing=args.load,load_edges=args.load_edges,
+                     bayer_pattern=args.bayer_pattern)
     sys.exit(app.exec())
 
 if __name__=="__main__":
