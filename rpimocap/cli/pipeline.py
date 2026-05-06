@@ -324,7 +324,27 @@ def run(args):
         print(f"── Filling gaps (max {args.fill_gaps} frames) ────────────")
         skeleton_frames = fill_trajectory_gaps(skeleton_frames, max_gap=args.fill_gaps)
 
-    # ── Export ─────────────────────────────────────────────────────────────
+    # ── Arena alignment ───────────────────────────────────────────────────────
+    align_result = None
+    if args.align_points:
+        from rpimocap.reconstruction.align import (
+            load_align_csv, kabsch_align,
+            align_skeleton_frames, align_voxel_frames,
+        )
+        print(f"\n── Arena alignment ({args.align_points}) ──────────────────────")
+        try:
+            align_pts = load_align_csv(args.align_points)
+            align_result = kabsch_align(align_pts)
+            print(f"  {align_result.n_points} correspondences  "
+                  f"RMSE = {align_result.rmse_mm:.2f} mm")
+            skeleton_frames = align_skeleton_frames(skeleton_frames, align_result)
+            if args.voxel:
+                voxel_pcs = align_voxel_frames(voxel_pcs, align_result)
+        except Exception as exc:
+            print(f"  WARNING: arena alignment failed — {exc}")
+            print("  Exporting in reconstructed (uncorrected) world frame.")
+
+        # ── Export ─────────────────────────────────────────────────────────────
     print("\n── Exporting ────────────────────────────────────────")
 
     # Statistics
@@ -432,6 +452,13 @@ def main():
                     help="Max gap length to interpolate (0 = off)")
     sm.add_argument("--max-repr-error", type=float, default=20.0,
                     help="Discard triangulations above this reprojection error (px)")
+
+    # Arena alignment
+    al = ap.add_argument_group("Arena alignment")
+    al.add_argument("--align-points", default=None, metavar="CSV",
+                    help="CSV of rec<->arena correspondences from rpimocap-align. "
+                         "Applies a Kabsch rigid transform to all exported "
+                         "coordinates so they are expressed in arena space.")
 
     # Export
     ex = ap.add_argument_group("Export")
