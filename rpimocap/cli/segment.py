@@ -303,9 +303,22 @@ def main() -> None:
         })
     print(f"  reconstruction.h5")
 
+    # Derive keypoint names and skeleton edges from the tracking results
+    kp_names = sorted({pt.name for frame in skeleton_frames for pt in frame})
+
+    # Skeleton connectivity along the spine + ears
+    _SPINE = ["nose","head","neck","back","rump","tail_base","tail_tip"]
+    _EAR   = [("head","left_ear"), ("head","right_ear")]
+    edges  = ([(a, b) for a, b in zip(_SPINE, _SPINE[1:])
+                if a in kp_names and b in kp_names]
+              + [(a, b) for a, b in _EAR
+                 if a in kp_names and b in kp_names])
+
     write_viewer_json(
         out_dir / "viewer_data.json",
         skeleton_frames,
+        keypoint_names=kp_names,
+        skeleton_edges=edges,
         bounds=bounds,
         fps=fps,
         voxel_frames=None)
