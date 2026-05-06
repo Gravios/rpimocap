@@ -200,6 +200,68 @@ class BackgroundModel:
         return cls(bg0, bg1, method)
 
     @classmethod
+    def from_multiple_captures(
+        cls,
+        caps0:         list,
+        caps1:         list,
+        n_frames_each: int  = 100,
+        method:        str  = "median",
+        start_frame:   int  = 0,
+        verbose:       bool = True,
+    ) -> "BackgroundModel":
+        """Build a background model from multiple stereo video pairs.
+
+        Each pair contributes ``n_frames_each`` evenly-spaced frames.
+        The final background is the median (or mean) across ALL sampled
+        frames from ALL sessions combined — the animal appears in
+        different positions across sessions, so the median converges to
+        the true background far more reliably than single-session sampling.
+
+        Parameters
+        ----------
+        caps0, caps1   : lists of VideoCapture-compatible objects, one
+                         per session (must be same length)
+        n_frames_each  : frames to sample from each session pair
+        method         : ``"median"`` or ``"mean"``
+        start_frame    : first frame index to consider in each session
+        verbose        : print progress
+        """
+        assert len(caps0) == len(caps1), "caps0 and caps1 must have same length"
+
+        stack0, stack1 = [], []
+        for si, (cap0, cap1) in enumerate(zip(caps0, caps1)):
+            total = int(min(cap0.get(cv2.CAP_PROP_FRAME_COUNT),
+                            cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
+            n = min(n_frames_each, total - start_frame)
+            step = max(1, (total - start_frame) // n)
+            indices = list(range(start_frame,
+                                  min(start_frame + step * n, total),
+                                  step))[:n]
+            if verbose:
+                print(f"  Session {si+1}/{len(caps0)}: "
+                      f"sampling {len(indices)} frames ...")
+            for idx in indices:
+                for cap, stack in [(cap0, stack0), (cap1, stack1)]:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                    ret, frame = cap.read()
+                    if ret:
+                        stack.append(cls._to_gray(frame))
+
+        if not stack0:
+            raise RuntimeError("No frames could be read for background model")
+
+        fn = np.median if method == "median" else np.mean
+        bg0 = fn(np.stack(stack0, axis=0), axis=0).astype(np.float32)
+        bg1 = fn(np.stack(stack1, axis=0), axis=0).astype(np.float32)
+
+        total_frames = len(stack0)
+        n_sessions   = len(caps0)
+        if verbose:
+            print(f"  Background model built  "
+                  f"({method}, {total_frames} frames, {n_sessions} sessions)")
+        return cls(bg0, bg1, method)
+
+    @classmethod
     def from_npz(cls, path: str | Path) -> "BackgroundModel":
         """Load a saved background model."""
         d = np.load(path)

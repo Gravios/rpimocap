@@ -102,6 +102,14 @@ def main() -> None:
     bg.add_argument("--background-method", default="median",
                     choices=["median","mean"],
                     help="Background estimation method (default: median)")
+    bg.add_argument("--background-extra-cam0", nargs="+", default=[],
+                    metavar="TIFF",
+                    help="Additional cam0 TIFF files for background estimation. "
+                         "Combining multiple sessions makes the median far more "
+                         "robust when the animal is present throughout each recording.")
+    bg.add_argument("--background-extra-cam1", nargs="+", default=[],
+                    metavar="TIFF",
+                    help="Additional cam1 TIFF files (must match --background-extra-cam0)")
 
     # ── Detection ────────────────────────────────────────────────────────────
     det = ap.add_argument_group("Detection")
@@ -199,16 +207,42 @@ def main() -> None:
     if args.background_model and Path(args.background_model).exists():
         print(f"  Loading: {args.background_model}")
         bg = BackgroundModel.from_npz(args.background_model)
-    elif bg_npz.exists():
+    elif bg_npz.exists() and not (args.background_extra_cam0):
         print(f"  Reusing: {bg_npz}")
         bg = BackgroundModel.from_npz(bg_npz)
     else:
-        bg = BackgroundModel.from_captures(
-            cap0, cap1,
-            n_frames=args.background_frames,
-            method=args.background_method,
-            start_frame=args.background_start,
-            verbose=True)
+        extra0 = args.background_extra_cam0
+        extra1 = args.background_extra_cam1
+        if extra0 and not extra1:
+            # If only cam0 extras given, use the same files for cam1
+            extra1 = extra0
+        if len(extra1) != len(extra0):
+            print("ERROR: --background-extra-cam0 and --background-extra-cam1 "
+                  "must have the same number of files")
+            sys.exit(1)
+        if extra0:
+            from rpimocap.io.export import TiffCapture as _TC
+            all_caps0 = [cap0] + [_TC(f, bayer_pattern=args.bayer_pattern)
+                                   for f in extra0]
+            all_caps1 = [cap1] + [_TC(f, bayer_pattern=args.bayer_pattern)
+                                   for f in extra1]
+            print(f"  Building from {len(all_caps0)} sessions "
+                  f"x {args.background_frames} frames each ...")
+            bg = BackgroundModel.from_multiple_captures(
+                all_caps0, all_caps1,
+                n_frames_each=args.background_frames,
+                method=args.background_method,
+                start_frame=args.background_start,
+                verbose=True)
+            for c in all_caps0[1:] + all_caps1[1:]:
+                c.release()
+        else:
+            bg = BackgroundModel.from_captures(
+                cap0, cap1,
+                n_frames=args.background_frames,
+                method=args.background_method,
+                start_frame=args.background_start,
+                verbose=True)
         bg.save(bg_npz)
         print(f"  Saved: {bg_npz}")
 
