@@ -289,29 +289,107 @@ class BackgroundModel:
 class ForegroundDetector:
     """Subtract background and return binary foreground masks.
 
+    Preprocessing pipeline (applied before background subtraction):
+
+    1. Channel extraction  — green channel only (``use_green_channel=True``)
+       Under NIR illumination the Bayer green pixels carry ~2x the signal
+       of red/blue.  Extracting the green channel gives a cleaner
+       single-channel image with better SNR.
+
+    2. CLAHE               — adaptive histogram equalisation (``clahe=True``)
+       Enhances local contrast so fur texture is distinguishable from
+       bedding even when the animal is dark against a dark background.
+       Applied per-tile so bright arena walls don't suppress the animal.
+
+    3. Bilateral filter    — edge-preserving smooth (``bilateral=True``)
+       Reduces sensor noise while keeping the fur/bedding boundary sharp.
+       Better than Gaussian for this task.
+
     Parameters
     ----------
-    background    : BackgroundModel
-    threshold     : absolute pixel difference threshold (0–255)
-    min_area_px   : discard blobs smaller than this (noise filter)
-    morph_k       : morphological kernel size for opening/closing
-    blur_k        : Gaussian blur kernel before thresholding (0 = skip)
+    background        : BackgroundModel
+    threshold         : absolute pixel difference threshold (0–255)
+    min_area_px       : discard blobs smaller than this (noise filter)
+    morph_k           : morphological kernel size for opening/closing
+    blur_k            : Gaussian blur kernel (0 = skip; overridden by bilateral)
+    clahe             : apply CLAHE before background subtraction
+    clahe_clip        : CLAHE clip limit (higher = more contrast, more noise)
+    clahe_tile        : CLAHE tile grid size (smaller = more local)
+    use_green_channel : extract green Bayer channel instead of luminance
+    bilateral         : apply bilateral filter instead of Gaussian blur
+    bilateral_d       : bilateral filter diameter (neighbourhood size)
+    bilateral_sigma   : bilateral sigma for colour and spatial
     """
 
     def __init__(
         self,
-        background:  BackgroundModel,
-        threshold:   float = 25.0,
-        min_area_px: int   = 500,
-        morph_k:     int   = 7,
-        blur_k:      int   = 5,
+        background:        BackgroundModel,
+        threshold:         float = 25.0,
+        min_area_px:       int   = 500,
+        morph_k:           int   = 7,
+        blur_k:            int   = 5,
+        clahe:             bool  = False,
+        clahe_clip:        float = 2.0,
+        clahe_tile:        int   = 8,
+        use_green_channel: bool  = False,
+        bilateral:         bool  = False,
+        bilateral_d:       int   = 9,
+        bilateral_sigma:   float = 50.0,
     ):
-        self.bg          = background
-        self.threshold   = threshold
-        self.min_area_px = min_area_px
-        self._kernel     = cv2.getStructuringElement(
+        self.bg                = background
+        self.threshold         = threshold
+        self.min_area_px       = min_area_px
+        self.use_green_channel = use_green_channel
+        self.bilateral         = bilateral
+        self.bilateral_d       = bilateral_d
+        self.bilateral_sigma   = bilateral_sigma
+        self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
-        self._blur_k     = blur_k | 1   # must be odd
+        self._blur_k = blur_k | 1
+
+        # CLAHE instance (shared across frames for efficiency)
+        self._clahe = (cv2.createCLAHE(
+                           clipLimit=clahe_clip,
+                           tileGridSize=(clahe_tile, clahe_tile))
+                       if clahe else None)
+
+    # ------------------------------------------------------------------ #
+
+    def _to_enhanced_gray(self, frame: np.ndarray) -> np.ndarray:
+        """Convert frame to enhanced grayscale applying the configured pipeline.
+
+        Steps:
+          1. Channel extraction (green or luminance)
+          2. CLAHE (if enabled)
+          3. Bilateral or Gaussian smooth (if enabled)
+
+        Returns uint8 (H, W) array.
+        """
+        # Step 1 — channel extraction
+        if self.use_green_channel and frame.ndim == 3 and frame.shape[2] == 3:
+            # BGR: index 1 is green.  Under NIR the green channel has
+            # the most signal — use it directly.
+            gray = frame[:, :, 1].copy()
+        else:
+            gray = BackgroundModel._to_gray(frame)
+
+        # Step 2 — CLAHE
+        if self._clahe is not None:
+            gray = self._clahe.apply(gray)
+
+        # Step 3 — smoothing
+        if self.bilateral:
+            gray = cv2.bilateralFilter(
+                gray.astype(np.uint8),
+                self.bilateral_d,
+                self.bilateral_sigma,
+                self.bilateral_sigma)
+        elif self._blur_k > 1:
+            gray = cv2.GaussianBlur(
+                gray.astype(np.uint8),
+                (self._blur_k, self._blur_k), 0)
+
+        return gray.astype(np.uint8)
 
     # ------------------------------------------------------------------ #
 
@@ -327,7 +405,7 @@ class ForegroundDetector:
         -------
         ForegroundResult
         """
-        gray = BackgroundModel._to_gray(frame).astype(np.float32)
+        gray = self._to_enhanced_gray(frame).astype(np.float32)
         bg   = self.bg.bg0 if cam == 0 else self.bg.bg1
 
         # Resize bg to match frame if needed (can differ for TiffCapture)
@@ -335,12 +413,13 @@ class ForegroundDetector:
             bg = cv2.resize(bg, (gray.shape[1], gray.shape[0]),
                             interpolation=cv2.INTER_LINEAR)
 
-        diff = np.abs(gray - bg)
-        if self._blur_k > 1:
-            diff = cv2.GaussianBlur(diff.astype(np.uint8),
-                                    (self._blur_k, self._blur_k), 0
-                                    ).astype(np.float32)
+        # If CLAHE or green channel is active the background model was
+        # built from raw frames, so we enhance the background to match
+        if self._clahe is not None or self.use_green_channel:
+            bg_frame = np.stack([bg.astype(np.uint8)] * 3, axis=-1)
+            bg = self._to_enhanced_gray(bg_frame).astype(np.float32)
 
+        diff   = np.abs(gray - bg)
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)
@@ -349,7 +428,7 @@ class ForegroundDetector:
             binary, connectivity=8)
 
         blobs = []
-        for i in range(1, n):   # skip background label 0
+        for i in range(1, n):
             if stats[i, cv2.CC_STAT_AREA] >= self.min_area_px:
                 blobs.append((stats[i], centroids[i]))
 

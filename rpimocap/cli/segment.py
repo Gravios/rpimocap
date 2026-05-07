@@ -124,6 +124,31 @@ def main() -> None:
                      help="Maximum epipolar line distance for stereo "
                           "matching (default: 8 px)")
 
+    # ── Contrast enhancement ─────────────────────────────────────────────────
+    con = ap.add_argument_group("Contrast enhancement (NIR footage)")
+    con.add_argument("--clahe", action="store_true",
+                     help="Apply CLAHE (adaptive histogram equalisation) before "
+                          "background subtraction.  Strongly recommended for NIR "
+                          "footage where animal fur blends with bedding.")
+    con.add_argument("--clahe-clip", type=float, default=2.0,
+                     help="CLAHE clip limit — higher = more contrast enhancement "
+                          "but also more noise amplification (default: 2.0)")
+    con.add_argument("--clahe-tile", type=int, default=8,
+                     help="CLAHE tile grid size — smaller tiles = more local "
+                          "enhancement (default: 8)")
+    con.add_argument("--green-channel", action="store_true",
+                     help="Use the green Bayer channel instead of luminance. "
+                          "Green carries ~2x NIR signal on IMX477.  "
+                          "Recommended with --bayer-pattern RGGB.")
+    con.add_argument("--bilateral", action="store_true",
+                     help="Apply bilateral filter instead of Gaussian blur. "
+                          "Preserves fur/bedding edges while reducing sensor noise.")
+    con.add_argument("--bilateral-d", type=int, default=9,
+                     help="Bilateral filter neighbourhood diameter (default: 9)")
+    con.add_argument("--bilateral-sigma", type=float, default=50.0,
+                     help="Bilateral filter sigma for colour and spatial "
+                          "domains (default: 50.0)")
+
     # ── SAM ──────────────────────────────────────────────────────────────────
     sam = ap.add_argument_group("SAM (optional)")
     sam.add_argument("--sam2-checkpoint", default=None, metavar="PATH",
@@ -278,7 +303,15 @@ def main() -> None:
         device=args.device,
         threshold=args.threshold,
         min_area_px=args.min_area,
+        morph_k=args.morph_k,
         redetect_every=args.redetect_every,
+        clahe=args.clahe,
+        clahe_clip=args.clahe_clip,
+        clahe_tile=args.clahe_tile,
+        use_green_channel=args.green_channel,
+        bilateral=args.bilateral,
+        bilateral_d=args.bilateral_d,
+        bilateral_sigma=args.bilateral_sigma,
         verbose=True)
 
     results = tracker.track_sequence(

@@ -390,21 +390,34 @@ class SegmentTracker:
 
     def __init__(
         self,
-        background:       BackgroundModel,
-        matcher:          EpipolarMatcher,
-        sam2_checkpoint:  Optional[str]  = None,
-        sam2_config:      str            = "sam2_hiera_large.yaml",
-        device:           str            = "cuda",
-        threshold:        float          = 25.0,
-        min_area_px:      int            = 500,
-        redetect_every:   int            = 60,
-        verbose:          bool           = True,
+        background:        BackgroundModel,
+        matcher:           EpipolarMatcher,
+        sam2_checkpoint:   Optional[str]  = None,
+        sam2_config:       str            = "sam2.1_hiera_l.yaml",
+        device:            str            = "cuda",
+        threshold:         float          = 25.0,
+        min_area_px:       int            = 500,
+        morph_k:           int            = 7,
+        redetect_every:    int            = 60,
+        clahe:             bool           = False,
+        clahe_clip:        float          = 2.0,
+        clahe_tile:        int            = 8,
+        use_green_channel: bool           = False,
+        bilateral:         bool           = False,
+        bilateral_d:       int            = 9,
+        bilateral_sigma:   float          = 50.0,
+        verbose:           bool           = True,
     ):
         self._matcher = matcher
         self._verbose = verbose
 
         self._det  = ForegroundDetector(
-            background, threshold=threshold, min_area_px=min_area_px)
+            background, threshold=threshold, min_area_px=min_area_px,
+            morph_k=morph_k,
+            clahe=clahe, clahe_clip=clahe_clip, clahe_tile=clahe_tile,
+            use_green_channel=use_green_channel,
+            bilateral=bilateral, bilateral_d=bilateral_d,
+            bilateral_sigma=bilateral_sigma)
         self._lbl  = GeometricLabeller()
 
         # Try SAM2 (used as mask refiner on top of optical flow)
