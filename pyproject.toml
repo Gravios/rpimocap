@@ -40,10 +40,9 @@ dependencies = [
 
 [project.optional-dependencies]
 mediapipe = ["mediapipe>=0.10"]
+sam2      = ["sam2>=1.0"]
 dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
-all       = ["rpimocap[mediapipe,dev]"]
-
-# ---------------------------------------------------------------------------
+all       = ["mediapipe>=0.10", "sam2>=1.0", "pytest>=7.4", "ruff", "mypy"]
 [project.scripts]
 rpimocap-calibrate = "rpimocap.cli.calibrate:main"
 rpimocap-autocalib = "rpimocap.cli.autocalib:main"
@@ -51,6 +50,7 @@ rpimocap-run       = "rpimocap.cli.pipeline:main"
 rpimocap-align     = "rpimocap.cli.align:main"
 rpimocap-segment   = "rpimocap.cli.segment:main"
 rpimocap-preview   = "rpimocap.cli.preview:main"
+rpimocap-download-models = "rpimocap.cli.download_models:main"
 
 # ---------------------------------------------------------------------------
 [tool.setuptools.packages.find]

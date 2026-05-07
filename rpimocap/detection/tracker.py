@@ -236,97 +236,132 @@ class OpticalFlowTracker:
 # --------------------------------------------------------------------------- #
 
 class SAM2Tracker:
-    """Propagate body part masks using the SAM2 video predictor.
+    """Per-frame body part segmentation using SAM2 image predictor.
 
-    Requires the ``sam2`` package (pip install sam2).
+    Uses the SAM2 image predictor (not the video predictor) so it works
+    directly on streaming TIFF frames without dumping to disk.  Optical
+    flow provides approximate centroids as prompts; SAM2 produces
+    high-quality binary masks for each body part.
+
+    Requires the ``sam2`` package::
+
+        pip install sam2
+        rpimocap-download-models          # downloads weights
 
     Parameters
     ----------
-    checkpoint  : path to SAM2 model weights
-    config      : SAM2 config name (e.g. ``"sam2_hiera_large.yaml"``)
-    device      : ``"cuda"`` or ``"cpu"``
+    checkpoint  : path to SAM2 .pt weights file
+    config      : SAM2 yaml config name (e.g. ``"sam2.1_hiera_l.yaml"``)
+    device      : ``"cuda"`` or ``"cpu"`` (cuda strongly recommended)
+    multimask   : return multiple mask candidates per prompt and pick best
     """
 
     def __init__(
         self,
         checkpoint: str,
-        config:     str  = "sam2_hiera_large.yaml",
+        config:     str  = "sam2.1_hiera_l.yaml",
         device:     str  = "cuda",
+        multimask:  bool = True,
     ):
-        self._ckpt    = checkpoint
-        self._config  = config
-        self._device  = device
+        self._ckpt      = checkpoint
+        self._config    = config
+        self._device    = device
+        self._multimask = multimask
         self._predictor = None
         self._available = self._try_load()
-        self._inference_state = None
-        self._labeller = GeometricLabeller()
+        self._labeller  = GeometricLabeller()
 
     def _try_load(self) -> bool:
+        """Try to import and load the SAM2 image predictor."""
         try:
-            from sam2.build_sam import build_sam2_video_predictor
-            self._predictor = build_sam2_video_predictor(
-                self._config, self._ckpt, device=self._device)
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+            model = build_sam2(self._config, self._ckpt,
+                               device=self._device)
+            self._predictor = SAM2ImagePredictor(model)
+            print(f"  SAM2 loaded: {Path(self._ckpt).name}  "
+                  f"({self._config})  device={self._device}")
             return True
-        except (ImportError, Exception):
+        except ImportError:
+            print("  SAM2 not installed — run: pip install sam2")
+            return False
+        except FileNotFoundError:
+            print(f"  SAM2 checkpoint not found: {self._ckpt}")
+            print("  Run: rpimocap-download-models")
+            return False
+        except Exception as e:
+            print(f"  SAM2 load failed: {e}")
             return False
 
     @property
     def available(self) -> bool:
         return self._available
 
-    def init_from_regions(
+    def segment(
         self,
-        frame0_bgr: np.ndarray,
-        regions:    list[BodyRegion],
-    ) -> bool:
-        """Initialise tracking from the first frame's region list."""
-        if not self._available or not regions:
-            return False
-        try:
-            import tempfile, os
-            # SAM2 video predictor needs a directory of frames
-            # For streaming use we pass the first frame as an image
-            rgb = cv2.cvtColor(frame0_bgr, cv2.COLOR_BGR2RGB)
-            self._inference_state = self._predictor.init_state(
-                video_path=None)
-            for i, r in enumerate(regions):
-                pts = np.array([[r.cx, r.cy]])
-                self._predictor.add_new_points_or_box(
-                    self._inference_state,
-                    frame_idx=0,
-                    obj_id=i,
-                    points=pts,
-                    labels=np.array([1]),
-                )
-            self._obj_labels = [r.label for r in regions]
-            return True
-        except Exception as e:
-            print(f"  SAM2 init failed: {e}")
-            return False
+        frame_bgr:   np.ndarray,
+        hint_regions: list[BodyRegion],
+    ) -> list[BodyRegion]:
+        """Segment body parts in one frame using hint centroids as prompts.
 
-    def propagate(self, frame_bgr: np.ndarray) -> list[BodyRegion]:
-        """Propagate masks to the next frame."""
-        if not self._available or self._inference_state is None:
-            return []
+        Parameters
+        ----------
+        frame_bgr    : BGR uint8 video frame
+        hint_regions : approximate body part locations (from optical flow
+                       or geometric labeller) used as SAM2 point prompts
+
+        Returns
+        -------
+        list[BodyRegion] with SAM2 mask quality, same labels as hints
+        """
+        if not self._available or not hint_regions:
+            return hint_regions
+
         try:
+            import torch
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            regions = []
-            for obj_id, mask, score in self._predictor.propagate_in_video(
-                    self._inference_state):
-                label = (self._obj_labels[obj_id]
-                         if obj_id < len(self._obj_labels) else "body")
-                ys, xs = np.where(mask > 0)
-                if len(xs) < 4:
-                    continue
-                cx, cy = xs.mean(), ys.mean()
-                regions.append(BodyRegion(
-                    label=label, cx=float(cx), cy=float(cy),
-                    mask=mask.astype(bool),
-                    area_px=float(len(xs)),
-                    confidence=float(score)))
-            return regions
-        except Exception:
-            return []
+
+            with torch.inference_mode():
+                self._predictor.set_image(rgb)
+
+                results = []
+                for hint in hint_regions:
+                    pts    = np.array([[hint.cx, hint.cy]], dtype=np.float32)
+                    labels = np.array([1], dtype=np.int32)
+
+                    masks, scores, _ = self._predictor.predict(
+                        point_coords=pts,
+                        point_labels=labels,
+                        multimask_output=self._multimask,
+                    )
+
+                    # Pick the mask with the highest score
+                    best  = int(np.argmax(scores))
+                    mask  = masks[best].astype(bool)
+                    score = float(scores[best])
+
+                    ys, xs = np.where(mask)
+                    if len(xs) < 4:
+                        # SAM2 found nothing — keep the hint centroid
+                        results.append(hint)
+                        continue
+
+                    results.append(BodyRegion(
+                        label=hint.label,
+                        cx=float(xs.mean()),
+                        cy=float(ys.mean()),
+                        mask=mask,
+                        bbox=(int(xs.min()), int(ys.min()),
+                              int(xs.max()-xs.min()), int(ys.max()-ys.min())),
+                        area_px=float(len(xs)),
+                        confidence=score,
+                        orientation=hint.orientation))
+
+            return results
+
+        except Exception as e:
+            # Any SAM2 error → return hints unchanged
+            return hint_regions
 
 
 # --------------------------------------------------------------------------- #
@@ -372,17 +407,13 @@ class SegmentTracker:
             background, threshold=threshold, min_area_px=min_area_px)
         self._lbl  = GeometricLabeller()
 
-        # Try SAM2
+        # Try SAM2 (used as mask refiner on top of optical flow)
         self._sam2: Optional[SAM2Tracker] = None
         if sam2_checkpoint:
             s = SAM2Tracker(sam2_checkpoint, sam2_config, device)
             if s.available:
                 self._sam2 = s
-                if verbose:
-                    print("  SAM2 tracker: available")
-            else:
-                if verbose:
-                    print("  SAM2 not available, using optical flow")
+            # SAM2 logs its own status in _try_load
 
         # Optical flow fallback
         self._of0 = OpticalFlowTracker(
@@ -466,19 +497,26 @@ class SegmentTracker:
         f0:  np.ndarray,
         f1:  np.ndarray,
     ) -> TrackResult:
-        """Process one stereo frame pair → TrackResult."""
+        """Process one stereo frame pair → TrackResult.
+
+        Pipeline with SAM2:
+          1. Optical flow tracker gives approximate centroids (fast)
+          2. SAM2 image predictor refines each centroid into a quality mask
+          3. Mask centroid is used for triangulation
+
+        Without SAM2:
+          Optical flow only.
+        """
+        # Step 1: optical flow → approximate centroids in both cameras
+        regions0 = self._of0.track(f0, 0)
+        regions1 = self._of1.track(f1, 1)
+
+        # Step 2: SAM2 mask refinement (if available)
         if self._sam2 is not None and self._sam2.available:
-            if idx == 0 or not hasattr(self, '_sam2_inited'):
-                # Initialise SAM2 from geometric detection on first frame
-                fg0 = self._det.detect(f0, 0)
-                init_regions = self._lbl.label(fg0)
-                self._sam2.init_from_regions(f0, init_regions)
-                self._sam2_inited = True
-            regions0 = self._sam2.propagate(f0)
-            regions1 = self._sam2.propagate(f1)
-        else:
-            regions0 = self._of0.track(f0, 0)
-            regions1 = self._of1.track(f1, 1)
+            if regions0:
+                regions0 = self._sam2.segment(f0, regions0)
+            if regions1:
+                regions1 = self._sam2.segment(f1, regions1)
 
         matches  = self._matcher.match(regions0, regions1)
         xyz_dict = self._matcher.triangulate(matches)
