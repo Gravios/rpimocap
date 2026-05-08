@@ -294,13 +294,24 @@ def main() -> None:
     # ── Arena alignment ───────────────────────────────────────────────────────
     align_result = None
     if args.align_points:
-        from rpimocap.reconstruction.align import load_align_csv, kabsch_align
+        from rpimocap.reconstruction.align import (
+                load_align_csv, kabsch_align,
+                kabsch_align_from_pixels)
         print(f"\n── Arena alignment ({args.align_points}) ─────────────────────")
         try:
-            align_pts    = load_align_csv(args.align_points)
-            align_result = kabsch_align(align_pts)
-            print(f"  {align_result.n_points} correspondences  "
-                  f"RMSE = {align_result.rmse_mm:.2f} mm")
+            align_pts = load_align_csv(args.align_points)
+            _has_px   = any(pt.px0 is not None for pt in align_pts)
+            if _has_px:
+                align_result = kabsch_align_from_pixels(
+                    align_pts, matcher.P0, matcher.P1)
+                print(f"  {align_result.n_points} pts  "
+                      f"RMSE={align_result.rmse_mm:.2f}mm  "
+                      "(re-triangulated from pixel clicks)")
+            else:
+                align_result = kabsch_align(align_pts)
+                print(f"  {align_result.n_points} pts  "
+                      f"RMSE={align_result.rmse_mm:.2f}mm  "
+                      "(WARNING: no px stored -- re-annotate)")
         except Exception as e:
             print(f"  WARNING: alignment failed — {e}")
 

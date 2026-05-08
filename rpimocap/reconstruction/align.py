@@ -63,6 +63,49 @@ class DistortionResult:
 #  Kabsch alignment                                                            #
 # --------------------------------------------------------------------------- #
 
+def kabsch_align_from_pixels(
+    points: list["AlignPoint"],
+    P0:     "np.ndarray",
+    P1:     "np.ndarray",
+) -> "AlignResult":
+    """Re-triangulate corners from stored pixel clicks then run Kabsch.
+
+    Use this instead of ``kabsch_align`` when the calibration has changed
+    since the CSV was annotated (e.g. autocalib → refined calibration).
+    The stored ``rec_xyz`` is ignored; pixel clicks ``px0`` / ``px1`` are
+    re-triangulated using the *current* projection matrices P0 and P1.
+
+    Parameters
+    ----------
+    points : list[AlignPoint] — must have px0 and px1 populated
+    P0, P1 : current (3, 4) projection matrices
+
+    Returns
+    -------
+    AlignResult
+    """
+    from rpimocap.reconstruction.triangulate import triangulate_dlt
+    usable = [p for p in points
+              if p.px0 is not None and p.px1 is not None]
+    if len(usable) < 3:
+        raise ValueError(
+            f"kabsch_align_from_pixels needs >= 3 points with pixel "
+            f"coords (px0/px1).  Have {len(usable)} — re-annotate in "
+            f"rpimocap-align to store pixel clicks.")
+    # Re-triangulate each corner
+    retriangulated = []
+    for pt in usable:
+        xyz = triangulate_dlt(P0, P1,
+                              (float(pt.px0[0]), float(pt.px0[1])),
+                              (float(pt.px1[0]), float(pt.px1[1])))
+        retriangulated.append(AlignPoint(
+            rec_xyz=xyz[:3],
+            arena_xyz=pt.arena_xyz,
+            label=pt.label,
+            px0=pt.px0, px1=pt.px1))
+    return kabsch_align(retriangulated)
+
+
 def kabsch_align(points: list[AlignPoint]) -> AlignResult:
     if len(points) < 3:
         raise ValueError(f"Need >= 3 correspondences, got {len(points)}")

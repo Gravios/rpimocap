@@ -343,9 +343,18 @@ def run(args):
         print(f"\n── Arena alignment ({args.align_points}) ──────────────────────")
         try:
             align_pts = load_align_csv(args.align_points)
-            align_result = kabsch_align(align_pts)
-            print(f"  {align_result.n_points} correspondences  "
-                  f"RMSE = {align_result.rmse_mm:.2f} mm")
+            _has_px   = any(pt.px0 is not None for pt in align_pts)
+            if _has_px:
+                align_result = kabsch_align_from_pixels(
+                    align_pts, cal.get('P0', K0 @ np.hstack([np.eye(3), np.zeros((3,1))])), cal.get('P1', K1 @ np.hstack([R, T.reshape(3,1)])))
+                print(f"  {align_result.n_points} pts  "
+                      f"RMSE={align_result.rmse_mm:.2f}mm  "
+                      "(re-triangulated from pixel clicks)")
+            else:
+                align_result = kabsch_align(align_pts)
+                print(f"  {align_result.n_points} pts  "
+                      f"RMSE={align_result.rmse_mm:.2f}mm  "
+                      "(WARNING: no px stored -- re-annotate)")
             skeleton_frames = align_skeleton_frames(skeleton_frames, align_result)
             if args.voxel:
                 voxel_pcs = align_voxel_frames(voxel_pcs, align_result)
