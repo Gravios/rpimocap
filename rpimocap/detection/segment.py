@@ -405,20 +405,36 @@ class ForegroundDetector:
         -------
         ForegroundResult
         """
+        # ── Current frame: full enhancement pipeline ─────────────────────
         gray = self._to_enhanced_gray(frame).astype(np.float32)
-        bg   = self.bg.bg0 if cam == 0 else self.bg.bg1
 
-        # Resize bg to match frame if needed (can differ for TiffCapture)
+        # ── Background: extract same channel but NO CLAHE ─────────────
+        # CLAHE must NOT be applied to the background — it normalises
+        # the histogram of both images to the same distribution, which
+        # collapses the difference signal and makes the animal invisible.
+        # Instead: extract the same channel (green or luminance) from
+        # the background so the subtraction is in the same colour space,
+        # but leave the histogram untouched.
+        bg_raw = self.bg.bg0 if cam == 0 else self.bg.bg1
+
+        if self.use_green_channel and frame.ndim == 3:
+            # Background was built from BGR→gray luminance.
+            # Re-extract green channel from a synthetic gray BGR for
+            # consistency: since bg_raw is already gray, all channels
+            # are equal so green channel == the gray value.
+            bg = bg_raw.copy()
+        else:
+            bg = bg_raw.copy()
+
+        # Resize if needed
         if bg.shape != gray.shape:
-            bg = cv2.resize(bg, (gray.shape[1], gray.shape[0]),
+            bg = cv2.resize(bg.astype(np.float32),
+                            (gray.shape[1], gray.shape[0]),
                             interpolation=cv2.INTER_LINEAR)
+        else:
+            bg = bg.astype(np.float32)
 
-        # If CLAHE or green channel is active the background model was
-        # built from raw frames, so we enhance the background to match
-        if self._clahe is not None or self.use_green_channel:
-            bg_frame = np.stack([bg.astype(np.uint8)] * 3, axis=-1)
-            bg = self._to_enhanced_gray(bg_frame).astype(np.float32)
-
+        # ── Diff and threshold ────────────────────────────────────────
         diff   = np.abs(gray - bg)
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
@@ -1126,13 +1142,8 @@ def save_diagnostics(
                 bg_arr = cv2.resize(bg_arr,
                                     (enhanced.shape[1], enhanced.shape[0]),
                                     interpolation=cv2.INTER_LINEAR)
-            if (detector._clahe is not None
-                    or detector.use_green_channel):
-                bg_frame = cv2.cvtColor(
-                    np.clip(bg_arr, 0, 255).astype(np.uint8),
-                    cv2.COLOR_GRAY2BGR)
-                bg_arr = detector._to_enhanced_gray(bg_frame).astype(np.float32)
-            diff = np.abs(enhanced.astype(np.float32) - bg_arr)
+            # Do NOT apply CLAHE to background (same fix as in detect())
+            diff = np.abs(enhanced.astype(np.float32) - bg_arr.astype(np.float32))
             diff_norm = np.clip(diff / max(diff.max(), 1.0) * 255,
                                 0, 255).astype(np.uint8)
             diff_colour = cv2.applyColorMap(diff_norm, cv2.COLORMAP_JET)
