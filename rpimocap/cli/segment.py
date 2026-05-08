@@ -188,6 +188,17 @@ def main() -> None:
     sm.add_argument("--fill-gaps", type=int, default=5,
                     help="Interpolate gaps up to N frames (default: 5, 0=off)")
 
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+    dg = ap.add_argument_group("Diagnostics")
+    dg.add_argument("--diagnostics", default="/tmp/rpimocap_diag",
+                    metavar="DIR",
+                    help="Write diagnostic images (background, enhanced frames, "
+                         "diff maps, mask overlays) to this directory. "
+                         "Default: /tmp/rpimocap_diag  (set to '' to disable)")
+    dg.add_argument("--diag-frames", type=int, default=6,
+                    help="Number of sample frames to save for diagnostics "
+                         "(default: 6, evenly spaced through the video)")
+
     args = ap.parse_args()
 
     # ── Imports ───────────────────────────────────────────────────────────────
@@ -313,6 +324,26 @@ def main() -> None:
         bilateral_d=args.bilateral_d,
         bilateral_sigma=args.bilateral_sigma,
         verbose=True)
+
+    # ── Diagnostics ──────────────────────────────────────────────────────────
+    if args.diagnostics:
+        from rpimocap.detection.segment import (
+            save_diagnostics, GeometricLabeller)
+        diag_header = f"\n── Diagnostics -> {args.diagnostics} ──────────────────────"
+        print(diag_header)
+        # Reset captures to start for diagnostic sampling
+        for cap in (cap0, cap1):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        save_diagnostics(
+            cap0, cap1,
+            detector=tracker._det,
+            labeller=GeometricLabeller(),
+            out_dir=args.diagnostics,
+            n_frames=args.diag_frames,
+        )
+        # Reset again for tracking
+        for cap in (cap0, cap1):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     results = tracker.track_sequence(
         cap0, cap1,

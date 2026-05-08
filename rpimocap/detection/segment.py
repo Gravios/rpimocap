@@ -1022,3 +1022,164 @@ class EpipolarMatcher:
         return reprojection_error(xyz, self.P0, self.P1,
                                    np.array([r0.cx, r0.cy]),
                                    np.array([r1.cx, r1.cy]))
+
+
+# =========================================================================== #
+#  Diagnostic image writer                                                     #
+# =========================================================================== #
+
+def save_diagnostics(
+    cap0,
+    cap1,
+    detector:   "ForegroundDetector",
+    labeller:   "GeometricLabeller",
+    out_dir:    str | Path = Path("/tmp/rpimocap_diag"),
+    n_frames:   int = 6,
+    frame_indices: list[int] | None = None,
+    cam_labels: tuple[str, str] = ("cam0", "cam1"),
+) -> None:
+    """Write a set of diagnostic images to out_dir for visual inspection.
+
+    Images written
+    --------------
+    background/
+        bg_cam0.png, bg_cam1.png         — raw background model
+        bg_cam0_enhanced.png             — background after contrast pipeline
+    frames/
+        frame_{idx}_{cam}_raw.png        — demosaiced frame (BGR)
+        frame_{idx}_{cam}_enhanced.png   — after green/CLAHE/bilateral
+        frame_{idx}_{cam}_diff.png       — |enhanced - bg| difference map
+        frame_{idx}_{cam}_mask.png       — binary foreground mask
+        frame_{idx}_{cam}_overlay.png    — mask + body part labels on raw frame
+        frame_{idx}_{cam}_composite.png  — 4-up grid: raw/enhanced/diff/overlay
+
+    Parameters
+    ----------
+    cap0, cap1      : VideoCapture-compatible objects (rewound after use)
+    detector        : ForegroundDetector (with contrast pipeline configured)
+    labeller        : GeometricLabeller
+    out_dir         : destination directory (created if needed)
+    n_frames        : number of evenly-spaced frames to sample
+    frame_indices   : explicit list of frame indices (overrides n_frames)
+    cam_labels      : display labels for each camera
+    """
+    out_dir = Path(out_dir)
+    (out_dir / "background").mkdir(parents=True, exist_ok=True)
+    (out_dir / "frames").mkdir(parents=True, exist_ok=True)
+
+    # ── Background images ─────────────────────────────────────────────────
+    for bg_arr, cam_lbl in [(detector.bg.bg0, cam_labels[0]),
+                             (detector.bg.bg1, cam_labels[1])]:
+        # Raw background
+        bg_u8 = np.clip(bg_arr, 0, 255).astype(np.uint8)
+        cv2.imwrite(str(out_dir / "background" / f"bg_{cam_lbl}.png"),
+                    cv2.cvtColor(bg_u8, cv2.COLOR_GRAY2BGR))
+        # Enhanced background (same pipeline as frames)
+        bg_bgr = cv2.cvtColor(bg_u8, cv2.COLOR_GRAY2BGR)
+        bg_enh = detector._to_enhanced_gray(bg_bgr)
+        cv2.imwrite(str(out_dir / "background" / f"bg_{cam_lbl}_enhanced.png"),
+                    cv2.cvtColor(bg_enh, cv2.COLOR_GRAY2BGR))
+    print(f"  [diag] background images → {out_dir / 'background'}")
+
+    # ── Frame samples ─────────────────────────────────────────────────────
+    total = int(min(cap0.get(cv2.CAP_PROP_FRAME_COUNT),
+                    cap1.get(cv2.CAP_PROP_FRAME_COUNT)))
+    if frame_indices is None:
+        step   = max(1, total // (n_frames + 1))
+        frame_indices = [step * (i + 1) for i in range(n_frames)]
+    frame_indices = [min(i, total - 1) for i in frame_indices]
+
+    _PART_COLOURS = {
+        "nose":      (0,   80, 255),
+        "head":      (0,  160, 255),
+        "left_ear":  (255, 200, 0),
+        "right_ear": (255, 200, 0),
+        "neck":      (0,  255, 160),
+        "back":      (0,  255,  80),
+        "rump":      (255, 120,  0),
+        "tail_base": (200,  0, 200),
+        "tail_tip":  (255,  0, 200),
+    }
+
+    for idx in frame_indices:
+        for cam_id, (cap, cam_lbl) in enumerate(
+                zip([cap0, cap1], cam_labels)):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+
+            prefix = out_dir / "frames" / f"frame_{idx:06d}_{cam_lbl}"
+
+            # 1. Raw frame
+            cv2.imwrite(str(prefix) + "_raw.png", frame)
+
+            # 2. Enhanced gray (as BGR for saving)
+            enhanced = detector._to_enhanced_gray(frame)
+            enh_bgr  = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+            cv2.imwrite(str(prefix) + "_enhanced.png", enh_bgr)
+
+            # 3. Diff map (colorised — blue=low, red=high)
+            bg_arr = detector.bg.bg0 if cam_id == 0 else detector.bg.bg1
+            bg_arr = bg_arr.copy()
+            if bg_arr.shape != enhanced.shape:
+                bg_arr = cv2.resize(bg_arr,
+                                    (enhanced.shape[1], enhanced.shape[0]),
+                                    interpolation=cv2.INTER_LINEAR)
+            if (detector._clahe is not None
+                    or detector.use_green_channel):
+                bg_frame = cv2.cvtColor(
+                    np.clip(bg_arr, 0, 255).astype(np.uint8),
+                    cv2.COLOR_GRAY2BGR)
+                bg_arr = detector._to_enhanced_gray(bg_frame).astype(np.float32)
+            diff = np.abs(enhanced.astype(np.float32) - bg_arr)
+            diff_norm = np.clip(diff / max(diff.max(), 1.0) * 255,
+                                0, 255).astype(np.uint8)
+            diff_colour = cv2.applyColorMap(diff_norm, cv2.COLORMAP_JET)
+            cv2.imwrite(str(prefix) + "_diff.png", diff_colour)
+
+            # 4. Binary mask
+            fg = detector.detect(frame, cam=cam_id)
+            mask_bgr = cv2.cvtColor(fg.mask, cv2.COLOR_GRAY2BGR)
+            # Tint blobs in green, non-blobs in dark
+            cv2.imwrite(str(prefix) + "_mask.png", mask_bgr)
+
+            # 5. Overlay: raw frame + mask outline + body part dots + labels
+            overlay = frame.copy()
+            contours, _ = cv2.findContours(
+                fg.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
+
+            regions = labeller.label(fg)
+            for r in regions:
+                col = _PART_COLOURS.get(r.label, (200, 200, 200))
+                cx, cy = int(r.cx), int(r.cy)
+                cv2.circle(overlay, (cx, cy), 6, col, -1)
+                cv2.circle(overlay, (cx, cy), 7, (0, 0, 0), 1)
+                cv2.putText(overlay, r.label, (cx + 8, cy - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            col, 1, cv2.LINE_AA)
+            cv2.imwrite(str(prefix) + "_overlay.png", overlay)
+
+            # 6. 4-up composite: raw | enhanced | diff | overlay
+            H, W = frame.shape[:2]
+            th   = max(1, min(H, W) // 20)   # text height reference
+            row1 = np.hstack([frame, enh_bgr])
+            row2 = np.hstack([diff_colour, overlay])
+            composite = np.vstack([row1, row2])
+            # Labels
+            for text, (tx, ty) in [
+                ("RAW",      (4,  16)),
+                ("ENHANCED", (W + 4, 16)),
+                ("DIFF",     (4,  H + 16)),
+                ("OVERLAY",  (W + 4, H + 16)),
+            ]:
+                cv2.putText(composite, text, (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.imwrite(str(prefix) + "_composite.png", composite)
+
+    n_written = len(frame_indices) * 2 * 6
+    print(f"  [diag] {len(frame_indices)} frames × 2 cameras "
+          f"× 6 images = {n_written} images")
+    print(f"  [diag] frames → {out_dir / 'frames'}")
