@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 # ---------------------------------------------------------------------------
 [project]
 name        = "rpimocap"
-version     = "0.1.0"
+version     = "0.2.0"
 description = "Raspberry Pi multi-camera 3D motion capture from synchronous stereo video"
 readme      = "README.md"
 license     = { text = "MIT" }
@@ -30,32 +30,57 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+# Core dependencies — required for all commands
 dependencies = [
     "numpy>=1.24",
     "opencv-python>=4.8",
     "scipy>=1.11",
     "h5py>=3.9",
-    "scikit-image>=0.21",
+    "tifffile>=2023.1",          # TiffCapture: streaming large TIFF stacks
+    "scikit-image>=0.21",        # voxel carving (skimage.measure)
 ]
 
+# ---------------------------------------------------------------------------
 [project.optional-dependencies]
+
+# PyQt6 — required for rpimocap-align GUI
+gui     = ["PyQt6>=6.8"]
+
+# tifffile zarr backend — faster random access on very large TIFF stacks
+# (falls back to page-by-page access without it, which is slower but works)
+zarr    = ["zarr>=2.16"]
+
+# SAM / SAM2 — body part segmentation in rpimocap-segment
+sam2    = ["sam2>=1.0"]
+
+# MediaPipe — alternative pose detector in rpimocap-run
 mediapipe = ["mediapipe>=0.10"]
-sam2      = ["sam2>=1.0"]
-dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
-all       = ["mediapipe>=0.10", "sam2>=1.0", "pytest>=7.4", "ruff", "mypy"]
+
+# Development and testing
+dev     = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
+
+# Install everything except dev tools
+all     = [
+    "PyQt6>=6.8",
+    "zarr>=2.16",
+    "sam2>=1.0",
+    "mediapipe>=0.10",
+]
+
+# ---------------------------------------------------------------------------
 [project.scripts]
-rpimocap-calibrate = "rpimocap.cli.calibrate:main"
-rpimocap-autocalib = "rpimocap.cli.autocalib:main"
-rpimocap-run       = "rpimocap.cli.pipeline:main"
-rpimocap-align     = "rpimocap.cli.align:main"
-rpimocap-segment   = "rpimocap.cli.segment:main"
-rpimocap-preview   = "rpimocap.cli.preview:main"
-rpimocap-download-models = "rpimocap.cli.download_models:main"
+rpimocap-calibrate       = "rpimocap.cli.calibrate:main"
+rpimocap-autocalib       = "rpimocap.cli.autocalib:main"
+rpimocap-run             = "rpimocap.cli.pipeline:main"
+rpimocap-align           = "rpimocap.cli.align:main"
+rpimocap-segment         = "rpimocap.cli.segment:main"
+rpimocap-preview         = "rpimocap.cli.preview:main"
 rpimocap-refine-cal      = "rpimocap.cli.refine_cal:main"
+rpimocap-download-models = "rpimocap.cli.download_models:main"
 
 # ---------------------------------------------------------------------------
 [tool.setuptools.packages.find]
-where = ["."]
+where   = ["."]
 include = ["rpimocap*"]
 
 [tool.setuptools.package-data]
@@ -63,14 +88,14 @@ include = ["rpimocap*"]
 
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths    = ["tests"]
-addopts      = "-v --tb=short"
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
 
 [tool.ruff]
-line-length = 100
+line-length    = 100
 target-version = "py310"
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]    # line length handled by formatter
+select         = ["E", "F", "W", "I"]
+ignore         = ["E501"]
 
 [tool.mypy]
 python_version         = "3.10"
