@@ -51,6 +51,7 @@ _PART_COLOURS: dict[str, tuple[int, int, int]] = {
     "rump":      ( 80, 180, 255),   # sky blue
     "tail_base": (140,  80, 255),   # violet
     "tail_tip":  (220,  80, 255),   # magenta
+    "animal":    (255, 255,   0),   # bright yellow — centroid-only mode
 }
 _DEFAULT_COLOUR = (200, 200, 200)
 
@@ -80,7 +81,7 @@ def _colour(name: str) -> tuple[int, int, int]:
 def _draw_skeleton(
     canvas:     np.ndarray,
     kp_px:      dict[str, tuple[int, int]],
-    dot_r:      int   = 6,
+    dot_r:      int   = 12,
     line_w:     int   = 2,
     alpha:      float = 0.85,
 ) -> np.ndarray:
