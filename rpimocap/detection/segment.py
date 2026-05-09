@@ -1011,18 +1011,32 @@ class EpipolarMatcher:
         used1: set[int] = set()
         matched: list[tuple[BodyRegion, BodyRegion]] = []
 
-        # Pass 1: label-based matching
+        # Pass 1: label-based matching WITH epipolar validation.
+        # Even when labels agree (e.g. 'animal' in both cameras), we verify
+        # that the two centroids are consistent with the epipolar geometry.
+        # Without this check, mismatched blobs (e.g. hand in cam0, rat in cam1)
+        # triangulate to coordinates at infinity and are silently rejected by
+        # the bounds filter, leaving 0 landmarks per frame.
         by_label1 = {r.label: (i, r) for i, r in enumerate(regions1)}
         remaining0 = []
         for r0 in regions0:
             if r0.label in by_label1:
                 i1, r1 = by_label1[r0.label]
-                matched.append((r0, r1))
-                used1.add(i1)
+                # Validate with epipolar constraint before accepting
+                line = self._epipolar_line(r0.cx, r0.cy)
+                d    = self._point_to_line_dist(line, r1.cx, r1.cy)
+                if d <= self.max_epipolar_px:
+                    matched.append((r0, r1))
+                    used1.add(i1)
+                else:
+                    # Label matches but epipolar constraint violated —
+                    # the blobs are different physical objects.
+                    # Fall through to epipolar-nearest matching.
+                    remaining0.append(r0)
             else:
                 remaining0.append(r0)
 
-        # Pass 2: epipolar nearest for unmatched
+        # Pass 2: epipolar nearest for unmatched (or epipolar-rejected) regions
         for r0 in remaining0:
             cx0, cy0 = r0.cx, r0.cy
             line     = self._epipolar_line(cx0, cy0)
