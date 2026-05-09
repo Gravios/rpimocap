@@ -355,29 +355,21 @@ class ForegroundDetector:
 
     # ------------------------------------------------------------------ #
 
-    def _to_enhanced_gray(self, frame: np.ndarray) -> np.ndarray:
-        """Convert frame to enhanced grayscale applying the configured pipeline.
-
-        Steps:
-          1. Channel extraction (green or luminance)
-          2. CLAHE (if enabled)
-          3. Bilateral or Gaussian smooth (if enabled)
-
-        Returns uint8 (H, W) array.
-        """
-        # Step 1 — channel extraction
+    def _to_channel_gray(self, frame: np.ndarray) -> np.ndarray:
+        """Extract the working channel (green or luminance). No CLAHE."""
         if self.use_green_channel and frame.ndim == 3 and frame.shape[2] == 3:
-            # BGR: index 1 is green.  Under NIR the green channel has
-            # the most signal — use it directly.
-            gray = frame[:, :, 1].copy()
-        else:
-            gray = BackgroundModel._to_gray(frame)
+            return frame[:, :, 1].copy().astype(np.uint8)
+        return BackgroundModel._to_gray(frame)
 
-        # Step 2 — CLAHE
-        if self._clahe is not None:
-            gray = self._clahe.apply(gray)
+    def _to_enhanced_gray(self, frame: np.ndarray) -> np.ndarray:
+        """Convert frame to enhanced grayscale (channel + smooth only, no CLAHE).
 
-        # Step 3 — smoothing
+        CLAHE is applied to the DIFF image in detect(), not here, so that
+        it amplifies the animal signal rather than amplifying bedding texture.
+        """
+        gray = self._to_channel_gray(frame)
+
+        # Smooth before subtraction
         if self.bilateral:
             gray = cv2.bilateralFilter(
                 gray.astype(np.uint8),
@@ -405,37 +397,34 @@ class ForegroundDetector:
         -------
         ForegroundResult
         """
-        # ── Current frame: full enhancement pipeline ─────────────────────
-        gray = self._to_enhanced_gray(frame).astype(np.float32)
-
-        # ── Background: extract same channel but NO CLAHE ─────────────
-        # CLAHE must NOT be applied to the background — it normalises
-        # the histogram of both images to the same distribution, which
-        # collapses the difference signal and makes the animal invisible.
-        # Instead: extract the same channel (green or luminance) from
-        # the background so the subtraction is in the same colour space,
-        # but leave the histogram untouched.
+        # ── Channel extraction (same for frame and background) ───────────
+        gray   = self._to_enhanced_gray(frame).astype(np.float32)
         bg_raw = self.bg.bg0 if cam == 0 else self.bg.bg1
+        bg     = bg_raw.astype(np.float32)
 
-        if self.use_green_channel and frame.ndim == 3:
-            # Background was built from BGR→gray luminance.
-            # Re-extract green channel from a synthetic gray BGR for
-            # consistency: since bg_raw is already gray, all channels
-            # are equal so green channel == the gray value.
-            bg = bg_raw.copy()
-        else:
-            bg = bg_raw.copy()
-
-        # Resize if needed
         if bg.shape != gray.shape:
-            bg = cv2.resize(bg.astype(np.float32),
-                            (gray.shape[1], gray.shape[0]),
+            bg = cv2.resize(bg, (gray.shape[1], gray.shape[0]),
                             interpolation=cv2.INTER_LINEAR)
-        else:
-            bg = bg.astype(np.float32)
 
-        # ── Diff and threshold ────────────────────────────────────────
-        diff   = np.abs(gray - bg)
+        # ── Background uses same channel extraction ───────────────────
+        # Re-extract the working channel from the background for
+        # consistency (bg_raw is luminance; if green_channel is set
+        # all channels are equal so this is a no-op).
+        if self.use_green_channel:
+            # bg_raw is already single-channel gray — use as-is
+            pass
+
+        # ── Diff ─────────────────────────────────────────────────────
+        diff = np.abs(gray - bg)
+
+        # ── CLAHE on the DIFF (not the frame) ────────────────────────
+        # Applying CLAHE here amplifies the animal blob (high diff signal)
+        # relative to the background noise (low diff signal), rather than
+        # amplifying bedding texture in the frame before subtraction.
+        if self._clahe is not None:
+            diff_u8 = np.clip(diff, 0, 255).astype(np.uint8)
+            diff    = self._clahe.apply(diff_u8).astype(np.float32)
+
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)
@@ -1001,12 +990,21 @@ class EpipolarMatcher:
     def triangulate(
         self,
         matches: list[tuple[BodyRegion, BodyRegion]],
+        bounds: "np.ndarray | None" = None,
     ) -> dict[str, np.ndarray]:
         """Triangulate matched region pairs → {label: xyz_mm}.
 
+        Parameters
+        ----------
+        matches : list of (cam0_region, cam1_region) pairs
+        bounds  : optional (6,) array [xmin,xmax,ymin,ymax,zmin,zmax].
+                  Points outside bounds + 20% margin are set to NaN
+                  (epipolar mismatch rejection).
+
         Returns
         -------
-        dict mapping label string to (3,) world coordinate array (mm)
+        dict mapping label string to (3,) world coordinate array (mm).
+        Out-of-bounds points are NaN — gap-filling handles them downstream.
         """
         from rpimocap.reconstruction.triangulate import triangulate_dlt
         result: dict[str, np.ndarray] = {}
@@ -1018,14 +1016,20 @@ class EpipolarMatcher:
                 pts1 = self._undistort(pts1, 1)
             X = triangulate_dlt(self.P0, self.P1,
                                   (pts0[0,0], pts0[0,1]),
-                                  (pts1[0,0], pts1[0,1]))
+                                  (pts1[0,0], pts1[0,1]))[:3]
+            # Reject points outside arena bounds (epipolar mismatch).
+            # 20% margin allows genuine near-boundary detections through.
+            if bounds is not None:
+                xmin,xmax,ymin,ymax,zmin,zmax = bounds
+                dx = (xmax-xmin)*0.20; dy = (ymax-ymin)*0.20
+                dz = (zmax-zmin)*0.20
+                if not (xmin-dx <= X[0] <= xmax+dx and
+                        ymin-dy <= X[1] <= ymax+dy and
+                        zmin-dz <= X[2] <= zmax+dz):
+                    X = np.full(3, np.nan)
             # Always use cam0 label as canonical name.
-            # Epipolar-matched pairs may have different labels when the
-            # geometric labeller determines spine orientation differently
-            # between cameras (common when the animal faces across the
-            # baseline).  The cam0 label is used as ground truth.
             label = r0.label
-            result[label] = X[:3]
+            result[label] = X
         return result
 
     def reprojection_error(
@@ -1148,8 +1152,13 @@ def save_diagnostics(
                 bg_arr = cv2.resize(bg_arr,
                                     (enhanced.shape[1], enhanced.shape[0]),
                                     interpolation=cv2.INTER_LINEAR)
-            # Do NOT apply CLAHE to background (same fix as in detect())
-            diff = np.abs(enhanced.astype(np.float32) - bg_arr.astype(np.float32))
+            # Apply same pipeline as detect(): CLAHE on diff, not frame
+            raw_diff = np.abs(enhanced.astype(np.float32) - bg_arr.astype(np.float32))
+            if detector._clahe is not None:
+                diff = detector._clahe.apply(
+                    np.clip(raw_diff, 0, 255).astype(np.uint8)).astype(np.float32)
+            else:
+                diff = raw_diff
             diff_norm = np.clip(diff / max(diff.max(), 1.0) * 255,
                                 0, 255).astype(np.uint8)
             diff_colour = cv2.applyColorMap(diff_norm, cv2.COLORMAP_JET)

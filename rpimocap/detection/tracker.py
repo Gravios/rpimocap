@@ -444,6 +444,7 @@ class SegmentTracker:
         end_frame:      Optional[int] = None,
         sample_every:   int           = 1,
         align_result    = None,
+        bounds:         "np.ndarray | None" = None,
     ) -> list[TrackResult]:
         """Track the full video sequence.
 
@@ -481,7 +482,7 @@ class SegmentTracker:
             if not ret0 or not ret1:
                 break
 
-            result = self._process_frame(idx, f0, f1)
+            result = self._process_frame(idx, f0, f1, bounds=bounds)
 
             # Apply arena alignment if provided
             if align_result is not None and result.xyz:
@@ -506,9 +507,10 @@ class SegmentTracker:
 
     def _process_frame(
         self,
-        idx: int,
-        f0:  np.ndarray,
-        f1:  np.ndarray,
+        idx:    int,
+        f0:     np.ndarray,
+        f1:     np.ndarray,
+        bounds: "np.ndarray | None" = None,
     ) -> TrackResult:
         """Process one stereo frame pair → TrackResult.
 
@@ -532,7 +534,7 @@ class SegmentTracker:
                 regions1 = self._sam2.segment(f1, regions1)
 
         matches  = self._matcher.match(regions0, regions1)
-        xyz_dict = self._matcher.triangulate(matches)
+        xyz_dict = self._matcher.triangulate(matches, bounds=bounds)
 
         # Compute reprojection errors
         reproj: dict[str, tuple] = {}

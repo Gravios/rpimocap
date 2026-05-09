@@ -356,12 +356,23 @@ def main() -> None:
         for cap in (cap0, cap1):
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+    # Parse bounds for epipolar mismatch rejection
+    _bounds_arr = None
+    if args.bounds:
+        try:
+            _bounds_arr = np.array([float(v) for v in args.bounds.split(",")])
+            assert len(_bounds_arr) == 6
+            print(f"  Bounds filter: {_bounds_arr} (rejects out-of-arena triangulations)")
+        except Exception:
+            print(f"  WARNING: could not parse --bounds '{args.bounds}', no filter applied")
+
     results = tracker.track_sequence(
         cap0, cap1,
         start_frame=args.start_frame,
         end_frame=args.end_frame,
         sample_every=args.sample_every,
-        align_result=align_result)
+        align_result=align_result,
+        bounds=_bounds_arr)
 
     cap0.release()
     cap1.release()
