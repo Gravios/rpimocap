@@ -525,16 +525,32 @@ class GeometricLabeller:
         if not fg.blobs:
             return []
 
-        # Centroid-only mode: return the largest blob centre as "animal"
-        # Use this when body-part labelling is unreliable (e.g. poor contrast)
+        # Centroid-only mode: return ALL blobs sorted by area (largest first),
+        # all labeled "animal".
+        #
+        # Returning all candidates (not just the largest) lets the epipolar
+        # matcher use Pass 2 to find the blob in cam0 that is epipolar-
+        # consistent with a blob in cam1.  This handles the common case where
+        # the largest blob in cam0 is a non-animal foreground object (e.g. an
+        # experimenter's hand that shifted position since the background was
+        # built) while the actual rat is a smaller blob that nonetheless has
+        # a valid epipolar match in cam1.
         if self._centroid_only:
-            best_stats, best_centroid = max(
-                fg.blobs, key=lambda b: b[0][cv2.CC_STAT_AREA])
-            cx, cy = best_centroid
-            return [BodyRegion(
-                label="animal", cx=float(cx), cy=float(cy),
-                area_px=float(best_stats[cv2.CC_STAT_AREA]),
-                confidence=1.0)]
+            # Sort blobs largest-first so the epipolar matcher tries them in
+            # size order and prefers larger objects when epipolar distance is tied.
+            sorted_blobs = sorted(
+                fg.blobs,
+                key=lambda b: b[0][cv2.CC_STAT_AREA],
+                reverse=True)
+            return [
+                BodyRegion(
+                    label="animal",
+                    cx=float(centroid[0]),
+                    cy=float(centroid[1]),
+                    area_px=float(stats[cv2.CC_STAT_AREA]),
+                    confidence=1.0)
+                for stats, centroid in sorted_blobs
+            ]
 
         if frame_gray is None:
             frame_gray = fg.frame_gray
@@ -1011,35 +1027,56 @@ class EpipolarMatcher:
         used1: set[int] = set()
         matched: list[tuple[BodyRegion, BodyRegion]] = []
 
+        # Determine if we're in centroid-only mode (all labels identical)
+        all_same_label = (
+            len(regions0) > 0 and len(regions1) > 0
+            and len({r.label for r in regions0}) == 1
+            and len({r.label for r in regions1}) == 1
+            and next(iter({r.label for r in regions0})) ==
+                next(iter({r.label for r in regions1})))
+
+        if all_same_label and (len(regions0) > 1 or len(regions1) > 1):
+            # Centroid-only mode: multiple candidates with the same label.
+            # Skip label matching entirely and do global epipolar-nearest:
+            # find the single best (cam0_blob, cam1_blob) pair across all
+            # candidates.  This selects the animal blob (which satisfies the
+            # epipolar constraint) over spurious blobs (hand, frame noise)
+            # that have no consistent match in the other camera.
+            best_d_global = float("inf")
+            best_pair = None
+            for i0, r0 in enumerate(regions0):
+                line = self._epipolar_line(r0.cx, r0.cy)
+                for i1, r1 in enumerate(regions1):
+                    d = self._point_to_line_dist(line, r1.cx, r1.cy)
+                    if d < best_d_global:
+                        best_d_global = d
+                        best_pair = (r0, r1)
+            if best_pair is not None and best_d_global <= self.max_epipolar_px:
+                matched.append(best_pair)
+            return matched
+
         # Pass 1: label-based matching WITH epipolar validation.
-        # Even when labels agree (e.g. 'animal' in both cameras), we verify
-        # that the two centroids are consistent with the epipolar geometry.
-        # Without this check, mismatched blobs (e.g. hand in cam0, rat in cam1)
-        # triangulate to coordinates at infinity and are silently rejected by
-        # the bounds filter, leaving 0 landmarks per frame.
+        # Even when labels agree (e.g. body-part labels in both cameras),
+        # we verify epipolar consistency before accepting the match.
+        # This prevents mismatched blobs from producing garbage triangulations.
         by_label1 = {r.label: (i, r) for i, r in enumerate(regions1)}
         remaining0 = []
         for r0 in regions0:
             if r0.label in by_label1:
                 i1, r1 = by_label1[r0.label]
-                # Validate with epipolar constraint before accepting
                 line = self._epipolar_line(r0.cx, r0.cy)
                 d    = self._point_to_line_dist(line, r1.cx, r1.cy)
                 if d <= self.max_epipolar_px:
                     matched.append((r0, r1))
                     used1.add(i1)
                 else:
-                    # Label matches but epipolar constraint violated —
-                    # the blobs are different physical objects.
-                    # Fall through to epipolar-nearest matching.
                     remaining0.append(r0)
             else:
                 remaining0.append(r0)
 
-        # Pass 2: epipolar nearest for unmatched (or epipolar-rejected) regions
+        # Pass 2: epipolar nearest for unmatched or epipolar-rejected regions
         for r0 in remaining0:
-            cx0, cy0 = r0.cx, r0.cy
-            line     = self._epipolar_line(cx0, cy0)
+            line = self._epipolar_line(r0.cx, r0.cy)
             best_d, best_i, best_r1 = float("inf"), -1, None
             for i1, r1 in enumerate(regions1):
                 if i1 in used1:
