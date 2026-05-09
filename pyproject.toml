@@ -89,6 +89,7 @@ rpimocap-align           = "rpimocap.cli.align:main"
 rpimocap-segment         = "rpimocap.cli.segment:main"
 rpimocap-preview         = "rpimocap.cli.preview:main"
 rpimocap-refine-cal      = "rpimocap.cli.refine_cal:main"
+rpimocap-calibrate-from-corners = "rpimocap.cli.calibrate_from_corners:main"
 rpimocap-download-models = "rpimocap.cli.download_models:main"
 
 # ---------------------------------------------------------------------------

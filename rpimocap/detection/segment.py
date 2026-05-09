@@ -894,8 +894,14 @@ class EpipolarMatcher:
             dist1 = np.ravel(cal.get("dist1", np.zeros(5)))
             R     = cal["R"]
             T     = cal["T"].ravel()
-            P0    = cal.get("P0", K0 @ np.hstack([np.eye(3), np.zeros((3,1))]))
-            P1    = cal.get("P1", K1 @ np.hstack([R, T.reshape(3,1)]))
+            # Prefer DLT projection matrices (from rpimocap-calibrate-from-corners)
+            # which work directly in arena frame without R/T decomposition issues
+            if "dlt_P0" in cal.files:
+                P0 = cal["dlt_P0"]
+                P1 = cal["dlt_P1"]
+            else:
+                P0 = cal.get("P0", K0 @ np.hstack([np.eye(3), np.zeros((3,1))]))
+                P1 = cal.get("P1", K1 @ np.hstack([R, T.reshape(3,1)]))
         else:
             raise TypeError("cal must be a dict-like (npz or dict)")
         return cls(P0=P0, P1=P1, K0=K0, K1=K1,
