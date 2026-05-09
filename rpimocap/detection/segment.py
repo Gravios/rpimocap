@@ -229,7 +229,10 @@ class BackgroundModel:
         start_frame    : first frame index to consider in each session
         verbose        : print progress
         """
-        assert len(caps0) == len(caps1), "caps0 and caps1 must have same length"
+        if len(caps0) != len(caps1):
+            raise ValueError(
+                f"caps0 and caps1 must have same length "
+                f"(got {len(caps0)} and {len(caps1)})")
 
         stack0, stack1 = [], []
         for si, (cap0, cap1) in enumerate(zip(caps0, caps1)):

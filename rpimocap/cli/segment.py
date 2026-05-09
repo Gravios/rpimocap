@@ -366,7 +366,8 @@ def main() -> None:
     if args.bounds:
         try:
             _bounds_arr = np.array([float(v) for v in args.bounds.split(",")])
-            assert len(_bounds_arr) == 6
+            if len(_bounds_arr) != 6:
+                raise ValueError(f"--bounds needs 6 values, got {len(_bounds_arr)}")
             print(f"  Bounds filter: {_bounds_arr} (rejects out-of-arena triangulations)")
         except Exception:
             print(f"  WARNING: could not parse --bounds '{args.bounds}', no filter applied")

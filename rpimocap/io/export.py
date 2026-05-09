@@ -367,9 +367,9 @@ class TiffCapture:
 
     def __init__(self, path: str, bayer_pattern: str = "RGGB") -> None:
         import tifffile
-        import cv2 as _cv2
+        import cv2
         self._path  = str(path)
-        self._cv2   = _cv2
+        self._cv2   = cv2
         self._tf    = tifffile.TiffFile(str(path))
         self._pages = self._tf.pages
         self._series = self._tf.series[0] if self._tf.series else None
