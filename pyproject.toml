@@ -36,33 +36,46 @@ dependencies = [
     "opencv-python>=4.8",
     "scipy>=1.11",
     "h5py>=3.9",
-    "tifffile>=2023.1",          # TiffCapture: streaming large TIFF stacks
-    "scikit-image>=0.21",        # voxel carving (skimage.measure)
+    "tifffile>=2023.1",       # TiffCapture: streaming large TIFF stacks
+    "scikit-image>=0.21",     # voxel carving (skimage.measure)
 ]
 
 # ---------------------------------------------------------------------------
 [project.optional-dependencies]
 
 # PyQt6 — required for rpimocap-align GUI
-gui     = ["PyQt6>=6.8"]
+gui       = ["PyQt6>=6.8"]
 
-# tifffile zarr backend — faster random access on very large TIFF stacks
-# (falls back to page-by-page access without it, which is slower but works)
-zarr    = ["zarr>=2.16"]
+# zarr — faster random-access backend for very large TIFF stacks.
+# Falls back to page-by-page tifffile access without it (slower but works).
+zarr      = ["zarr>=2.16"]
 
-# SAM / SAM2 — body part segmentation in rpimocap-segment
-sam2    = ["sam2>=1.0"]
+# PyTorch — required for SAM2 inference.
+# The PyPI build is CPU-only. For GPU (CUDA 13.1 / RTX 50xx Blackwell):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu131
+# Or use environment.yml which installs the GPU build via conda automatically.
+torch     = ["torch>=2.7"]
+
+# SAM2 — body part segmentation in rpimocap-segment.
+# Install torch with GPU support first (see above), then:
+#   pip install -e ".[sam2]"
+sam2      = ["sam2>=1.0"]
 
 # MediaPipe — alternative pose detector in rpimocap-run
 mediapipe = ["mediapipe>=0.10"]
 
 # Development and testing
-dev     = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
+dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
 
-# Install everything except dev tools
-all     = [
+# Install everything (GUI + zarr + torch + SAM2 + mediapipe).
+# For GPU (CUDA 13.1 / RTX 50xx) install torch with CUDA first, then [all]:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu131
+#   pip install -e ".[all]"
+# Or use environment.yml — conda handles GPU torch automatically.
+all       = [
     "PyQt6>=6.8",
     "zarr>=2.16",
+    "torch>=2.7",
     "sam2>=1.0",
     "mediapipe>=0.10",
 ]

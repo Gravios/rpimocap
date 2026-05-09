@@ -1,32 +1,34 @@
 name: rpimocap
 
 channels:
+  - pytorch                # official PyTorch channel — always has GPU builds
+  - nvidia                 # CUDA runtime libraries
   - conda-forge
   - defaults
 
 dependencies:
   # ── Python ──────────────────────────────────────────────────────────────
-  - python=3.11          # 3.11 recommended; 3.10 minimum, 3.12 works
+  - python=3.11            # 3.11 recommended; 3.10 minimum, 3.12 works
 
   # ── Core scientific stack (conda builds preferred — faster, MKL-linked) ─
   - numpy>=1.24
   - scipy>=1.11
   - scikit-image>=0.21
   - h5py>=3.9
-  - tifffile>=2023.7     # multi-frame TIFF stack reading (streaming)
-  - zarr>=2.16           # fast page access for BigTIFF / OME-TIFF
+  - tifffile>=2023.7       # multi-frame TIFF stack reading (streaming)
+  - zarr>=2.16             # fast page access for BigTIFF / OME-TIFF
 
   # ── OpenCV ───────────────────────────────────────────────────────────────
-  # Use conda-forge opencv — includes all codecs and avoids pip wheel issues
-  - opencv>=4.8
+  - opencv>=4.8            # conda-forge build includes all codecs
 
-  # ── Raspberry Pi camera / hardware sync (Pi only) ────────────────────────
-  # libcamera python bindings are not on conda — install via apt on the Pi:
-  #   sudo apt install python3-libcamera python3-kms++
-  # Leave these out of the conda env to keep it cross-platform.
+  # ── PyTorch (CUDA 13.1 — RTX 5070 Ti / Blackwell) ───────────────────────
+  # conda from the pytorch channel installs the correct CUDA build automatically
+  - pytorch>=2.7           # 2.7+ has official CUDA 13.1 / Blackwell support
+  - pytorch-cuda=13.1      # pins the CUDA runtime version
+  - torchvision            # required by sam2
 
-  # ── GUI (arena_aligner.py) ───────────────────────────────────────────────
-  - pyqt6>=6.8           # Qt6 GUI (arena_aligner.py)
+  # ── GUI (rpimocap-align) ─────────────────────────────────────────────────
+  - pyqt6>=6.8
 
   # ── Dev tools ────────────────────────────────────────────────────────────
   - pytest>=7.4
@@ -37,28 +39,31 @@ dependencies:
   # ── Pip-only packages ────────────────────────────────────────────────────
   - pip
   - pip:
-    # opencv-python not needed when using conda opencv above
+    # SAM2 — no conda package, pip only.
+    # torch is already installed above with GPU support so sam2 won't override it.
+    - sam2>=1.0
+
     # mediapipe — no conda package, pip only
     - mediapipe>=0.10
 
-    # rpimocap itself — editable install from the unpacked tarball
-    # Run after activating the env:
-    #   pip install -e .
-    # (listed here as a reminder, not auto-installed by conda)
-
 # ── Usage ───────────────────────────────────────────────────────────────────
-# Create:
+# Create (installs GPU torch via pytorch+nvidia channels automatically):
 #   conda env create -f environment.yml
 #
 # Activate:
 #   conda activate rpimocap
 #
-# Install rpimocap (from unpacked tarball directory):
+# Install rpimocap:
 #   pip install -e .
 #
-# Verify:
+# Verify GPU:
+#   python -c "import torch; print(torch.cuda.get_device_name(0))"
+#
+# Download SAM2 weights:
+#   rpimocap-download-models --model large
+#
+# Run tests:
 #   python -m pytest tests/
-#   rpimocap-autocalib --help
 #
 # Update env after changes to this file:
 #   conda env update -f environment.yml --prune
