@@ -406,6 +406,7 @@ class SegmentTracker:
         bilateral:         bool           = False,
         bilateral_d:       int            = 9,
         bilateral_sigma:   float          = 50.0,
+        centroid_only:     bool           = False,
         verbose:           bool           = True,
     ):
         self._matcher = matcher
@@ -418,7 +419,7 @@ class SegmentTracker:
             use_green_channel=use_green_channel,
             bilateral=bilateral, bilateral_d=bilateral_d,
             bilateral_sigma=bilateral_sigma)
-        self._lbl  = GeometricLabeller()
+        self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
         # Try SAM2 (used as mask refiner on top of optical flow)
         self._sam2: Optional[SAM2Tracker] = None

@@ -71,6 +71,9 @@ import numpy as np
 PART_ORDER = ["nose", "left_ear", "right_ear", "head",
               "neck", "back", "rump", "tail_base", "tail_tip"]
 
+# Centroid-only mode: just the largest blob centre, labelled "animal"
+CENTROID_ONLY = False  # flipped per-run by --centroid-only flag
+
 
 # --------------------------------------------------------------------------- #
 #  Data classes                                                                #
@@ -495,9 +498,11 @@ class GeometricLabeller:
         self,
         ear_variance_percentile: float = 85.0,
         min_ear_area_px:         int   = 40,
+        centroid_only:           bool  = False,
     ):
         self._ear_var_pct    = ear_variance_percentile
         self._min_ear_area   = min_ear_area_px
+        self._centroid_only  = centroid_only
 
     # ------------------------------------------------------------------ #
 
@@ -516,6 +521,17 @@ class GeometricLabeller:
         """
         if not fg.blobs:
             return []
+
+        # Centroid-only mode: return the largest blob centre as "animal"
+        # Use this when body-part labelling is unreliable (e.g. poor contrast)
+        if self._centroid_only:
+            best_stats, best_centroid = max(
+                fg.blobs, key=lambda b: b[0][cv2.CC_STAT_AREA])
+            cx, cy = best_centroid
+            return [BodyRegion(
+                label="animal", cx=float(cx), cy=float(cy),
+                area_px=float(best_stats[cv2.CC_STAT_AREA]),
+                confidence=1.0)]
 
         if frame_gray is None:
             frame_gray = fg.frame_gray

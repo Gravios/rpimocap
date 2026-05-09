@@ -123,6 +123,10 @@ def main() -> None:
     det.add_argument("--max-epipolar-px", type=float, default=8.0,
                      help="Maximum epipolar line distance for stereo "
                           "matching (default: 8 px)")
+    det.add_argument("--centroid-only", action="store_true",
+                     help="Track only the animal centroid (label: 'animal') "
+                          "instead of labelling body parts. More robust when "
+                          "body-part detection is unreliable.")
 
     # ── Contrast enhancement ─────────────────────────────────────────────────
     con = ap.add_argument_group("Contrast enhancement (NIR footage)")
@@ -327,6 +331,7 @@ def main() -> None:
         min_area_px=args.min_area,
         morph_k=args.morph_k,
         redetect_every=args.redetect_every,
+        centroid_only=args.centroid_only,
         clahe=args.clahe,
         clahe_clip=args.clahe_clip,
         clahe_tile=args.clahe_tile,
