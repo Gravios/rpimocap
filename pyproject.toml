@@ -68,10 +68,10 @@ mediapipe = ["mediapipe>=0.10"]
 dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
 
 # Install everything (GUI + zarr + torch + SAM2 + mediapipe).
-# For GPU (CUDA 13.1 / RTX 50xx) install torch with CUDA first, then [all]:
-#   pip install torch --index-url https://download.pytorch.org/whl/cu131
+# For GPU (CUDA 13.1 / RTX 50xx) install cu126 torch first, then [all]:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 #   pip install -e ".[all]"
-# Or use environment.yml — conda handles GPU torch automatically.
+# Or use environment.yml which handles this automatically.
 all       = [
     "PyQt6>=6.8",
     "zarr>=2.16",

@@ -1,8 +1,6 @@
 name: rpimocap
 
 channels:
-  - pytorch                # official PyTorch channel — always has GPU builds
-  - nvidia                 # CUDA runtime libraries
   - conda-forge
   - defaults
 
@@ -21,12 +19,6 @@ dependencies:
   # ── OpenCV ───────────────────────────────────────────────────────────────
   - opencv>=4.8            # conda-forge build includes all codecs
 
-  # ── PyTorch (CUDA 13.1 — RTX 5070 Ti / Blackwell) ───────────────────────
-  # conda from the pytorch channel installs the correct CUDA build automatically
-  - pytorch>=2.7           # 2.7+ has official CUDA 13.1 / Blackwell support
-  - pytorch-cuda=13.1      # pins the CUDA runtime version
-  - torchvision            # required by sam2
-
   # ── GUI (rpimocap-align) ─────────────────────────────────────────────────
   - pyqt6>=6.8
 
@@ -39,15 +31,22 @@ dependencies:
   # ── Pip-only packages ────────────────────────────────────────────────────
   - pip
   - pip:
-    # SAM2 — no conda package, pip only.
-    # torch is already installed above with GPU support so sam2 won't override it.
+    # PyTorch with CUDA 12.6 wheels — compatible with CUDA 13.1 runtime
+    # (CUDA is backward compatible; RTX 5070 Ti / Blackwell works fine)
+    # pytorch-cuda=13.1 is not yet packaged in conda channels (May 2025).
+    # Wheels built for cu126 run correctly on CUDA 13.1.
+    - --index-url https://download.pytorch.org/whl/cu126
+    - torch>=2.7
+    - torchvision
+
+    # SAM2 — body part segmentation in rpimocap-segment
     - sam2>=1.0
 
-    # mediapipe — no conda package, pip only
+    # mediapipe — alternative pose detector in rpimocap-run
     - mediapipe>=0.10
 
 # ── Usage ───────────────────────────────────────────────────────────────────
-# Create (installs GPU torch via pytorch+nvidia channels automatically):
+# Create:
 #   conda env create -f environment.yml
 #
 # Activate:
@@ -65,8 +64,9 @@ dependencies:
 # Run tests:
 #   python -m pytest tests/
 #
-# Update env after changes to this file:
+# Update existing env:
 #   conda env update -f environment.yml --prune
+#   pip install -e .
 #
 # Remove:
 #   conda env remove -n rpimocap
