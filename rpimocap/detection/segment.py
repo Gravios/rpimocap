@@ -909,17 +909,21 @@ class EpipolarMatcher:
                 P1 = cal.get("P1", K1 @ np.hstack([R, T.reshape(3,1)]))
         else:
             raise TypeError("cal must be a dict-like (npz or dict)")
-        return cls(P0=P0, P1=P1, K0=K0, K1=K1,
-                   dist0=dist0, dist1=dist1, R=R, T=T,
-                   max_epipolar_px=max_epipolar_px)
+        matcher = cls(P0=P0, P1=P1, K0=K0, K1=K1,
+                      dist0=dist0, dist1=dist1, R=R, T=T,
+                      max_epipolar_px=max_epipolar_px)
+        # When DLT P matrices are in use, recompute F from them directly.
+        # F from K/R/T of the original autocalib is inconsistent with DLT
+        # P matrices and causes every epipolar match to fail.
+        if "dlt_P0" in cal.files:
+            matcher.F = cls._compute_F_from_P(P0, P1)
+        return matcher
 
     @staticmethod
     def _compute_F(K0, K1, R, T) -> np.ndarray:
         """Compute the fundamental matrix F from stereo calibration.
 
         F = K1^{-T} · [t]× · R · K0^{-1}
-
-        where [t]× is the skew-symmetric cross-product matrix of T.
         """
         t = T.ravel()
         tx = np.array([[ 0,    -t[2],  t[1]],
@@ -927,6 +931,35 @@ class EpipolarMatcher:
                        [-t[1],  t[0],  0   ]], dtype=np.float64)
         E  = tx @ R.astype(np.float64)
         F  = np.linalg.inv(K1).T @ E @ np.linalg.inv(K0)
+        return F / (np.abs(F).max() + 1e-12)
+
+    @staticmethod
+    def _compute_F_from_P(P0: np.ndarray, P1: np.ndarray) -> np.ndarray:
+        """Compute fundamental matrix F directly from two 3×4 projection matrices.
+
+        Uses the formula:  F = [e']× P1 P0+
+        where P0+ is the pseudoinverse of P0 and e' = P1 @ null(P0)
+        is the epipole (projection of cam0 centre into cam1).
+
+        This is the correct F when P0/P1 are DLT-estimated projection
+        matrices not decomposable into a standard K[R|t] stereo pair.
+        """
+        # Camera 0 centre: null space of P0
+        _, _, Vt = np.linalg.svd(P0)
+        C0 = Vt[-1]                         # homogeneous camera centre
+        C0 = C0 / C0[3]                     # normalise
+
+        # Epipole in cam1: projection of cam0 centre
+        e1 = P1 @ C0                        # (3,) homogeneous
+        e1 = e1 / (np.abs(e1).max() + 1e-12)
+
+        # Skew-symmetric matrix of e1
+        e1x = np.array([[ 0,    -e1[2],  e1[1]],
+                        [ e1[2], 0,     -e1[0]],
+                        [-e1[1], e1[0],  0    ]], dtype=np.float64)
+
+        P0_pinv = np.linalg.pinv(P0)
+        F = e1x @ P1 @ P0_pinv
         return F / (np.abs(F).max() + 1e-12)
 
     def _epipolar_line(self, x: float, y: float) -> np.ndarray:
