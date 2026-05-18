@@ -17,13 +17,15 @@ Pipeline
 
 Output
 ------
-    output/
-    ├── reconstruction.h5      ← 3D trajectories per body part
-    ├── viewer_data.json       ← HTML 3D viewer
-    ├── detection_stats.csv    ← per-frame detection rates
-    └── background/
-        ├── bg_cam0.png        ← background image (for inspection)
-        └── bg_cam1.png
+    <session>/
+    ├── background/
+    │   ├── bg.npz             ← background model (reuse with --background-model)
+    │   ├── bg_cam0.png        ← background image (for inspection)
+    │   └── bg_cam1.png
+    └── tracking/
+        ├── reconstruction.h5  ← 3D trajectories per body part
+        ├── viewer_data.json   ← HTML 3D viewer
+        └── detection_stats.csv
 
 Usage
 -----
@@ -216,10 +218,11 @@ def main() -> None:
         smooth_trajectory, fill_trajectory_gaps, trajectory_stats)
     from rpimocap.io.export import write_hdf5, write_viewer_json, write_stats_csv
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    bg_dir  = out_dir / "background"
-    bg_dir.mkdir(exist_ok=True)
+    out_dir   = Path(args.out)
+    bg_dir    = out_dir / "background"
+    track_dir = out_dir / "tracking"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    track_dir.mkdir(parents=True, exist_ok=True)
 
     print("rpimocap-segment")
     print(f"  cam0   : {args.cam0}")
@@ -408,11 +411,11 @@ def main() -> None:
     # ── Export ───────────────────────────────────────────────────────────────
     print("\n── Exporting ───────────────────────────────────────────────────")
 
-    write_stats_csv(out_dir / "detection_stats.csv", stats)
+    write_stats_csv(track_dir / "detection_stats.csv", stats)
     print(f"  detection_stats.csv")
 
     write_hdf5(
-        out_dir / "reconstruction.h5",
+        track_dir / "reconstruction.h5",
         skeleton_frames,
         voxel_frames=None,
         fps=fps,
@@ -441,7 +444,7 @@ def main() -> None:
                  if a in kp_names and b in kp_names])
 
     write_viewer_json(
-        out_dir / "viewer_data.json",
+        track_dir / "viewer_data.json",
         skeleton_frames,
         keypoint_names=kp_names,
         skeleton_edges=edges,
@@ -458,7 +461,7 @@ def main() -> None:
     print(f"  Processed : {n_tot} frames")
     print(f"  Detected  : {n_det} ({100*n_det/max(n_tot,1):.1f}%)")
     print(f"  Body parts: {sorted(parts)}")
-    print(f"  Output    : {out_dir}/")
+    print(f"  Output    : {track_dir}/")
 
 
 if __name__ == "__main__":

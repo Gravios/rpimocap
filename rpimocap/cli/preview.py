@@ -12,7 +12,7 @@ Usage
         --calib         autocalib_refined.npz \\
         --h5            segment-output/reconstruction.h5 \\
         --bayer-pattern RGGB \\
-        --out           segment-output/preview.mp4   (H264 via ffmpeg if available)
+        --out           <session>/tracking/preview.mp4   (H264 via ffmpeg if available)
 
 Options
 -------
@@ -155,7 +155,8 @@ def main() -> None:
     io.add_argument("--h5",     required=True,
                     help="reconstruction.h5 from rpimocap-segment or rpimocap-run")
     io.add_argument("--out",    required=True,
-                    help="Output .mp4 path")
+                    metavar="MP4",
+                    help="Output video path (e.g. <session>/tracking/preview.mp4)")
     io.add_argument("--bayer-pattern", default="RGGB",
                     choices=["RGGB","BGGR","GRBG","GBRG"])
     io.add_argument("--align-points", default=None, metavar="CSV",

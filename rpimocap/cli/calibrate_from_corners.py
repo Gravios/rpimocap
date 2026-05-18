@@ -60,6 +60,7 @@ def main() -> None:
     ap.add_argument("--calib",  required=True,
                     help="Existing calibration .npz (used for dist0/dist1 if present)")
     ap.add_argument("--out",    default=None,
+                    metavar="NPZ",
                     help="Output .npz (default: <calib_stem>_corners.npz)")
     args = ap.parse_args()
 

@@ -186,7 +186,9 @@ def main():
     io.add_argument("--cam1",    required=True, help="Camera 1 video file")
     io.add_argument("--bounds",  default=None,
                     help="Arena bounds: xmin,xmax,ymin,ymax,zmin,zmax (mm)")
-    io.add_argument("--out",     default="autocalib.npz")
+    io.add_argument("--out",     default="autocalib.npz",
+                    metavar="NPZ",
+                    help="Output calibration file (e.g. <session>/calib/autocalib.npz)")
     io.add_argument("--report",  default="autocalib_report.html")
     io.add_argument("--compare", default=None,
                     help="Path to calibrate.py .npz for cross-validation")
