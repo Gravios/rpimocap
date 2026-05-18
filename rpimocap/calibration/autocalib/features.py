@@ -106,7 +106,19 @@ class CrossViewMatcher:
                  min_inliers: int = 80,
                  min_inlier_ratio: float = 0.25,
                  grid_rows: int = 4,
-                 grid_cols: int = 4):
+                 grid_cols: int = 4,
+                 clahe: bool = True,
+                 clahe_clip: float = 2.0,
+                 clahe_tile: int = 8):
+        """
+        Parameters
+        ----------
+        clahe       : Apply CLAHE before SIFT feature detection.
+                      Strongly recommended for NIR/low-contrast scenes such as
+                      rodent behavioural arenas with bedding texture.
+        clahe_clip  : CLAHE clip limit (default 2.0; increase for very dark scenes).
+        clahe_tile  : CLAHE tile grid size NxN (default 8).
+        """
 
         self._sift = cv2.SIFT_create(
             nfeatures=n_features,
@@ -121,6 +133,9 @@ class CrossViewMatcher:
         self._min_inlier_ratio = min_inlier_ratio
         self._grid_rows = grid_rows
         self._grid_cols = grid_cols
+        self._clahe = (cv2.createCLAHE(clipLimit=clahe_clip,
+                                        tileGridSize=(clahe_tile, clahe_tile))
+                       if clahe else None)
 
     # ── Core matching ──────────────────────────────────────────────────────
 
@@ -135,6 +150,13 @@ class CrossViewMatcher:
         """
         g0 = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
         g1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+
+        # CLAHE: equalise local contrast before SIFT — essential for NIR
+        # scenes where bedding, fur, and arena structure have similar mean
+        # intensity but differ in local texture.
+        if self._clahe is not None:
+            g0 = self._clahe.apply(g0)
+            g1 = self._clahe.apply(g1)
 
         kp0, des0 = self._sift.detectAndCompute(g0, None)
         kp1, des1 = self._sift.detectAndCompute(g1, None)

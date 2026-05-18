@@ -205,6 +205,16 @@ def main():
     feat = ap.add_argument_group("Feature matching")
     feat.add_argument("--n-features", type=int, default=4000,
                       help="Max SIFT keypoints per frame (default: 4000)")
+    feat.add_argument("--clahe", action=argparse.BooleanOptionalAction,
+                      default=True,
+                      help="Apply CLAHE before SIFT detection (default: on). "
+                           "Strongly recommended for NIR/low-contrast arenas.")
+    feat.add_argument("--clahe-clip", type=float, default=2.0,
+                      metavar="CLIP",
+                      help="CLAHE clip limit (default 2.0; raise for very dark frames)")
+    feat.add_argument("--clahe-tile", type=int, default=8,
+                      metavar="N",
+                      help="CLAHE tile grid size NxN (default 8)")
     feat.add_argument("--ratio-thresh", type=float, default=0.72,
                       help="Lowe ratio test threshold (default: 0.72)")
     feat.add_argument("--ransac-thresh", type=float, default=1.5,
@@ -265,6 +275,9 @@ def main():
     t0 = time.time()
     matcher = CrossViewMatcher(
         n_features=args.n_features,
+        clahe=args.clahe,
+        clahe_clip=args.clahe_clip,
+        clahe_tile=args.clahe_tile,
         ratio_thresh=args.ratio_thresh,
         ransac_thresh=args.ransac_thresh,
         min_inliers=args.min_inliers,
