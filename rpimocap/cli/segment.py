@@ -85,6 +85,10 @@ def main() -> None:
                          "rpimocap-autocalib)")
     io.add_argument("--out",    required=True,
                     help="Output directory")
+    opt.add_argument("--no-roi-mask", action="store_true", default=False,
+                    help="Disable the automatic arena ROI mask computed from "
+                         "DLT projection matrices. Use if the mask clips "
+                         "the animal at the arena edges.")
     io.add_argument("--bayer-pattern", default="RGGB",
                     choices=["RGGB","BGGR","GRBG","GBRG"],
                     help="Bayer CFA pattern for raw TIFF stacks (default: RGGB)")
@@ -212,6 +216,7 @@ def main() -> None:
     from rpimocap.detection.segment import (
         BackgroundModel, ForegroundDetector,
         GeometricLabeller, EpipolarMatcher,
+        arena_roi_mask,
     )
     from rpimocap.detection.tracker import SegmentTracker
     from rpimocap.reconstruction.triangulate import (
@@ -322,6 +327,33 @@ def main() -> None:
         except Exception as e:
             print(f"  WARNING: alignment failed — {e}")
 
+    # ── Arena ROI masks ──────────────────────────────────────────────────────
+    # Project the 8 known arena corners through each DLT projection matrix
+    # to create a convex-hull mask that restricts foreground detection to
+    # the physical arena interior.  This eliminates the frame, cables,
+    # LED reflections, and bedding disturbance outside the arena.
+    _ARENA_CORNERS = np.array([
+        [-140, -215,   0], [ 140, -215,   0],
+        [ 140,  215,   0], [-140,  215,   0],
+        [-140, -215, 388], [ 140, -215, 388],
+        [ 140,  215, 388], [-140,  215, 388],
+    ], dtype=np.float64)
+
+    roi_mask0 = roi_mask1 = None
+    if not args.no_roi_mask:
+        P0_dlt = cal.get("dlt_P0", cal.get("P0", None))
+        P1_dlt = cal.get("dlt_P1", cal.get("P1", None))
+        if P0_dlt is not None and P1_dlt is not None:
+            roi_mask0 = arena_roi_mask(P0_dlt, _ARENA_CORNERS,
+                                       (vid_h, vid_w), pad_px=20)
+            roi_mask1 = arena_roi_mask(P1_dlt, _ARENA_CORNERS,
+                                       (vid_h, vid_w), pad_px=20)
+            print("  Arena ROI masks computed from DLT projection matrices")
+        else:
+            print("  WARNING: no DLT P matrices in calib — ROI mask disabled")
+    else:
+        print("  Arena ROI mask disabled (--no-roi-mask)")
+
     # ── Tracker ──────────────────────────────────────────────────────────────
     print("\n── Tracking ────────────────────────────────────────────────────")
     tracker = SegmentTracker(
@@ -342,7 +374,12 @@ def main() -> None:
         bilateral=args.bilateral,
         bilateral_d=args.bilateral_d,
         bilateral_sigma=args.bilateral_sigma,
+        roi_mask=roi_mask0,
         verbose=True)
+
+    # Register the cam1 ROI mask on the shared ForegroundDetector
+    if roi_mask1 is not None:
+        tracker._det.set_roi_mask(1, roi_mask1)
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     if args.diagnostics:

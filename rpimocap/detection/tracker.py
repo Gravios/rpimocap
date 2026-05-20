@@ -408,6 +408,7 @@ class SegmentTracker:
         bilateral_sigma:   float          = 50.0,
         centroid_only:     bool           = False,
         verbose:           bool           = True,
+        roi_mask:          "Optional[np.ndarray]" = None,
     ):
         self._matcher = matcher
         self._verbose = verbose
@@ -418,7 +419,8 @@ class SegmentTracker:
             clahe=clahe, clahe_clip=clahe_clip, clahe_tile=clahe_tile,
             use_green_channel=use_green_channel,
             bilateral=bilateral, bilateral_d=bilateral_d,
-            bilateral_sigma=bilateral_sigma)
+            bilateral_sigma=bilateral_sigma,
+            roi_mask=roi_mask)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
         # Try SAM2 (used as mask refiner on top of optical flow)

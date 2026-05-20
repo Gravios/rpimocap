@@ -292,6 +292,51 @@ class BackgroundModel:
 #  Foreground detector                                                         #
 # --------------------------------------------------------------------------- #
 
+def arena_roi_mask(P: np.ndarray,
+                   arena_pts: np.ndarray,
+                   image_shape: tuple,
+                   pad_px: int = 20) -> np.ndarray:
+    """Compute a filled convex-hull mask of the arena for one camera.
+
+    Projects the 8 known 3D arena corners through the DLT projection matrix
+    ``P`` (3×4) and fills the convex hull of the resulting 2D points.
+    Pixels outside the hull are set to 0; pixels inside are 255.
+
+    Parameters
+    ----------
+    P           : 3×4 DLT camera matrix (maps arena mm → pixel homogeneous).
+    arena_pts   : (N, 3) array of 3D corner positions in arena mm coordinates.
+    image_shape : (height, width[, channels]) — output mask has this shape.
+    pad_px      : expand the hull outward by this many pixels to avoid clipping
+                  the animal when it presses against the arena wall.
+
+    Returns
+    -------
+    mask : uint8 ndarray, shape (height, width), values 0 or 255.
+    """
+    h, w = image_shape[:2]
+    px_pts = []
+    for pt in arena_pts:
+        Xh = np.append(pt, 1.0)
+        p  = P @ Xh
+        u, v = p[0] / p[2], p[1] / p[2]
+        px_pts.append([u, v])
+
+    pts  = np.array(px_pts, dtype=np.float32)
+    hull = cv2.convexHull(pts).reshape(-1, 1, 2)
+
+    # Expand hull outward by pad_px using the centroid
+    centroid = pts.mean(axis=0)
+    dirs     = hull[:, 0, :] - centroid          # vectors from centroid to hull
+    norms    = np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-6
+    hull_pad = hull + (dirs / norms * pad_px).reshape(-1, 1, 2)
+    hull_pad = hull_pad.astype(np.int32)
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [hull_pad], 255)
+    return mask
+
+
 class ForegroundDetector:
     """Subtract background and return binary foreground masks.
 
@@ -325,6 +370,12 @@ class ForegroundDetector:
     bilateral         : apply bilateral filter instead of Gaussian blur
     bilateral_d       : bilateral filter diameter (neighbourhood size)
     bilateral_sigma   : bilateral sigma for colour and spatial
+    roi_mask          : uint8 binary mask (255 = valid, 0 = ignore).
+                        Applied to the thresholded diff before connected-
+                        components.  Use ``arena_roi_mask()`` to compute
+                        one automatically from the DLT projection matrices.
+                        Eliminates the arena frame, cables, and everything
+                        outside the physical arena interior.
     """
 
     def __init__(
@@ -341,6 +392,7 @@ class ForegroundDetector:
         bilateral:         bool  = False,
         bilateral_d:       int   = 9,
         bilateral_sigma:   float = 50.0,
+        roi_mask:          Optional[np.ndarray] = None,
     ):
         self.bg                = background
         self.threshold         = threshold
@@ -352,12 +404,21 @@ class ForegroundDetector:
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
+        # Store as per-camera dict so one detector can serve both cams.
+        # roi_mask (cam-0) is passed for backward compat.
+        self._roi_masks: dict = {0: roi_mask, 1: None}
 
         # CLAHE instance (shared across frames for efficiency)
         self._clahe = (cv2.createCLAHE(
                            clipLimit=clahe_clip,
                            tileGridSize=(clahe_tile, clahe_tile))
                        if clahe else None)
+
+    # ------------------------------------------------------------------ #
+
+    def set_roi_mask(self, cam: int, mask: "Optional[np.ndarray]") -> None:
+        """Set or replace the ROI mask for one camera (0 or 1)."""
+        self._roi_masks[cam] = mask
 
     # ------------------------------------------------------------------ #
 
@@ -434,6 +495,13 @@ class ForegroundDetector:
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)
+
+        # Arena ROI mask — zero out everything outside the projected arena
+        # convex hull.  Eliminates the frame, cables, LED reflections, and
+        # any foreground outside the physical recording volume.
+        _mask = self._roi_masks.get(cam)
+        if _mask is not None:
+            binary = cv2.bitwise_and(binary, _mask)
 
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary, connectivity=8)
