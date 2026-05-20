@@ -414,13 +414,15 @@ class SegmentTracker:
         verbose:           bool           = True,
         roi_mask:          "Optional[np.ndarray]" = None,
         wall_weight:       "Optional[np.ndarray]" = None,
+        cable_erosion_px:  int = 0,
         texture_suppress:  bool  = False,
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
         texture_n_orient:  int   = 4,
     ):
-        self._matcher = matcher
-        self._verbose = verbose
+        self._matcher        = matcher
+        self._verbose        = verbose
+        self._cable_erosion  = cable_erosion_px
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -563,13 +565,17 @@ class SegmentTracker:
         refined = []
         for r0, r1 in matches:
             if fg0 is not None:
-                hx0, hy0 = self._det.hull_centroid(fg0, r0.cx, r0.cy)
+                hx0, hy0 = self._det.hull_centroid(
+                    fg0, r0.cx, r0.cy,
+                    cable_erosion_px=self._cable_erosion)
                 r0 = r0.__class__(
                     label=r0.label, cx=hx0, cy=hy0,
                     area_px=r0.area_px, confidence=r0.confidence,
                     mask=r0.mask)
             if fg1 is not None:
-                hx1, hy1 = self._det.hull_centroid(fg1, r1.cx, r1.cy)
+                hx1, hy1 = self._det.hull_centroid(
+                    fg1, r1.cx, r1.cy,
+                    cable_erosion_px=self._cable_erosion)
                 r1 = r1.__class__(
                     label=r1.label, cx=hx1, cy=hy1,
                     area_px=r1.area_px, confidence=r1.confidence,

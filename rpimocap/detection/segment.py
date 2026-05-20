@@ -743,53 +743,83 @@ class ForegroundDetector:
             result: ForegroundResult,
             cx: float,
             cy: float,
+            cable_erosion_px: int = 0,
     ) -> tuple[float, float]:
-        """Refine a centroid by re-computing the convex hull of its blob.
+        """Refine a centroid, optionally stripping an attached cable first.
 
-        After epipolar matching has identified which blob is the animal
-        (given by its connected-component centroid ``cx``, ``cy``), this
-        method:
+        Pipeline
+        --------
+        1. Look up which connected-component label owns (cx, cy).
+        2. Extract that blob as a binary mask.
+        3. **Cable erosion** (if cable_erosion_px > 0):
+               Erode the blob with an ellipse kernel of radius
+               cable_erosion_px.  A headstage cable is typically 3–8 px
+               wide; the rat body is 60–120 px wide.  Choosing a radius
+               between those two values disconnects the cable while
+               leaving the body intact.  The largest remaining connected
+               component after erosion is the body.
+        4. Fit an ellipse to the (possibly eroded) body pixels.
+               The ellipse centre sits at the geometric body centre
+               regardless of cable direction.
+        5. Fall back to convex-hull centroid, then pixel mean.
 
-          1. Looks up the connected-component label at (cx, cy) in
-             ``result.label_map``.
-          2. Extracts all pixels belonging to that label.
-          3. Computes their convex hull.
-          4. Returns the centroid of the hull polygon.
+        Parameters
+        ----------
+        result           : ForegroundResult from detect().
+        cx, cy           : Connected-component centroid of the selected blob.
+        cable_erosion_px : Erosion radius in pixels (0 = skip step 3).
+                           Good starting point: half the visible cable
+                           width in pixels.  Typically 8–15 px for a
+                           chronic headstage cable at 1–2 m camera distance.
 
-        This gives a more stable estimate than the raw cc centroid, which
-        can be pulled toward the bedding boundary of the blob.  If
-        ``label_map`` is unavailable or the lookup fails the original
-        (cx, cy) is returned unchanged.
+        Returns
+        -------
+        (cx_refined, cy_refined) — falls back to (cx, cy) on any failure.
         """
         if result.label_map is None:
             return cx, cy
 
+        # ── Step 1: find the blob label ───────────────────────────────
         ix, iy = int(round(cx)), int(round(cy))
         h, w   = result.label_map.shape
         ix     = max(0, min(w - 1, ix))
         iy     = max(0, min(h - 1, iy))
         lbl    = result.label_map[iy, ix]
         if lbl == 0:
-            # centroid landed in background — find nearest labelled pixel
             ys, xs = np.where(result.label_map > 0)
             if len(xs) == 0:
                 return cx, cy
-            dists = (xs - ix) ** 2 + (ys - iy) ** 2
-            nearest = np.argmin(dists)
-            lbl = result.label_map[ys[nearest], xs[nearest]]
+            dists   = (xs - ix) ** 2 + (ys - iy) ** 2
+            lbl     = result.label_map[ys[np.argmin(dists)], xs[np.argmin(dists)]]
 
         ys, xs = np.where(result.label_map == lbl)
         if len(xs) < 3:
             return cx, cy
 
-        pts  = np.column_stack([xs, ys]).astype(np.float32)
+        # ── Step 2: build binary blob mask ────────────────────────────
+        blob_mask = (result.label_map == lbl).astype(np.uint8) * 255
 
-        # Prefer ellipse-fit centroid over hull centroid: fitting an
-        # ellipse to the blob pixels gives a centre at the body's
-        # geometric middle, largely unaffected by a thin cable
-        # appendage (which contributes few pixels at one extreme).
-        # Fall back to hull-polygon centroid if fitEllipse requires
-        # at least 5 points and fails for tiny blobs.
+        # ── Step 3: cable erosion ─────────────────────────────────────
+        if cable_erosion_px > 0:
+            r   = int(cable_erosion_px)
+            k   = cv2.getStructuringElement(
+                      cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+            eroded = cv2.erode(blob_mask, k, iterations=1)
+
+            # Largest connected component of the eroded mask = body
+            n_e, lbl_e, stats_e, cent_e = cv2.connectedComponentsWithStats(
+                eroded, connectivity=8)
+            if n_e > 1:
+                # component 0 is background; pick largest foreground one
+                body_lbl = 1 + np.argmax(
+                    stats_e[1:, cv2.CC_STAT_AREA])
+                ys, xs = np.where(lbl_e == body_lbl)
+                if len(xs) < 3:
+                    # erosion was too aggressive — fall back to full blob
+                    ys, xs = np.where(blob_mask > 0)
+
+        # ── Step 4: ellipse-fit centroid ──────────────────────────────
+        pts = np.column_stack([xs, ys]).astype(np.float32)
         if len(pts) >= 5:
             try:
                 ellipse = cv2.fitEllipse(pts)
@@ -797,6 +827,7 @@ class ForegroundDetector:
             except cv2.error:
                 pass
 
+        # ── Step 5: hull centroid fallback ────────────────────────────
         hull = cv2.convexHull(pts)
         M    = cv2.moments(hull)
         if M['m00'] < 1e-6:

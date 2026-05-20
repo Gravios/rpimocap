@@ -128,6 +128,16 @@ def main() -> None:
                     help="Maximum blob area px² (default: unlimited). "
                          "Discard blobs larger than this — useful for "
                          "rejecting large bedding-activation artefacts.")
+    det.add_argument("--cable-erosion", type=int, default=0,
+                    metavar="PX",
+                    help="Erode the selected rat blob by this radius "
+                         "(px) before computing the centroid. "
+                         "Disconnects a thin headstage cable "
+                         "(typically 3–8 px wide) from the body "
+                         "(60–120 px wide). The largest remaining "
+                         "component after erosion is used as the body. "
+                         "Good starting point: 10–15 px. "
+                         "0 = disabled (default).")
     det.add_argument("--min-solidity", type=float, default=0.0,
                     metavar="S",
                     help="Minimum blob solidity = area/hull_area [0–1] "
@@ -424,6 +434,7 @@ def main() -> None:
         bilateral_sigma=args.bilateral_sigma,
         roi_mask=roi_mask0,
         wall_weight=wall_weight0,
+        cable_erosion_px=args.cable_erosion,
         texture_suppress=args.texture_suppress,
         texture_lambdas=tuple(args.texture_lambdas),
         texture_alpha=args.texture_alpha,
