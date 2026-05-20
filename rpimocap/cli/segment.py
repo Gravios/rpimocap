@@ -122,13 +122,28 @@ def main() -> None:
     det.add_argument("--threshold", type=float, default=25.0,
                      help="Foreground detection threshold 0-255 "
                           "(default: 25)")
-    det.add_argument("--min-area", type=int, default=500,
-                     help="Minimum blob area in pixels (default: 500)")
+    det.add_argument("--min-area", type=int, default=1500,
+                    metavar="PX2",
+                    help="Minimum blob area px² (default 1500). "
+                         "Plexiglas wall reflections are typically "
+                         "< 500 px²; rat body is 3000–20000 px².")
+    det.add_argument("--max-area", type=int, default=None,
+                    metavar="PX2",
+                    help="Maximum blob area px² (default: unlimited). "
+                         "Discard blobs larger than this — useful for "
+                         "rejecting large bedding-activation artefacts.")
     det.add_argument("--morph-k", type=int, default=7,
                      help="Morphological kernel size (default: 7)")
     det.add_argument("--max-epipolar-px", type=float, default=8.0,
                      help="Maximum epipolar line distance for stereo "
                           "matching (default: 8 px)")
+    det.add_argument("--wall-decay", type=float, default=80.0,
+                    metavar="PX",
+                    help="Wall distance weight decay in pixels (default 80). "
+                         "At this distance from the projected arena wall, "
+                         "foreground diff is weighted to ~0.63 of its value. "
+                         "Smaller = sharper attenuation at walls. "
+                         "Set to 0 to disable wall weighting.")
     det.add_argument("--texture-suppress", action="store_true", default=False,
                     help="Gabor filter bank bedding suppression. "
                          "Attenuates foreground pixels whose current Gabor "
@@ -355,6 +370,7 @@ def main() -> None:
     ], dtype=np.float64)
 
     roi_mask0 = roi_mask1 = None
+    wall_weight0 = wall_weight1 = None
     if not args.no_roi_mask:
         P0_dlt = cal.get("dlt_P0", cal.get("P0", None))
         P1_dlt = cal.get("dlt_P1", cal.get("P1", None))
@@ -364,6 +380,15 @@ def main() -> None:
             roi_mask1 = arena_roi_mask(P1_dlt, _ARENA_CORNERS,
                                        (vid_h, vid_w), pad_px=20)
             print("  Arena ROI masks computed from DLT projection matrices")
+            if args.wall_decay > 0:
+                from rpimocap.detection.segment import arena_wall_weight
+                wall_weight0 = arena_wall_weight(P0_dlt, _ARENA_CORNERS,
+                                                 (vid_h, vid_w),
+                                                 decay_px=args.wall_decay)
+                wall_weight1 = arena_wall_weight(P1_dlt, _ARENA_CORNERS,
+                                                 (vid_h, vid_w),
+                                                 decay_px=args.wall_decay)
+                print(f"  Wall weight maps (decay={args.wall_decay:.0f}px) computed")
         else:
             print("  WARNING: no DLT P matrices in calib — ROI mask disabled")
     else:
@@ -379,6 +404,7 @@ def main() -> None:
         device=args.device,
         threshold=args.threshold,
         min_area_px=args.min_area,
+        max_area_px=args.max_area,
         morph_k=args.morph_k,
         redetect_every=args.redetect_every,
         centroid_only=args.centroid_only,
@@ -390,14 +416,17 @@ def main() -> None:
         bilateral_d=args.bilateral_d,
         bilateral_sigma=args.bilateral_sigma,
         roi_mask=roi_mask0,
+        wall_weight=wall_weight0,
         texture_suppress=args.texture_suppress,
         texture_lambdas=tuple(args.texture_lambdas),
         texture_alpha=args.texture_alpha,
         verbose=True)
 
-    # Register the cam1 ROI mask on the shared ForegroundDetector
+    # Register cam1 masks on the shared ForegroundDetector
     if roi_mask1 is not None:
         tracker._det.set_roi_mask(1, roi_mask1)
+    if wall_weight1 is not None:
+        tracker._det.set_wall_weight(1, wall_weight1)
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     if args.diagnostics:

@@ -118,12 +118,17 @@ class ForegroundResult:
     blobs       : list of per-blob (stats, centroid) from connectedComponentsWithStats
     frame_gray  : (H, W) uint8 grayscale frame used for detection
     n_blobs     : number of blobs above the minimum area threshold
+    label_map   : (H, W) int32 connected-component label image.
+                  Pixel value == blob index into ``blobs`` + 1
+                  (0 = background).  Used by hull_centroid() to extract
+                  the pixels of a specific blob after epipolar selection.
     """
 
     mask:       np.ndarray
     blobs:      list
     frame_gray: np.ndarray
     n_blobs:    int
+    label_map:  Optional[np.ndarray] = field(default=None, repr=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +342,50 @@ def arena_roi_mask(P: np.ndarray,
     return mask
 
 
+def arena_wall_weight(
+        P: np.ndarray,
+        arena_pts: np.ndarray,
+        image_shape: tuple,
+        decay_px: float = 80.0,
+) -> np.ndarray:
+    """Per-pixel weight map that decreases toward the projected arena walls.
+
+    Uses ``cv2.distanceTransform`` on the arena convex-hull mask to compute
+    each pixel's Euclidean distance to the nearest wall edge, then maps that
+    distance through an exponential decay:
+
+        weight(x,y) = 1 - exp(-dist(x,y) / decay_px)
+
+    Pixels at the wall get weight ≈ 0; pixels at the arena centre get
+    weight ≈ 1.  Multiplying the foreground diff by this map before
+    thresholding means wall-adjacent pixels (plexiglas reflections, edge
+    artefacts) need a proportionally larger intensity change to be detected
+    as foreground.
+
+    Parameters
+    ----------
+    P          : 3×4 DLT camera matrix.
+    arena_pts  : (N, 3) 3D corner positions in arena mm coordinates.
+    image_shape: (height, width[, channels]).
+    decay_px   : Distance (px) at which the weight reaches ~0.63.
+                 Smaller = sharper drop-off at the walls.
+
+    Returns
+    -------
+    weight : float32 ndarray in [0, 1], shape (height, width).
+    """
+    # Build the binary arena mask (0/255)
+    mask = arena_roi_mask(P, arena_pts, image_shape, pad_px=0)
+
+    # Distance transform: for every *inside* pixel, distance to nearest
+    # background pixel (= nearest wall edge).
+    dist = cv2.distanceTransform(mask, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+
+    # Soft exponential decay so there is no hard edge between high/low weight
+    weight = 1.0 - np.exp(-dist / max(decay_px, 1.0))
+    return weight.astype(np.float32)
+
+
 def gabor_bedding_energy(
         image: np.ndarray,
         lambdas: tuple = (8, 12, 16),
@@ -423,7 +472,12 @@ class ForegroundDetector:
     ----------
     background        : BackgroundModel
     threshold         : absolute pixel difference threshold (0–255)
-    min_area_px       : discard blobs smaller than this (noise filter)
+    min_area_px       : discard blobs smaller than this (noise filter).
+                        Default 500 px².  Raise to ~1500 to eliminate
+                        plexiglas wall reflections (typically < 500 px²).
+    max_area_px       : discard blobs larger than this.  Use to reject
+                        large bedding-activation artefacts when the whole
+                        floor lights up.  None = no upper limit.
     morph_k           : morphological kernel size for opening/closing
     blur_k            : Gaussian blur kernel (0 = skip; overridden by bilateral)
     clahe             : apply CLAHE before background subtraction
@@ -461,6 +515,7 @@ class ForegroundDetector:
         background:        BackgroundModel,
         threshold:         float = 25.0,
         min_area_px:       int   = 500,
+        max_area_px:       Optional[int] = None,
         morph_k:           int   = 7,
         blur_k:            int   = 5,
         clahe:             bool  = False,
@@ -471,6 +526,7 @@ class ForegroundDetector:
         bilateral_d:       int   = 9,
         bilateral_sigma:   float = 50.0,
         roi_mask:          Optional[np.ndarray] = None,
+        wall_weight:       Optional[np.ndarray] = None,
         texture_suppress:  bool  = False,
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
@@ -479,6 +535,7 @@ class ForegroundDetector:
         self.bg                = background
         self.threshold         = threshold
         self.min_area_px       = min_area_px
+        self.max_area_px       = max_area_px
         self.use_green_channel = use_green_channel
         self.bilateral         = bilateral
         self.bilateral_d       = bilateral_d
@@ -488,7 +545,8 @@ class ForegroundDetector:
         self._blur_k = blur_k | 1
         # Store as per-camera dict so one detector can serve both cams.
         # roi_mask (cam-0) is passed for backward compat.
-        self._roi_masks: dict = {0: roi_mask, 1: None}
+        self._roi_masks:   dict = {0: roi_mask, 1: None}
+        self._wall_weights: dict = {0: wall_weight, 1: None}
 
         # Gabor bedding-texture suppression
         # Pre-compute the background's Gabor energy once at init time.
@@ -530,6 +588,11 @@ class ForegroundDetector:
     def set_roi_mask(self, cam: int, mask: "Optional[np.ndarray]") -> None:
         """Set or replace the ROI mask for one camera (0 or 1)."""
         self._roi_masks[cam] = mask
+
+    def set_wall_weight(self, cam: int,
+                        weight: "Optional[np.ndarray]") -> None:
+        """Set or replace the wall distance weight map for one camera."""
+        self._wall_weights[cam] = weight
 
     # ------------------------------------------------------------------ #
 
@@ -603,6 +666,16 @@ class ForegroundDetector:
             diff_u8 = np.clip(diff, 0, 255).astype(np.uint8)
             diff    = self._clahe.apply(diff_u8).astype(np.float32)
 
+        # ── Wall distance down-weighting ────────────────────────────────
+        # Pixels near the projected arena walls are softly attenuated in
+        # the diff image before thresholding.  This means plexiglas
+        # reflections and edge artefacts need a proportionally larger
+        # intensity change to be flagged as foreground, without creating
+        # a hard binary cutoff at the wall.
+        _ww = self._wall_weights.get(cam)
+        if _ww is not None:
+            diff = diff * _ww
+
         # ── Gabor texture suppression ─────────────────────────────────
         # Where the current frame has high Gabor energy at bedding scales
         # (fibrous texture → probably disturbed bedding, not animal body)
@@ -637,14 +710,71 @@ class ForegroundDetector:
 
         blobs = []
         for i in range(1, n):
-            if stats[i, cv2.CC_STAT_AREA] >= self.min_area_px:
-                blobs.append((stats[i], centroids[i]))
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < self.min_area_px:
+                continue
+            if self.max_area_px is not None and area > self.max_area_px:
+                continue
+            blobs.append((stats[i], centroids[i]))
 
         return ForegroundResult(
             mask=binary,
             blobs=blobs,
             frame_gray=gray.astype(np.uint8),
-            n_blobs=len(blobs))
+            n_blobs=len(blobs),
+            label_map=labels)
+
+    def hull_centroid(
+            self,
+            result: ForegroundResult,
+            cx: float,
+            cy: float,
+    ) -> tuple[float, float]:
+        """Refine a centroid by re-computing the convex hull of its blob.
+
+        After epipolar matching has identified which blob is the animal
+        (given by its connected-component centroid ``cx``, ``cy``), this
+        method:
+
+          1. Looks up the connected-component label at (cx, cy) in
+             ``result.label_map``.
+          2. Extracts all pixels belonging to that label.
+          3. Computes their convex hull.
+          4. Returns the centroid of the hull polygon.
+
+        This gives a more stable estimate than the raw cc centroid, which
+        can be pulled toward the bedding boundary of the blob.  If
+        ``label_map`` is unavailable or the lookup fails the original
+        (cx, cy) is returned unchanged.
+        """
+        if result.label_map is None:
+            return cx, cy
+
+        ix, iy = int(round(cx)), int(round(cy))
+        h, w   = result.label_map.shape
+        ix     = max(0, min(w - 1, ix))
+        iy     = max(0, min(h - 1, iy))
+        lbl    = result.label_map[iy, ix]
+        if lbl == 0:
+            # centroid landed in background — find nearest labelled pixel
+            ys, xs = np.where(result.label_map > 0)
+            if len(xs) == 0:
+                return cx, cy
+            dists = (xs - ix) ** 2 + (ys - iy) ** 2
+            nearest = np.argmin(dists)
+            lbl = result.label_map[ys[nearest], xs[nearest]]
+
+        ys, xs = np.where(result.label_map == lbl)
+        if len(xs) < 3:
+            return cx, cy
+
+        pts  = np.column_stack([xs, ys]).astype(np.float32)
+        hull = cv2.convexHull(pts)
+        # Centroid of the hull polygon via moments
+        M    = cv2.moments(hull)
+        if M['m00'] < 1e-6:
+            return float(pts[:, 0].mean()), float(pts[:, 1].mean())
+        return M['m10'] / M['m00'], M['m01'] / M['m00']
 
     def largest_blob_mask(self, result: ForegroundResult) -> Optional[np.ndarray]:
         """Return a boolean mask for the largest detected blob, or None."""

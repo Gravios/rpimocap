@@ -134,6 +134,7 @@ class OpticalFlowTracker:
     ):
         self._det            = detector
         self._lbl            = labeller
+        self._last_fg        = None   # ForegroundResult from last detect()
         self._min_conf       = min_confidence
         self._min_pts        = min_points
         self._redetect_every = redetect_every
@@ -160,6 +161,7 @@ class OpticalFlowTracker:
 
         if need_detect:
             fg = self._det.detect(frame, cam)
+            self._last_fg = fg          # expose for post-match re-hulling
             regions = self._lbl.label(fg)
             if regions:
                 # If we have labels from a previous detection, try to
@@ -397,6 +399,7 @@ class SegmentTracker:
         device:            str            = "cuda",
         threshold:         float          = 25.0,
         min_area_px:       int            = 500,
+        max_area_px:       "Optional[int]" = None,
         morph_k:           int            = 7,
         redetect_every:    int            = 60,
         clahe:             bool           = False,
@@ -409,6 +412,7 @@ class SegmentTracker:
         centroid_only:     bool           = False,
         verbose:           bool           = True,
         roi_mask:          "Optional[np.ndarray]" = None,
+        wall_weight:       "Optional[np.ndarray]" = None,
         texture_suppress:  bool  = False,
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
@@ -418,13 +422,15 @@ class SegmentTracker:
         self._verbose = verbose
 
         self._det  = ForegroundDetector(
-            background, threshold=threshold, min_area_px=min_area_px,
+            background, threshold=threshold,
+            min_area_px=min_area_px, max_area_px=max_area_px,
             morph_k=morph_k,
             clahe=clahe, clahe_clip=clahe_clip, clahe_tile=clahe_tile,
             use_green_channel=use_green_channel,
             bilateral=bilateral, bilateral_d=bilateral_d,
             bilateral_sigma=bilateral_sigma,
             roi_mask=roi_mask,
+            wall_weight=wall_weight,
             texture_suppress=texture_suppress,
             texture_lambdas=texture_lambdas,
             texture_alpha=texture_alpha,
@@ -545,6 +551,30 @@ class SegmentTracker:
                 regions1 = self._sam2.segment(f1, regions1)
 
         matches  = self._matcher.match(regions0, regions1)
+
+        # Re-hull: for each matched pair, replace the raw connected-
+        # component centroid with the convex-hull centroid of the
+        # selected blob.  The hull centroid is more stable because it
+        # is not pulled toward bedding pixels at the blob boundary.
+        fg0 = getattr(self._of0, '_last_fg', None)
+        fg1 = getattr(self._of1, '_last_fg', None)
+        refined = []
+        for r0, r1 in matches:
+            if fg0 is not None:
+                hx0, hy0 = self._det.hull_centroid(fg0, r0.cx, r0.cy)
+                r0 = r0.__class__(
+                    label=r0.label, cx=hx0, cy=hy0,
+                    area_px=r0.area_px, confidence=r0.confidence,
+                    mask=r0.mask)
+            if fg1 is not None:
+                hx1, hy1 = self._det.hull_centroid(fg1, r1.cx, r1.cy)
+                r1 = r1.__class__(
+                    label=r1.label, cx=hx1, cy=hy1,
+                    area_px=r1.area_px, confidence=r1.confidence,
+                    mask=r1.mask)
+            refined.append((r0, r1))
+        matches = refined
+
         xyz_dict = self._matcher.triangulate(matches, bounds=bounds)
 
         # Compute reprojection errors
