@@ -516,6 +516,7 @@ class ForegroundDetector:
         threshold:         float = 25.0,
         min_area_px:       int   = 500,
         max_area_px:       Optional[int] = None,
+        min_solidity:      float = 0.0,
         morph_k:           int   = 7,
         blur_k:            int   = 5,
         clahe:             bool  = False,
@@ -536,6 +537,7 @@ class ForegroundDetector:
         self.threshold         = threshold
         self.min_area_px       = min_area_px
         self.max_area_px       = max_area_px
+        self.min_solidity      = min_solidity
         self.use_green_channel = use_green_channel
         self.bilateral         = bilateral
         self.bilateral_d       = bilateral_d
@@ -715,6 +717,18 @@ class ForegroundDetector:
                 continue
             if self.max_area_px is not None and area > self.max_area_px:
                 continue
+            # Solidity filter: reject blobs that are too non-convex
+            # (e.g. rat body + cable creates a blob with large hull
+            # area relative to the actual pixel area).
+            if self.min_solidity > 0:
+                blob_mask = (labels == i).astype(np.uint8) * 255
+                cnts, _ = cv2.findContours(
+                    blob_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if cnts:
+                    hull_area = cv2.contourArea(cv2.convexHull(cnts[0]))
+                    solidity  = area / (hull_area + 1e-6)
+                    if solidity < self.min_solidity:
+                        continue
             blobs.append((stats[i], centroids[i]))
 
         return ForegroundResult(
@@ -769,8 +783,21 @@ class ForegroundDetector:
             return cx, cy
 
         pts  = np.column_stack([xs, ys]).astype(np.float32)
+
+        # Prefer ellipse-fit centroid over hull centroid: fitting an
+        # ellipse to the blob pixels gives a centre at the body's
+        # geometric middle, largely unaffected by a thin cable
+        # appendage (which contributes few pixels at one extreme).
+        # Fall back to hull-polygon centroid if fitEllipse requires
+        # at least 5 points and fails for tiny blobs.
+        if len(pts) >= 5:
+            try:
+                ellipse = cv2.fitEllipse(pts)
+                return float(ellipse[0][0]), float(ellipse[0][1])
+            except cv2.error:
+                pass
+
         hull = cv2.convexHull(pts)
-        # Centroid of the hull polygon via moments
         M    = cv2.moments(hull)
         if M['m00'] < 1e-6:
             return float(pts[:, 0].mean()), float(pts[:, 1].mean())

@@ -85,10 +85,6 @@ def main() -> None:
                          "rpimocap-autocalib)")
     io.add_argument("--out",    required=True,
                     help="Output directory")
-    opt.add_argument("--no-roi-mask", action="store_true", default=False,
-                    help="Disable the automatic arena ROI mask computed from "
-                         "DLT projection matrices. Use if the mask clips "
-                         "the animal at the arena edges.")
     io.add_argument("--bayer-pattern", default="RGGB",
                     choices=["RGGB","BGGR","GRBG","GBRG"],
                     help="Bayer CFA pattern for raw TIFF stacks (default: RGGB)")
@@ -132,6 +128,13 @@ def main() -> None:
                     help="Maximum blob area px² (default: unlimited). "
                          "Discard blobs larger than this — useful for "
                          "rejecting large bedding-activation artefacts.")
+    det.add_argument("--min-solidity", type=float, default=0.0,
+                    metavar="S",
+                    help="Minimum blob solidity = area/hull_area [0–1] "
+                         "(default 0 = disabled). A compact rat body is "
+                         "~0.6–0.8; a rat+cable blob drops to ~0.3–0.5. "
+                         "Set ~0.45 to keep rat body and reject cable-only "
+                         "or reflection blobs.")
     det.add_argument("--morph-k", type=int, default=7,
                      help="Morphological kernel size (default: 7)")
     det.add_argument("--max-epipolar-px", type=float, default=8.0,
@@ -159,6 +162,9 @@ def main() -> None:
                     default=[8, 12, 16], metavar="PX",
                     help="Gabor wavelengths in px targeting the bedding "
                          "fibre scale (default: 8 12 16 px).")
+    det.add_argument("--no-roi-mask", action="store_true", default=False,
+                    help="Disable the automatic arena ROI mask. "
+                         "Use if the mask clips the animal at the walls.")
     det.add_argument("--centroid-only", action="store_true",
                      help="Track only the animal centroid (label: 'animal') "
                           "instead of labelling body parts. More robust when "
@@ -405,6 +411,7 @@ def main() -> None:
         threshold=args.threshold,
         min_area_px=args.min_area,
         max_area_px=args.max_area,
+        min_solidity=args.min_solidity,
         morph_k=args.morph_k,
         redetect_every=args.redetect_every,
         centroid_only=args.centroid_only,

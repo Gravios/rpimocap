@@ -400,6 +400,7 @@ class SegmentTracker:
         threshold:         float          = 25.0,
         min_area_px:       int            = 500,
         max_area_px:       "Optional[int]" = None,
+        min_solidity:      float = 0.0,
         morph_k:           int            = 7,
         redetect_every:    int            = 60,
         clahe:             bool           = False,
@@ -424,6 +425,7 @@ class SegmentTracker:
         self._det  = ForegroundDetector(
             background, threshold=threshold,
             min_area_px=min_area_px, max_area_px=max_area_px,
+            min_solidity=min_solidity,
             morph_k=morph_k,
             clahe=clahe, clahe_clip=clahe_clip, clahe_tile=clahe_tile,
             use_green_channel=use_green_channel,
