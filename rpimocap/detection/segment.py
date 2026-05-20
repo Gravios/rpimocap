@@ -337,6 +337,69 @@ def arena_roi_mask(P: np.ndarray,
     return mask
 
 
+def gabor_bedding_energy(
+        image: np.ndarray,
+        lambdas: tuple = (8, 12, 16),
+        n_orientations: int = 4,
+        sigma_factor: float = 1.5,
+        ksize: int = 31,
+) -> np.ndarray:
+    """Compute the per-pixel Gabor energy at bedding-characteristic spatial scales.
+
+    Runs a bank of Gabor filters at several wavelengths (spatial frequencies)
+    and orientations, then returns the max response across the full bank.
+    This gives a per-pixel measure of how much "bedding-like texture" is
+    present at each location.
+
+    Parameters
+    ----------
+    image         : uint8 or float32 single-channel image.
+    lambdas       : Gabor wavelengths in pixels.  Choose to match the bedding
+                    fibre scale — for typical NIR arena images with IMX477 at
+                    2-4m distance, fibres appear at roughly 8–16 px.
+    n_orientations: number of evenly-spaced orientations (default 4 → 0°,
+                    45°, 90°, 135°).  Bedding is isotropic so 4 is enough.
+    sigma_factor  : sigma = sigma_factor × lambda (controls bandwidth).
+    ksize         : kernel size (must be odd; larger = better low-freq resp).
+
+    Returns
+    -------
+    energy : float32 ndarray, same shape as ``image``, values ≥ 0.
+             High values indicate bedding-like texture.
+    """
+    if image.dtype != np.float32:
+        img = image.astype(np.float32)
+    else:
+        img = image
+
+    energy = np.zeros(img.shape[:2], dtype=np.float32)
+    thetas = [np.pi * i / n_orientations for i in range(n_orientations)]
+
+    for lam in lambdas:
+        sigma = sigma_factor * lam
+        for theta in thetas:
+            # Real and imaginary Gabor kernels (quadrature pair)
+            kr = cv2.getGaborKernel(
+                (ksize, ksize), sigma=sigma, theta=theta,
+                lambd=float(lam), gamma=0.5, psi=0.0, ktype=cv2.CV_32F)
+            ki = cv2.getGaborKernel(
+                (ksize, ksize), sigma=sigma, theta=theta,
+                lambd=float(lam), gamma=0.5, psi=np.pi / 2, ktype=cv2.CV_32F)
+            # Zero-mean the kernels: OpenCV getGaborKernel has non-zero DC
+            # component which causes the filter to respond to mean intensity
+            # (making a flat 128-valued patch look textured). Subtracting the
+            # mean confines the response to local texture only.
+            kr -= kr.mean()
+            ki -= ki.mean()
+
+            resp_r = cv2.filter2D(img, cv2.CV_32F, kr)
+            resp_i = cv2.filter2D(img, cv2.CV_32F, ki)
+            amp    = np.sqrt(resp_r ** 2 + resp_i ** 2)
+            np.maximum(energy, amp, out=energy)
+
+    return energy
+
+
 class ForegroundDetector:
     """Subtract background and return binary foreground masks.
 
@@ -376,6 +439,21 @@ class ForegroundDetector:
                         one automatically from the DLT projection matrices.
                         Eliminates the arena frame, cables, and everything
                         outside the physical arena interior.
+    texture_suppress  : Enable Gabor-based bedding texture suppression.
+                        Pre-computes the Gabor energy of the background at
+                        bedding-characteristic spatial scales; in each frame
+                        pixels whose foreground diff is high BUT whose
+                        current Gabor energy is also high (bedding-like
+                        texture → disturbed bedding) are weighted down before
+                        thresholding.  This discriminates the animal body
+                        (smooth dark blob → low Gabor energy) from displaced
+                        bedding (same fibrous texture → high Gabor energy).
+    texture_lambdas   : Gabor wavelengths (px) targeting the bedding scale.
+    texture_alpha     : Suppression strength [0–1].  0 = off, 1 = full.
+                        At 1.0 a pixel with maximum bedding-like Gabor energy
+                        has its diff value halved; the suppression is
+                        multiplicative so it never zeroes out a diff entirely.
+    texture_n_orient  : Orientations in Gabor bank (4 for isotropic bedding).
     """
 
     def __init__(
@@ -393,6 +471,10 @@ class ForegroundDetector:
         bilateral_d:       int   = 9,
         bilateral_sigma:   float = 50.0,
         roi_mask:          Optional[np.ndarray] = None,
+        texture_suppress:  bool  = False,
+        texture_lambdas:   tuple = (8, 12, 16),
+        texture_alpha:     float = 0.7,
+        texture_n_orient:  int   = 4,
     ):
         self.bg                = background
         self.threshold         = threshold
@@ -407,6 +489,35 @@ class ForegroundDetector:
         # Store as per-camera dict so one detector can serve both cams.
         # roi_mask (cam-0) is passed for backward compat.
         self._roi_masks: dict = {0: roi_mask, 1: None}
+
+        # Gabor bedding-texture suppression
+        # Pre-compute the background's Gabor energy once at init time.
+        # This is the per-pixel "how much bedding texture exists here in
+        # the background" map, used as a suppression weight in detect().
+        self._texture_alpha = texture_alpha if texture_suppress else 0.0
+        if texture_suppress:
+            bg0_gray = background.bg0
+            if bg0_gray.ndim == 3:
+                bg0_gray = cv2.cvtColor(
+                    bg0_gray.astype(np.uint8), cv2.COLOR_BGR2GRAY
+                ).astype(np.float32)
+            bg1_gray = background.bg1
+            if bg1_gray.ndim == 3:
+                bg1_gray = cv2.cvtColor(
+                    bg1_gray.astype(np.uint8), cv2.COLOR_BGR2GRAY
+                ).astype(np.float32)
+            bg0_e = gabor_bedding_energy(bg0_gray, lambdas=texture_lambdas,
+                                         n_orientations=texture_n_orient)
+            bg1_e = gabor_bedding_energy(bg1_gray, lambdas=texture_lambdas,
+                                         n_orientations=texture_n_orient)
+            # Normalise to [0, 1] using the 99th percentile so bright
+            # LED reflections don't collapse the rest of the range.
+            self._bg_gabor: dict = {
+                0: bg0_e / (np.percentile(bg0_e, 99) + 1e-6),
+                1: bg1_e / (np.percentile(bg1_e, 99) + 1e-6),
+            }
+        else:
+            self._bg_gabor = {}
 
         # CLAHE instance (shared across frames for efficiency)
         self._clahe = (cv2.createCLAHE(
@@ -491,6 +602,24 @@ class ForegroundDetector:
         if self._clahe is not None:
             diff_u8 = np.clip(diff, 0, 255).astype(np.uint8)
             diff    = self._clahe.apply(diff_u8).astype(np.float32)
+
+        # ── Gabor texture suppression ─────────────────────────────────
+        # Where the current frame has high Gabor energy at bedding scales
+        # (fibrous texture → probably disturbed bedding, not animal body)
+        # the diff is attenuated before thresholding.
+        # The animal body is a smooth dark blob → low Gabor energy → NOT
+        # suppressed.  Disturbed bedding keeps its fibrous texture → high
+        # Gabor energy → suppressed even if the pixel value changed.
+        if self._texture_alpha > 0 and cam in self._bg_gabor:
+            frame_gabor  = gabor_bedding_energy(gray.astype(np.float32))
+            frame_gabor_n = frame_gabor / (np.percentile(frame_gabor, 99) + 1e-6)
+            # Use the minimum of frame and background Gabor energy as the
+            # suppression weight — this catches displaced bedding (frame
+            # energy similar to bg energy) but not novel objects.
+            suppress_w   = np.minimum(
+                np.clip(frame_gabor_n, 0, 1),
+                np.clip(self._bg_gabor[cam], 0, 1))
+            diff = diff * (1.0 - self._texture_alpha * suppress_w)
 
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)

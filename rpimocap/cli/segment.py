@@ -129,6 +129,21 @@ def main() -> None:
     det.add_argument("--max-epipolar-px", type=float, default=8.0,
                      help="Maximum epipolar line distance for stereo "
                           "matching (default: 8 px)")
+    det.add_argument("--texture-suppress", action="store_true", default=False,
+                    help="Gabor filter bank bedding suppression. "
+                         "Attenuates foreground pixels whose current Gabor "
+                         "energy matches the background bedding texture, "
+                         "reducing false detections from disturbed bedding. "
+                         "Recommended when the rat moves bedding around.")
+    det.add_argument("--texture-alpha", type=float, default=0.7,
+                    metavar="A",
+                    help="Gabor suppression strength 0–1 (default 0.7). "
+                         "Higher = more bedding suppression, may clip "
+                         "animal edges at boundary with bedding.")
+    det.add_argument("--texture-lambdas", type=int, nargs="+",
+                    default=[8, 12, 16], metavar="PX",
+                    help="Gabor wavelengths in px targeting the bedding "
+                         "fibre scale (default: 8 12 16 px).")
     det.add_argument("--centroid-only", action="store_true",
                      help="Track only the animal centroid (label: 'animal') "
                           "instead of labelling body parts. More robust when "
@@ -375,6 +390,9 @@ def main() -> None:
         bilateral_d=args.bilateral_d,
         bilateral_sigma=args.bilateral_sigma,
         roi_mask=roi_mask0,
+        texture_suppress=args.texture_suppress,
+        texture_lambdas=tuple(args.texture_lambdas),
+        texture_alpha=args.texture_alpha,
         verbose=True)
 
     # Register the cam1 ROI mask on the shared ForegroundDetector
