@@ -112,6 +112,20 @@ def main() -> None:
     bg.add_argument("--background-extra-cam1", nargs="+", default=[],
                     metavar="TIFF",
                     help="Additional cam1 TIFF files (must match --background-extra-cam0)")
+    bg.add_argument("--flat-field-cam0", default=None, metavar="PATH",
+                    help="Flat-field image (PNG / TIFF / NPZ) for cam0, "
+                         "applied to every frame to correct NIR vignette. "
+                         "Disabled by default — pass an explicit path to "
+                         "enable. See rpimocap.detection.vignette.")
+    bg.add_argument("--flat-field-cam1", default=None, metavar="PATH",
+                    help="Flat-field image for cam1 (same semantics as "
+                         "--flat-field-cam0).")
+    bg.add_argument("--synthesize-flat-field", action="store_true",
+                    help="When no explicit flat-field is supplied, fit a "
+                         "smooth radial polynomial to the background model "
+                         "and use that as a synthetic flat-field. Less "
+                         "accurate than a true rig-calibration capture but "
+                         "removes the bulk of the vignette bias.")
 
     # ── Detection ────────────────────────────────────────────────────────────
     det = ap.add_argument_group("Detection")
@@ -370,6 +384,32 @@ def main() -> None:
         cv2.imwrite(str(bg_dir / name),
                     np.clip(img, 0, 255).astype(np.uint8))
 
+    # ── Flat-field (NIR vignette) correction ──────────────────────────────────
+    flat0: "np.ndarray | None" = None
+    flat1: "np.ndarray | None" = None
+    if args.flat_field_cam0 or args.flat_field_cam1 or args.synthesize_flat_field:
+        from rpimocap.detection.vignette import (
+            apply_flat_field, load_flat_field, synthesize_flat_field)
+        print("\n── Flat-field correction ────────────────────────────")
+        if args.flat_field_cam0:
+            flat0 = load_flat_field(args.flat_field_cam0)
+            print(f"  cam0 flat-field: {args.flat_field_cam0}")
+        elif args.synthesize_flat_field:
+            flat0 = synthesize_flat_field(bg.bg0)
+            print("  cam0 flat-field: synthesized from background")
+        if args.flat_field_cam1:
+            flat1 = load_flat_field(args.flat_field_cam1)
+            print(f"  cam1 flat-field: {args.flat_field_cam1}")
+        elif args.synthesize_flat_field:
+            flat1 = synthesize_flat_field(bg.bg1)
+            print("  cam1 flat-field: synthesized from background")
+        # Correct the background itself so the per-frame bg-subtraction is
+        # comparing flat-fielded frames against a flat-fielded background.
+        if flat0 is not None:
+            bg.bg0 = apply_flat_field(bg.bg0, flat0, clip=False).astype(np.float32)
+        if flat1 is not None:
+            bg.bg1 = apply_flat_field(bg.bg1, flat1, clip=False).astype(np.float32)
+
     # ── Epipolar matcher ──────────────────────────────────────────────────────
     matcher = EpipolarMatcher.from_calibration(
         cal, max_epipolar_px=args.max_epipolar_px)
@@ -467,6 +507,8 @@ def main() -> None:
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,
         use_trajectory_prior=args.trajectory_prior,
         trajectory_prior_lambda=args.trajectory_prior_lambda,
+        flat_field_cam0=flat0,
+        flat_field_cam1=flat1,
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

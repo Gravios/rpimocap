@@ -581,6 +581,8 @@ class SegmentTracker:
         bg_adapt_dilate_px: int  = 25,
         use_trajectory_prior: bool = False,
         trajectory_prior_lambda: float = 0.05,
+        flat_field_cam0:  "Optional[np.ndarray]" = None,
+        flat_field_cam1:  "Optional[np.ndarray]" = None,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -595,6 +597,8 @@ class SegmentTracker:
         self._prior_cx1:    "tuple[float, float] | None" = None
         self._prior_lambda: float = float(trajectory_prior_lambda)
         self._use_prior:    bool  = bool(use_trajectory_prior)
+        self._flat0 = flat_field_cam0
+        self._flat1 = flat_field_cam1
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -717,6 +721,18 @@ class SegmentTracker:
         Without SAM2:
           Optical flow only.
         """
+        # ── Flat-field (NIR vignette) correction ────────────────────────
+        # If a flat-field was supplied, divide-and-rescale each frame
+        # before any further processing. The background was already
+        # flat-fielded at construction time so background subtraction
+        # remains symmetric.
+        if self._flat0 is not None or self._flat1 is not None:
+            from rpimocap.detection.vignette import apply_flat_field
+            if self._flat0 is not None:
+                f0 = apply_flat_field(f0, self._flat0, clip=True)
+            if self._flat1 is not None:
+                f1 = apply_flat_field(f1, self._flat1, clip=True)
+
         # Step 1: optical flow → approximate centroids in both cameras
         regions0 = self._of0.track(f0, 0)
         regions1 = self._of1.track(f1, 1)
