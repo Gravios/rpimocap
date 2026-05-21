@@ -175,6 +175,20 @@ def main() -> None:
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
+    det.add_argument("--bg-adapt-alpha", type=float, default=None,
+                    metavar="A",
+                    help="Enable temporal background adaptation with the "
+                         "given EMA weight. At 25 fps, alpha=0.995 gives "
+                         "~8 s memory, 0.999 gives ~40 s. Updates only at "
+                         "pixels where no animal was detected, so bedding "
+                         "that the rat moved earlier is gradually absorbed "
+                         "into the new background. Disabled by default.")
+    det.add_argument("--bg-adapt-dilate-px", type=int, default=25,
+                    metavar="PX",
+                    help="Dilation radius (px) applied to the foreground "
+                         "mask before background adaptation. The animal's "
+                         "shadow / fur halo gets excluded from the update "
+                         "to prevent it being baked into the background.")
     det.add_argument("--centroid-only", action="store_true",
                      help="Track only the animal centroid (label: 'animal') "
                           "instead of labelling body parts. More robust when "
@@ -438,6 +452,8 @@ def main() -> None:
         texture_suppress=args.texture_suppress,
         texture_lambdas=tuple(args.texture_lambdas),
         texture_alpha=args.texture_alpha,
+        bg_adapt_alpha=args.bg_adapt_alpha,
+        bg_adapt_dilate_px=args.bg_adapt_dilate_px,
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

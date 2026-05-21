@@ -419,10 +419,15 @@ class SegmentTracker:
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
         texture_n_orient:  int   = 4,
+        bg_adapt_alpha:    "Optional[float]" = None,
+        bg_adapt_dilate_px: int  = 25,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
         self._cable_erosion  = cable_erosion_px
+        self._background     = background
+        self._bg_adapt_alpha = bg_adapt_alpha
+        self._bg_adapt_dilate_px = int(bg_adapt_dilate_px)
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -584,6 +589,30 @@ class SegmentTracker:
         matches = refined
 
         xyz_dict = self._matcher.triangulate(matches, bounds=bounds)
+
+        # ── Temporal background adaptation ──────────────────────────────
+        # Only adapt on frames with a confirmed (epipolar-validated) match,
+        # so that one spurious cam0 blob can't bake itself into the model.
+        # The mask is the foreground mask dilated by `bg_adapt_dilate_px`
+        # so that we don't bake the animal's own shadow / fur halo into
+        # the new background.
+        if (self._bg_adapt_alpha is not None
+                and xyz_dict
+                and fg0 is not None and fg1 is not None):
+            try:
+                import cv2 as _cv2
+                k = max(1, 2 * self._bg_adapt_dilate_px + 1)
+                kern = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (k, k))
+                m0 = _cv2.dilate(
+                    fg0.astype(np.uint8), kern).astype(bool)
+                m1 = _cv2.dilate(
+                    fg1.astype(np.uint8), kern).astype(bool)
+                self._background.update(
+                    f0, f1, mask0=m0, mask1=m1,
+                    alpha=self._bg_adapt_alpha)
+            except Exception:
+                # Adaptation is best-effort; never let it abort tracking.
+                pass
 
         # Compute reprojection errors
         reproj: dict[str, tuple] = {}

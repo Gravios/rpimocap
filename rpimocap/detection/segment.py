@@ -285,6 +285,71 @@ class BackgroundModel:
         np.savez_compressed(path, bg0=self.bg0, bg1=self.bg1,
                             method=self.method)
 
+    # ------------------------------------------------------------------ #
+    #  Temporal adaptation                                                #
+    # ------------------------------------------------------------------ #
+
+    def update(
+        self,
+        frame0:        np.ndarray,
+        frame1:        np.ndarray,
+        mask0:         "np.ndarray | None" = None,
+        mask1:         "np.ndarray | None" = None,
+        alpha:         float = 0.995,
+        bayer_pattern: str = "RGGB",
+    ) -> None:
+        """Adapt the background model toward a new stereo frame pair.
+
+        Performs an exponential moving average update **only at pixels
+        where the foreground mask is zero**, so disturbances that the
+        animal made earlier in the recording (bedding kicked aside,
+        objects nudged) gradually become part of the new background
+        while the animal itself is excluded.
+
+        Parameters
+        ----------
+        frame0, frame1 : raw camera frames (BGR or grayscale, uint8).
+        mask0, mask1   : optional (H, W) boolean foreground masks. True
+                         means "animal pixel — do not update here". When
+                         None, every pixel is updated (i.e. uniform EMA).
+        alpha          : EMA weight on the existing background, in [0, 1].
+                         Higher = slower adaptation. At 25 fps:
+                             alpha=0.995 → ~8 s memory (200 frames)
+                             alpha=0.999 → ~40 s memory
+                             alpha=0.99  → ~4 s memory
+        bayer_pattern  : retained for API compatibility; ignored.
+
+        Notes
+        -----
+        Call this once per frame (or every Nth frame) inside the
+        tracking loop. The foreground mask should be the epipolar-
+        validated animal mask, not the raw bg-subtract output, to avoid
+        baking noise into the background.
+        """
+        if not (0.0 <= alpha <= 1.0):
+            raise ValueError(f"alpha must be in [0, 1]; got {alpha}")
+
+        g0 = self._to_gray(frame0).astype(np.float32)
+        g1 = self._to_gray(frame1).astype(np.float32)
+        if g0.shape != self.bg0.shape or g1.shape != self.bg1.shape:
+            raise ValueError(
+                f"frame shapes {g0.shape}/{g1.shape} differ from "
+                f"background {self.bg0.shape}/{self.bg1.shape}")
+
+        if mask0 is None:
+            self.bg0 = alpha * self.bg0 + (1.0 - alpha) * g0
+        else:
+            m0 = ~np.asarray(mask0, dtype=bool)   # update where NOT animal
+            self.bg0[m0] = alpha * self.bg0[m0] + (1.0 - alpha) * g0[m0]
+
+        if mask1 is None:
+            self.bg1 = alpha * self.bg1 + (1.0 - alpha) * g1
+        else:
+            m1 = ~np.asarray(mask1, dtype=bool)
+            self.bg1[m1] = alpha * self.bg1[m1] + (1.0 - alpha) * g1[m1]
+
+    # ------------------------------------------------------------------ #
+
     @staticmethod
     def _to_gray(frame: np.ndarray) -> np.ndarray:
         """Convert a BGR frame to uint8 grayscale."""

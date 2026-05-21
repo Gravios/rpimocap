@@ -84,6 +84,63 @@ class TestBackgroundModel:
         bg2 = BackgroundModel.from_npz(p)
         np.testing.assert_allclose(bg2.bg0, background_model.bg0)
 
+    def _fresh_bg(self, background_model):
+        """Return an independent BackgroundModel that mirrors the fixture
+        but doesn't alias its arrays, so we can mutate without poisoning
+        the shared module-scoped fixture used by downstream tests."""
+        from rpimocap.detection.segment import BackgroundModel
+        return BackgroundModel(
+            background_model.bg0.copy(),
+            background_model.bg1.copy(),
+            background_model.method)
+
+    def test_update_pulls_background_toward_new_frame_outside_mask(self, background_model):
+        """EMA update should move the background toward the new frame
+        at pixels where the mask is False, and leave it unchanged where
+        the mask is True."""
+        bg = self._fresh_bg(background_model)
+        bg0_before = bg.bg0.copy()
+
+        new0 = np.full_like(bg0_before, 200.0, dtype=np.uint8)
+        new1 = np.full_like(bg.bg1, 200.0, dtype=np.uint8)
+        # Mask covers the top half — that region must NOT be updated
+        mask0 = np.zeros(bg0_before.shape, dtype=bool)
+        mask0[:bg0_before.shape[0] // 2] = True
+        mask1 = mask0.copy()
+
+        bg.update(new0, new1, mask0=mask0, mask1=mask1, alpha=0.5)
+
+        # Masked region unchanged
+        np.testing.assert_allclose(
+            bg.bg0[mask0], bg0_before[mask0],
+            err_msg="background updated inside animal mask")
+        # Unmasked region moved toward 200; with alpha=0.5 the result is
+        # exactly (bg_before + new) / 2
+        expected = 0.5 * bg0_before[~mask0] + 0.5 * 200.0
+        np.testing.assert_allclose(bg.bg0[~mask0], expected, atol=1e-4)
+
+    def test_update_alpha_one_means_no_change(self, background_model):
+        bg = self._fresh_bg(background_model)
+        bg0_before = bg.bg0.copy()
+        new0 = np.full_like(bg0_before, 200.0, dtype=np.uint8)
+        new1 = np.full_like(bg.bg1, 200.0, dtype=np.uint8)
+        bg.update(new0, new1, alpha=1.0)
+        np.testing.assert_allclose(bg.bg0, bg0_before)
+
+    def test_update_rejects_invalid_alpha(self, background_model):
+        bg = self._fresh_bg(background_model)
+        new = np.zeros_like(bg.bg0, dtype=np.uint8)
+        with pytest.raises(ValueError):
+            bg.update(new, new, alpha=1.5)
+        with pytest.raises(ValueError):
+            bg.update(new, new, alpha=-0.1)
+
+    def test_update_rejects_shape_mismatch(self, background_model):
+        bg = self._fresh_bg(background_model)
+        wrong = np.zeros((10, 10), dtype=np.uint8)
+        with pytest.raises(ValueError):
+            bg.update(wrong, wrong, alpha=0.5)
+
 
 # --------------------------------------------------------------------------- #
 #  ForegroundDetector                                                          #
