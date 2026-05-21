@@ -200,9 +200,22 @@ def run(args):
         print(f"  Rectification: OFF  (using raw projection matrices)")
 
     # ── Refraction model ──────────────────────────────────────────────────
+    # Refraction correction is OFF by default. The current arena has no
+    # plexiglass enclosure between the cameras and the animal, so straight-
+    # ray DLT is correct. The module is wired in for future setups where
+    # an acrylic wall is interposed; opt in by passing both
+    # --enable-refraction and --refraction-config.
     arena_model = None
     refraction_kwargs = {}
-    if args.refraction_config:
+    if args.refraction_config and not args.enable_refraction:
+        print("\n── Arena refraction model ───────────────────────────")
+        print(f"  --refraction-config={args.refraction_config} supplied "
+              "but --enable-refraction not set; refraction OFF.")
+    elif args.enable_refraction and not args.refraction_config:
+        print("\n── Arena refraction model ───────────────────────────")
+        print("  --enable-refraction set without --refraction-config; "
+              "refraction OFF (no wall model to apply).")
+    elif args.enable_refraction and args.refraction_config:
         from rpimocap.reconstruction.refraction import load_arena_config
         arena_model = load_arena_config(args.refraction_config)
         print(f"\n── Arena refraction model ───────────────────────────")
@@ -227,6 +240,10 @@ def run(args):
             K1=K1_raw, dist1=dist1_raw,
             R1=R_raw, T1=T_raw.reshape(3),
         )
+    else:
+        # Default path — no refraction. Print a brief confirmation so users
+        # see in the log that this is the straight-ray DLT path.
+        print("\n── Refraction correction: OFF (default) ─────────────")
 
     # ── Detectors ──────────────────────────────────────────────────────────
     print("\n── Pose detectors ───────────────────────────────────")
@@ -513,11 +530,16 @@ def main():
                          "coordinates so they are expressed in arena space.")
     al.add_argument("--refraction-config", default=None, metavar="JSON",
                     help="JSON file describing the arena walls (planes, "
-                         "thickness, refractive index). When supplied, "
-                         "triangulation refracts each camera ray through "
-                         "the wall it crosses before intersecting, "
-                         "correcting the apparent-position bias from the "
-                         "acrylic enclosure.")
+                         "thickness, refractive index). Used only when "
+                         "--enable-refraction is also passed; otherwise "
+                         "ignored. Refraction is OFF by default because "
+                         "the standard rpimocap rig has no plexiglass "
+                         "between the cameras and the animal.")
+    al.add_argument("--enable-refraction", action="store_true",
+                    help="Opt in to refractive triangulation. Requires "
+                         "--refraction-config to also be supplied. Off by "
+                         "default; only relevant for arenas with acrylic "
+                         "walls between the cameras and the subject.")
 
     # Export
     ex = ap.add_argument_group("Export")

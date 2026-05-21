@@ -1,5 +1,11 @@
 # Planar refraction correction
 
+> **OFF by default.** The standard `rpimocap` rig has no plexiglass
+> enclosure between the cameras and the animal — straight-ray DLT is
+> correct. This module is wired in for future setups where an acrylic
+> wall is interposed; opt in with `--enable-refraction` **and**
+> `--refraction-config`.
+
 `rpimocap.reconstruction.refraction` corrects the systematic
 apparent-position bias that arises when a camera observes a subject
 through transparent acrylic (PMMA) arena walls. With a refractive index
@@ -149,6 +155,7 @@ Then run the pipeline with refraction enabled:
 ```bash
 rpimocap-run \
     --calib calibration.npz \
+    --enable-refraction \
     --refraction-config arena.json \
     --videos cam0.tif cam1.tif \
     --out results/

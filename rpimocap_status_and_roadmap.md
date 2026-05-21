@@ -62,6 +62,11 @@ Activity, not code. Target accuracy gates:
 Acrylic walls (n ≈ 1.49) modelled as parallel-faced slabs; calibration
 unmodified because corners sit on the outer face.
 
+**OFF by default.** The current rpimocap rig has no plexiglass between
+the cameras and the animal. The module is shipped and tested for future
+setups where an acrylic wall is interposed; opt in with both
+`--enable-refraction` and `--refraction-config`.
+
 ### ⏳ Phase 3 — Pose detection
 Replace the `CentroidPoseDetector` placeholder with a SLEAP-trained
 model for whisker-scale tracking. The triangulation contract
