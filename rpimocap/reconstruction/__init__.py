@@ -54,6 +54,12 @@ from rpimocap.reconstruction.refraction import (
     save_arena_config,
     load_arena_config,
 )
+from rpimocap.reconstruction.kalman import (
+    KalmanInfo,
+    KalmanTracker3D,
+    smooth_trajectory_kalman,
+    smooth_trajectory_dict_kalman,
+)
 
 __all__ = [
     # triangulate
@@ -88,4 +94,9 @@ __all__ = [
     "triangulate_refracted",
     "save_arena_config",
     "load_arena_config",
+    # kalman
+    "KalmanInfo",
+    "KalmanTracker3D",
+    "smooth_trajectory_kalman",
+    "smooth_trajectory_dict_kalman",
 ]
