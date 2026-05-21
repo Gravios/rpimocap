@@ -199,6 +199,35 @@ def run(args):
         P1 = K1 @ np.hstack([R, T.reshape(3, 1)])
         print(f"  Rectification: OFF  (using raw projection matrices)")
 
+    # ── Refraction model ──────────────────────────────────────────────────
+    arena_model = None
+    refraction_kwargs = {}
+    if args.refraction_config:
+        from rpimocap.reconstruction.refraction import load_arena_config
+        arena_model = load_arena_config(args.refraction_config)
+        print(f"\n── Arena refraction model ───────────────────────────")
+        print(f"  Loaded {len(arena_model.planes)} walls from "
+              f"{args.refraction_config}")
+        if do_rectify:
+            print("  WARNING: --refraction-config requires raw (un-rectified) "
+                  "intrinsics/extrinsics. Disabling rectification path for "
+                  "refractive triangulation.")
+            # Pull raw K/dist/R/T even when rectification was requested
+            K0_raw, dist0_raw = cal["K0"], cal["dist0"]
+            K1_raw, dist1_raw = cal["K1"], cal["dist1"]
+            R_raw, T_raw = cal["R"], cal["T"]
+        else:
+            K0_raw, dist0_raw = K0, dist0
+            K1_raw, dist1_raw = K1, dist1
+            R_raw, T_raw = R, T
+        refraction_kwargs = dict(
+            arena_model=arena_model,
+            K0=K0_raw, dist0=dist0_raw,
+            R0=np.eye(3), T0=np.zeros(3),
+            K1=K1_raw, dist1=dist1_raw,
+            R1=R_raw, T1=T_raw.reshape(3),
+        )
+
     # ── Detectors ──────────────────────────────────────────────────────────
     print("\n── Pose detectors ───────────────────────────────────")
     det0, det1 = build_detector(args)
@@ -294,6 +323,7 @@ def run(args):
             P0, P1, r0, r1,
             min_confidence=args.min_detection_conf,
             max_reprojection_px=args.max_repr_error,
+            **refraction_kwargs,
         )
         skeleton_frames.append(pts3d)
 
@@ -481,6 +511,13 @@ def main():
                     help="CSV of rec<->arena correspondences from rpimocap-align. "
                          "Applies a Kabsch rigid transform to all exported "
                          "coordinates so they are expressed in arena space.")
+    al.add_argument("--refraction-config", default=None, metavar="JSON",
+                    help="JSON file describing the arena walls (planes, "
+                         "thickness, refractive index). When supplied, "
+                         "triangulation refracts each camera ray through "
+                         "the wall it crosses before intersecting, "
+                         "correcting the apparent-position bias from the "
+                         "acrylic enclosure.")
 
     # Export
     ex = ap.add_argument_group("Export")

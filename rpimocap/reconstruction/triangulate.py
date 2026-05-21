@@ -96,6 +96,12 @@ def triangulate_keypoints(
     result1,
     min_confidence: float = 0.3,
     max_reprojection_px: float = 20.0,
+    *,
+    arena_model=None,
+    K0: Optional[np.ndarray] = None, dist0: Optional[np.ndarray] = None,
+    R0: Optional[np.ndarray] = None, T0: Optional[np.ndarray] = None,
+    K1: Optional[np.ndarray] = None, dist1: Optional[np.ndarray] = None,
+    R1: Optional[np.ndarray] = None, T1: Optional[np.ndarray] = None,
 ) -> list[Point3D]:
     """
     Triangulate all mutually visible, high-confidence keypoints from two views.
@@ -110,6 +116,12 @@ def triangulate_keypoints(
     result0, result1   : Pose2DResult objects (or any iterable of Keypoint2D)
     min_confidence     : minimum per-landmark confidence to attempt triangulation
     max_reprojection_px: discard triangulations with higher mean reprojection error
+    arena_model        : Optional ``ArenaRefractionModel``. When supplied, rays are
+                         refracted through whichever wall each one crosses before
+                         being intersected, correcting the apparent-position bias
+                         introduced by acrylic arena walls. Requires the per-camera
+                         intrinsics/extrinsics (K0/dist0/R0/T0, K1/dist1/R1/T1) to
+                         be passed as well; otherwise this falls back to DLT.
 
     Returns
     -------
@@ -117,6 +129,17 @@ def triangulate_keypoints(
     """
     kps0 = result0.by_name() if hasattr(result0, "by_name") else {k.name: k for k in result0}
     kps1 = result1.by_name() if hasattr(result1, "by_name") else {k.name: k for k in result1}
+
+    use_refraction = (
+        arena_model is not None
+        and K0 is not None and R0 is not None and T0 is not None
+        and K1 is not None and R1 is not None and T1 is not None
+    )
+    if use_refraction:
+        # Pre-compute camera centres in world coordinates: C = -R^T T
+        from rpimocap.reconstruction.refraction import (
+            pixel_to_world_ray, triangulate_refracted
+        )
 
     results = []
     for name, kp0 in kps0.items():
@@ -127,6 +150,8 @@ def triangulate_keypoints(
         if conf < min_confidence:
             continue
 
+        # Initial DLT estimate (also used as seed for refractive iteration
+        # and as the fallback if refraction is not configured).
         X = triangulate_dlt(P0, P1, (kp0.x, kp0.y), (kp1.x, kp1.y))
         err0 = reprojection_error(P0, X, (kp0.x, kp0.y))
         err1 = reprojection_error(P1, X, (kp1.x, kp1.y))
@@ -135,9 +160,25 @@ def triangulate_keypoints(
         if err > max_reprojection_px:
             continue
 
+        if use_refraction:
+            try:
+                C0, d0 = pixel_to_world_ray(K0, R0, T0, (kp0.x, kp0.y), dist=dist0)
+                C1, d1 = pixel_to_world_ray(K1, R1, T1, (kp1.x, kp1.y), dist=dist1)
+                X_ref, _gap, _it = triangulate_refracted(
+                    C0, d0, C1, d1, arena_model,
+                    initial_xyz=X[:3],
+                )
+                xyz = np.asarray(X_ref, dtype=np.float64).reshape(3)
+            except Exception:
+                # If refraction fails (e.g. TIR or ray misses all walls in
+                # an unexpected way), fall back to the straight-ray solution.
+                xyz = X[:3].copy()
+        else:
+            xyz = X[:3].copy()
+
         results.append(Point3D(
             name=name,
-            xyz=X[:3].copy(),
+            xyz=xyz,
             confidence=conf,
             reprojection_error=err,
         ))

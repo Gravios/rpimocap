@@ -42,6 +42,18 @@ from rpimocap.reconstruction.voxel import (
     surface_centers,
     grid_to_mesh,
 )
+from rpimocap.reconstruction.refraction import (
+    RefractivePlane,
+    ArenaRefractionModel,
+    build_box_arena,
+    snell_refract,
+    refract_through_wall,
+    pixel_to_world_ray,
+    closest_point_two_lines,
+    triangulate_refracted,
+    save_arena_config,
+    load_arena_config,
+)
 
 __all__ = [
     # triangulate
@@ -65,4 +77,15 @@ __all__ = [
     "occupied_centers",
     "surface_centers",
     "grid_to_mesh",
+    # refraction
+    "RefractivePlane",
+    "ArenaRefractionModel",
+    "build_box_arena",
+    "snell_refract",
+    "refract_through_wall",
+    "pixel_to_world_ray",
+    "closest_point_two_lines",
+    "triangulate_refracted",
+    "save_arena_config",
+    "load_arena_config",
 ]
