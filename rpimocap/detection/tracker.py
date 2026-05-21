@@ -421,6 +421,8 @@ class SegmentTracker:
         texture_n_orient:  int   = 4,
         bg_adapt_alpha:    "Optional[float]" = None,
         bg_adapt_dilate_px: int  = 25,
+        use_trajectory_prior: bool = False,
+        trajectory_prior_lambda: float = 0.05,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -428,6 +430,13 @@ class SegmentTracker:
         self._background     = background
         self._bg_adapt_alpha = bg_adapt_alpha
         self._bg_adapt_dilate_px = int(bg_adapt_dilate_px)
+        # Trajectory-constrained selection: remember the last confirmed
+        # blob centroid in each camera so the global epipolar selector
+        # can prefer candidates near the previous detection.
+        self._prior_cx0:    "tuple[float, float] | None" = None
+        self._prior_cx1:    "tuple[float, float] | None" = None
+        self._prior_lambda: float = float(trajectory_prior_lambda)
+        self._use_prior:    bool  = bool(use_trajectory_prior)
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -493,6 +502,8 @@ class SegmentTracker:
 
         self._of0.reset()
         self._of1.reset()
+        self._prior_cx0 = None
+        self._prior_cx1 = None
         results: list[TrackResult] = []
         n_frames = len(range(start_frame, end_frame, sample_every))
 
@@ -559,7 +570,13 @@ class SegmentTracker:
             if regions1:
                 regions1 = self._sam2.segment(f1, regions1)
 
-        matches  = self._matcher.match(regions0, regions1)
+        if self._use_prior:
+            matches = self._matcher.match(
+                regions0, regions1,
+                prior0=self._prior_cx0, prior1=self._prior_cx1,
+                prior_lambda=self._prior_lambda)
+        else:
+            matches = self._matcher.match(regions0, regions1)
 
         # Re-hull: for each matched pair, replace the raw connected-
         # component centroid with the convex-hull centroid of the
@@ -589,6 +606,14 @@ class SegmentTracker:
         matches = refined
 
         xyz_dict = self._matcher.triangulate(matches, bounds=bounds)
+
+        # Update trajectory prior centroids from the (possibly refined)
+        # matched pair, so the next frame can score candidates against
+        # this one. Use the hull-refined centroids if available.
+        if self._use_prior and matches:
+            r0_last, r1_last = matches[0]
+            self._prior_cx0 = (r0_last.cx, r0_last.cy)
+            self._prior_cx1 = (r1_last.cx, r1_last.cy)
 
         # ── Temporal background adaptation ──────────────────────────────
         # Only adapt on frames with a confirmed (epipolar-validated) match,

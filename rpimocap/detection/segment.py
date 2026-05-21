@@ -1464,12 +1464,36 @@ class EpipolarMatcher:
         self,
         regions0: list[BodyRegion],
         regions1: list[BodyRegion],
+        prior0:   "tuple[float, float] | None" = None,
+        prior1:   "tuple[float, float] | None" = None,
+        prior_lambda: float = 0.05,
     ) -> list[tuple[BodyRegion, BodyRegion]]:
         """Return matched (cam0_region, cam1_region) pairs.
 
         Matching is label-first: if both cameras have a region with the
         same anatomical label, they are matched directly.  Unmatched
         regions fall back to epipolar-nearest matching.
+
+        Parameters
+        ----------
+        regions0, regions1 : candidate body regions in each camera.
+        prior0, prior1     : optional (x, y) pixel centroid of the
+                              previous confirmed detection in each
+                              camera. When supplied, the global
+                              epipolar-nearest score becomes
+
+                                  d_eff = d_epi + lambda * (d0 + d1)
+
+                              where d0/d1 are the pixel distances from
+                              each candidate to its prior. This keeps
+                              the tracker from jumping to a far-away
+                              blob with coincidentally low epipolar
+                              distance (e.g. a wall reflection on the
+                              opposite side of the arena).
+        prior_lambda       : strength of the spatial-prior term
+                              (px-epipolar per px-spatial). Default 0.05
+                              means a 100 px jump from prior costs the
+                              same as 5 px of epipolar error.
         """
         if not regions0 or not regions1:
             return []
@@ -1497,11 +1521,23 @@ class EpipolarMatcher:
             for i0, r0 in enumerate(regions0):
                 line = self._epipolar_line(r0.cx, r0.cy)
                 for i1, r1 in enumerate(regions1):
-                    d = self._point_to_line_dist(line, r1.cx, r1.cy)
-                    if d < best_d_global:
-                        best_d_global = d
+                    d_epi = self._point_to_line_dist(line, r1.cx, r1.cy)
+                    if d_epi > self.max_epipolar_px:
+                        continue
+                    # Optional trajectory prior — penalise candidates far
+                    # from the previous confirmed detection in each camera.
+                    d_prior = 0.0
+                    if prior0 is not None:
+                        d_prior += float(np.hypot(r0.cx - prior0[0],
+                                                  r0.cy - prior0[1]))
+                    if prior1 is not None:
+                        d_prior += float(np.hypot(r1.cx - prior1[0],
+                                                  r1.cy - prior1[1]))
+                    d_eff = d_epi + prior_lambda * d_prior
+                    if d_eff < best_d_global:
+                        best_d_global = d_eff
                         best_pair = (r0, r1)
-            if best_pair is not None and best_d_global <= self.max_epipolar_px:
+            if best_pair is not None:
                 matched.append(best_pair)
             return matched
 

@@ -189,6 +189,17 @@ def main() -> None:
                          "mask before background adaptation. The animal's "
                          "shadow / fur halo gets excluded from the update "
                          "to prevent it being baked into the background.")
+    det.add_argument("--trajectory-prior", action="store_true",
+                    help="Bias the centroid-only blob selector toward "
+                         "candidates near the previous frame's confirmed "
+                         "detection. Prevents jumps to wall reflections "
+                         "or coincidentally well-aligned far blobs.")
+    det.add_argument("--trajectory-prior-lambda", type=float, default=0.05,
+                    metavar="L",
+                    help="Strength of the spatial prior in --trajectory-"
+                         "prior mode (px-epipolar per px-spatial). At the "
+                         "default L=0.05, a 100 px jump from the prior "
+                         "costs the same as 5 px of epipolar error.")
     det.add_argument("--centroid-only", action="store_true",
                      help="Track only the animal centroid (label: 'animal') "
                           "instead of labelling body parts. More robust when "
@@ -454,6 +465,8 @@ def main() -> None:
         texture_alpha=args.texture_alpha,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,
+        use_trajectory_prior=args.trajectory_prior,
+        trajectory_prior_lambda=args.trajectory_prior_lambda,
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

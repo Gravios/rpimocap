@@ -288,6 +288,54 @@ class TestEpipolarMatcher:
         # Just verify it returns a list
         assert isinstance(matches, list)
 
+    def test_trajectory_prior_breaks_tie_in_centroid_only(self, matcher):
+        """With two equally-good epipolar pairs, the prior selects the
+        one closer to last frame's confirmed centroid."""
+        from rpimocap.detection.segment import BodyRegion
+        # Both candidates on the same scanline (y=240) so both have
+        # epipolar distance ≈ 0; same label so the matcher goes into
+        # centroid-only mode and runs the global selector.
+        r0 = [BodyRegion("animal", 320, 240),    # cluster A
+              BodyRegion("animal", 100, 240)]    # cluster B (far away)
+        r1 = [BodyRegion("animal", 220, 240),    # cluster A'
+              BodyRegion("animal",   0, 240)]    # cluster B'
+
+        # Without a prior, the selector picks one of the pairs (both
+        # have ~zero epipolar distance; tie broken by iteration order).
+        m_noprior = matcher.match(r0, r1)
+        assert len(m_noprior) == 1
+
+        # With the prior anchored at cluster B in both cameras, the
+        # selector must pick B↔B'.
+        m_prior = matcher.match(
+            r0, r1,
+            prior0=(100, 240), prior1=(0, 240),
+            prior_lambda=0.05)
+        assert len(m_prior) == 1
+        a, b = m_prior[0]
+        assert (a.cx, a.cy) == (100, 240)
+        assert (b.cx, b.cy) == (0, 240)
+
+    def test_trajectory_prior_does_not_admit_bad_epipolar_match(self, matcher):
+        """Even with a strong prior, a candidate with epipolar distance
+        above the threshold must still be rejected."""
+        from rpimocap.detection.segment import BodyRegion
+        # cam1 candidate is far off the epipolar line of the cam0 point
+        r0 = [BodyRegion("animal", 320, 240),
+              BodyRegion("animal", 100, 240)]
+        r1 = [BodyRegion("animal", 220, 240),
+              BodyRegion("animal",   0, 400)]    # huge y offset → bad epipolar
+
+        m = matcher.match(
+            r0, r1,
+            prior0=(100, 240), prior1=(0, 400),    # prior favours the bad pair
+            prior_lambda=1e6)                       # try very strong prior
+        # Either no match, or the legitimate A↔A' pair — never the bad one
+        if m:
+            a, b = m[0]
+            assert (a.cx, a.cy) != (100, 240) or (b.cx, b.cy) != (0, 400), (
+                "matcher accepted an epipolar-bad pair just because of prior")
+
 
 # --------------------------------------------------------------------------- #
 #  OpticalFlowTracker                                                          #
