@@ -60,6 +60,11 @@ from rpimocap.reconstruction.kalman import (
     smooth_trajectory_kalman,
     smooth_trajectory_dict_kalman,
 )
+from rpimocap.reconstruction.rearing import (
+    PostureState,
+    RearingClassifier,
+    trace_postures,
+)
 
 __all__ = [
     # triangulate
@@ -99,4 +104,8 @@ __all__ = [
     "KalmanTracker3D",
     "smooth_trajectory_kalman",
     "smooth_trajectory_dict_kalman",
+    # rearing
+    "PostureState",
+    "RearingClassifier",
+    "trace_postures",
 ]
