@@ -336,6 +336,82 @@ class TestEpipolarMatcher:
             assert (a.cx, a.cy) != (100, 240) or (b.cx, b.cy) != (0, 400), (
                 "matcher accepted an epipolar-bad pair just because of prior")
 
+    @pytest.fixture
+    def distorted_matcher(self):
+        """Same rig as `matcher` but with realistic barrel distortion
+        (k1 = -0.24, matching the plumb-line fits the user gets at
+        wide focal lengths on the IMX477 + 2.8 mm lenses).
+        """
+        from rpimocap.detection.segment import EpipolarMatcher
+        K0 = np.array([[800, 0, 320], [0, 800, 240], [0, 0, 1]], dtype=float)
+        K1 = K0.copy()
+        R  = np.eye(3)
+        T  = np.array([100.0, 0.0, 0.0])
+        d  = np.array([-0.24, 0.05, 0.0, 0.0, 0.0])
+        P0 = K0 @ np.hstack([np.eye(3), np.zeros((3,1))])
+        P1 = K1 @ np.hstack([R, T.reshape(3,1)])
+        return (EpipolarMatcher(P0=P0, P1=P1, K0=K0, K1=K1,
+                                dist0=d, dist1=d, R=R, T=T,
+                                max_epipolar_px=10.0,
+                                undistort_match=True),
+                EpipolarMatcher(P0=P0, P1=P1, K0=K0, K1=K1,
+                                dist0=d, dist1=d, R=R, T=T,
+                                max_epipolar_px=10.0,
+                                undistort_match=False),
+                K0, d)
+
+    def test_undistort_match_reduces_peripheral_epipolar_error(self, distorted_matcher):
+        """Distorted pixels near the image edge appear off the F-derived
+        epipolar line by several pixels.  Undistort-first removes that
+        bias so the same true correspondence has a smaller measured
+        epipolar distance."""
+        from rpimocap.detection.segment import BodyRegion
+        m_ud, m_raw, K, dist = distorted_matcher
+
+        # Pick a true 3D point well to the side, project into both
+        # cameras WITH distortion, then check epipolar distance.
+        X = np.array([180.0, 80.0, 400.0])      # mm, off-axis
+        rvec = np.zeros(3); tvec = np.zeros(3)
+        uv0, _ = cv2.projectPoints(X[None], rvec, tvec, K, dist)
+        # Cam1 has T=(100,0,0): X in cam1 frame is X - T
+        Xc1 = X - np.array([100.0, 0.0, 0.0])
+        uv1, _ = cv2.projectPoints(Xc1[None], rvec, tvec, K, dist)
+        u0, v0 = uv0.ravel()
+        u1, v1 = uv1.ravel()
+
+        r0 = [BodyRegion("animal", float(u0), float(v0))]
+        r1 = [BodyRegion("animal", float(u1), float(v1))]
+
+        # Raw (distorted-space) epipolar distance
+        line_raw = m_raw._epipolar_line(u0, v0)
+        d_raw = m_raw._point_to_line_dist(line_raw, u1, v1)
+
+        # Undistort-first epipolar distance
+        ud0 = m_ud._undistort(np.array([[u0, v0]]), 0)[0]
+        ud1 = m_ud._undistort(np.array([[u1, v1]]), 1)[0]
+        line_ud = m_ud._epipolar_line(ud0[0], ud0[1])
+        d_ud = m_ud._point_to_line_dist(line_ud, ud1[0], ud1[1])
+
+        assert d_ud < d_raw, (
+            f"Undistort-first should reduce epipolar error: "
+            f"raw={d_raw:.2f} px, undistort-first={d_ud:.2f} px")
+        # Undistort-first should bring it well below 1 px (perfect with
+        # a textbook lens model); raw can be several px on a real lens.
+        assert d_ud < 1.0, (
+            f"Undistort-first epipolar error too large: {d_ud:.2f} px")
+
+    def test_undistort_match_default_is_on(self):
+        """Backward-compat safety: undistort_match defaults to True so
+        the new behaviour is the default."""
+        from rpimocap.detection.segment import EpipolarMatcher
+        K = np.eye(3); K[0,0] = K[1,1] = 800; K[0,2] = 320; K[1,2] = 240
+        P0 = K @ np.hstack([np.eye(3), np.zeros((3,1))])
+        P1 = K @ np.hstack([np.eye(3), np.array([[100.0], [0], [0]])])
+        m = EpipolarMatcher(P0=P0, P1=P1, K0=K, K1=K,
+                            dist0=np.zeros(5), dist1=np.zeros(5),
+                            R=np.eye(3), T=np.array([100., 0., 0.]))
+        assert m.undistort_match is True
+
 
 # --------------------------------------------------------------------------- #
 #  OpticalFlowTracker                                                          #

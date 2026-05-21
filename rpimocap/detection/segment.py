@@ -1340,6 +1340,7 @@ class EpipolarMatcher:
         T:               np.ndarray,
         max_epipolar_px: float = 8.0,
         undistort_pts:   bool  = True,
+        undistort_match: bool  = True,
     ):
         self.P0 = P0; self.P1 = P1
         self.K0 = K0; self.K1 = K1
@@ -1347,6 +1348,7 @@ class EpipolarMatcher:
         self.R = R; self.T = T
         self.max_epipolar_px = max_epipolar_px
         self.undistort_pts   = undistort_pts
+        self.undistort_match = undistort_match
         self.F = self._compute_F(K0, K1, R, T)
 
     @classmethod
@@ -1501,6 +1503,28 @@ class EpipolarMatcher:
         used1: set[int] = set()
         matched: list[tuple[BodyRegion, BodyRegion]] = []
 
+        # Pre-compute undistorted centroids for every candidate so that
+        # the epipolar geometry (F is exact only in undistorted coords)
+        # is correct.  With ~k1 ≈ -0.24 lenses, matching on raw pixel
+        # coordinates near the image periphery absorbs several pixels of
+        # distortion error into the max_epipolar_px tolerance.
+        if self.undistort_match:
+            cx0_arr = np.array([[r.cx, r.cy] for r in regions0])
+            cx1_arr = np.array([[r.cx, r.cy] for r in regions1])
+            ud0 = self._undistort(cx0_arr, 0)
+            ud1 = self._undistort(cx1_arr, 1)
+            ud_prior0 = (None if prior0 is None
+                         else tuple(self._undistort(
+                             np.array([prior0]), 0)[0]))
+            ud_prior1 = (None if prior1 is None
+                         else tuple(self._undistort(
+                             np.array([prior1]), 1)[0]))
+        else:
+            ud0 = np.array([[r.cx, r.cy] for r in regions0])
+            ud1 = np.array([[r.cx, r.cy] for r in regions1])
+            ud_prior0 = prior0
+            ud_prior1 = prior1
+
         # Determine if we're in centroid-only mode (all labels identical)
         all_same_label = (
             len(regions0) > 0 and len(regions1) > 0
@@ -1519,20 +1543,23 @@ class EpipolarMatcher:
             best_d_global = float("inf")
             best_pair = None
             for i0, r0 in enumerate(regions0):
-                line = self._epipolar_line(r0.cx, r0.cy)
+                line = self._epipolar_line(ud0[i0, 0], ud0[i0, 1])
                 for i1, r1 in enumerate(regions1):
-                    d_epi = self._point_to_line_dist(line, r1.cx, r1.cy)
+                    d_epi = self._point_to_line_dist(
+                        line, ud1[i1, 0], ud1[i1, 1])
                     if d_epi > self.max_epipolar_px:
                         continue
                     # Optional trajectory prior — penalise candidates far
                     # from the previous confirmed detection in each camera.
                     d_prior = 0.0
-                    if prior0 is not None:
-                        d_prior += float(np.hypot(r0.cx - prior0[0],
-                                                  r0.cy - prior0[1]))
-                    if prior1 is not None:
-                        d_prior += float(np.hypot(r1.cx - prior1[0],
-                                                  r1.cy - prior1[1]))
+                    if ud_prior0 is not None:
+                        d_prior += float(np.hypot(
+                            ud0[i0, 0] - ud_prior0[0],
+                            ud0[i0, 1] - ud_prior0[1]))
+                    if ud_prior1 is not None:
+                        d_prior += float(np.hypot(
+                            ud1[i1, 0] - ud_prior1[0],
+                            ud1[i1, 1] - ud_prior1[1]))
                     d_eff = d_epi + prior_lambda * d_prior
                     if d_eff < best_d_global:
                         best_d_global = d_eff
@@ -1547,27 +1574,29 @@ class EpipolarMatcher:
         # This prevents mismatched blobs from producing garbage triangulations.
         by_label1 = {r.label: (i, r) for i, r in enumerate(regions1)}
         remaining0 = []
-        for r0 in regions0:
+        for i0, r0 in enumerate(regions0):
             if r0.label in by_label1:
                 i1, r1 = by_label1[r0.label]
-                line = self._epipolar_line(r0.cx, r0.cy)
-                d    = self._point_to_line_dist(line, r1.cx, r1.cy)
+                line = self._epipolar_line(ud0[i0, 0], ud0[i0, 1])
+                d    = self._point_to_line_dist(
+                    line, ud1[i1, 0], ud1[i1, 1])
                 if d <= self.max_epipolar_px:
                     matched.append((r0, r1))
                     used1.add(i1)
                 else:
-                    remaining0.append(r0)
+                    remaining0.append((i0, r0))
             else:
-                remaining0.append(r0)
+                remaining0.append((i0, r0))
 
         # Pass 2: epipolar nearest for unmatched or epipolar-rejected regions
-        for r0 in remaining0:
-            line = self._epipolar_line(r0.cx, r0.cy)
+        for i0, r0 in remaining0:
+            line = self._epipolar_line(ud0[i0, 0], ud0[i0, 1])
             best_d, best_i, best_r1 = float("inf"), -1, None
             for i1, r1 in enumerate(regions1):
                 if i1 in used1:
                     continue
-                d = self._point_to_line_dist(line, r1.cx, r1.cy)
+                d = self._point_to_line_dist(
+                    line, ud1[i1, 0], ud1[i1, 1])
                 if d < best_d:
                     best_d, best_i, best_r1 = d, i1, r1
             if best_r1 is not None and best_d <= self.max_epipolar_px:
