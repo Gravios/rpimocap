@@ -149,6 +149,14 @@ mv background/bg.npz background/bg.npz   # already in place
 - [ ] `background/bg.npz` created
 - [ ] `background/bg_cam0.png` and `bg_cam1.png` look clean (empty arena)
 
+> **For v0.5.0 Gabor refinement support (Step 6b):** add
+> `--texture-suppress` to the command above. This bakes a Gabor
+> energy model of the bedding texture into `bg.npz` alongside the
+> intensity background. Without it the `--gabor-refine` flag at
+> tracking time is a silent no-op. Adds ~30 s to background build
+> on a typical session; the cached model is then free to use at
+> tracking time.
+
 ---
 
 ## Step 6 — Track Each Session
@@ -194,12 +202,21 @@ h5 = "$session/tracking/reconstruction.h5"
 with h5py.File(h5) as f:
     if "animal" not in f.get("skeleton", {}):
         print("  WARN: no animal key — check background/threshold"); sys.exit(1)
-    xyz = f["skeleton"]["animal"]["xyz"][:]
-v = ~np.isnan(xyz).any(axis=1)
-pct = 100*v.sum()/max(len(xyz),1)
-print(f"  Validation: {v.sum()}/50 frames ({pct:.0f}%)")
+    g = f["skeleton"]["animal"]
+    # Prefer /detected (v0.5.0+): captured pre-post-processing, so
+    # gap-filled frames are correctly False even when xyz is non-NaN.
+    if "detected" in g:
+        det = g["detected"][:]
+        n_real, n_total = int(det.sum()), int(len(det))
+    else:
+        xyz = g["xyz"][:]
+        v = ~np.isnan(xyz).any(axis=1)
+        n_real, n_total = int(v.sum()), int(len(xyz))
+pct = 100*n_real/max(n_total,1)
+print(f"  Validation: {n_real}/{n_total} real frames ({pct:.0f}%)")
 if pct < 60:
-    print("  WARN: < 60% detection — check threshold or background")
+    print("  WARN: < 60% detection — see Troubleshooting (try "
+          "--gabor-refine --kalman --kalman-online)")
     sys.exit(1)
 PYEOF
         [ $? -ne 0 ] && { echo "  SKIP full run (validation failed)"; continue; }
@@ -308,6 +325,7 @@ rpimocap-segment \
 | `--kalman-online` | Velocity-aware blob prior keeps producing predictions through gaps |
 | `--rearing-detection` | Vertical body posture swaps in `90 × 45 mm` body dims so the anatomical prior doesn't pull the centroid toward a horizontal body that isn't there |
 | `--kalman` (offline) | Mahalanobis-gate outlier rejection + RTS backward smoother on the final trajectory |
+| `--sam2-video-checkpoint` | Replace bg-subtraction entirely with SAM2 video propagation. Best for sessions with severe bedding disturbance or sustained occlusion; requires the `sam2` package + checkpoint and a one-time pre-pass (cached, reused on re-runs) |
 
 ### Optional: flat-field correction for NIR vignette
 
@@ -418,8 +436,15 @@ done
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Kabsch RMSE > 20 mm | Bad autocalib focal lengths | `calib_from_corners` is the fix — check DLT reprojection |
-| < 60% valid frames | Threshold too low or BG mismatch | Raise `--threshold` (try 25–35) |
+| < 60% valid frames, plain pipeline | Threshold too low or BG mismatch | Raise `--threshold` (try 25–35), or enable the v0.5.0 robust toolkit: `--gabor-refine --kalman --kalman-online` |
 | Z values > 400 mm or negative | Epipolar mismatch | Check bounds filter; re-verify DLT reprojection < 10 px |
-| Animal near wall → missing frames | Normal occlusion | Increase `--fill-gaps 15` |
+| Animal near wall → missing frames | Normal occlusion | First try `--kalman` (predictive gap-fill respecting `--kalman-max-speed`); falls back to `--fill-gaps 15` if Kalman is off |
+| Centroid jumps to wall reflections | Epipolar selector tied | `--trajectory-prior` (last-frame prior) and/or `--kalman-online` (velocity-aware prior); raise `--trajectory-prior-lambda` if reflections still win |
+| Centroid drags toward headstage cable | Cable pixels included in centroid | `--cable-erosion 10–15` to disconnect the cable, then `--body-length 180 --body-width 70` for the anatomical Gaussian prior |
+| Bedding has been disturbed | Intensity-based bg-sub captures bedding edges | `--gabor-refine` (requires `--texture-suppress` background); for severe disturbance, `--sam2-video-checkpoint` |
+| Centroid wrong during rearing | Horizontal body prior applied vertically | `--rearing-detection` (needs `--kalman-online`); swaps in vertical body dims when reared |
+| Lighting non-uniform across image | NIR vignette | `--synthesize-flat-field`, or `--flat-field-cam0/--flat-field-cam1` with captured references |
 | One session much worse than others | Lighting change | Build session-specific BG: add `--background-extra-*` for just that session |
 | Hand visible in background | BG built while experimenter present | Use only empty-arena sessions for `--background-extra-*` |
+| Gap-filled frames look like real detections | xyz NaN check is post-Kalman | Read `/skeleton/<name>/detected` from the HDF5 — `True` iff a real detection pre-post-processing |
+
