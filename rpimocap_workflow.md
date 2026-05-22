@@ -342,7 +342,21 @@ command there already passes `--texture-suppress`). If you built
 
 ### Full robust run
 
+This command is **self-contained for a single session** — fill in
+the three variables at the top, then paste:
+
 ```bash
+# ── EDIT THESE ──────────────────────────────────────────────────────────
+DATE_PART=20260214
+TIME_PART=021722
+SUBJECT_DIR=strohA-al-RPICAM-${DATE_PART}
+# ────────────────────────────────────────────────────────────────────────
+
+raw_dir="${SUBJECT_DIR}/raw"
+cam0_tif="${raw_dir}/cam0_${DATE_PART}_${TIME_PART}_raw.tif"
+cam1_tif="${raw_dir}/cam1_${DATE_PART}_${TIME_PART}_raw.tif"
+session="${SUBJECT_DIR}/${DATE_PART}-${TIME_PART}"
+
 rpimocap-segment \
     --cam0             "$cam0_tif" \
     --cam1             "$cam1_tif" \
@@ -382,6 +396,11 @@ rpimocap-segment \
     --out              "$session"
 ```
 
+To batch this across every session, wrap it in the Step 6 batch
+loop's outer `for session_dir in strohA-al-RPICAM-*/` shell (which
+provides `$cam0_tif` / `$cam1_tif` / `$session` per iteration) and
+drop the EDIT-THESE block above.
+
 ### What each flag fixes
 
 | Flag(s) | Problem it addresses |
@@ -399,19 +418,16 @@ rpimocap-segment \
 ### Optional: flat-field correction for NIR vignette
 
 Capture a flat-field reference frame at rig assembly (uniform NIR-lit
-target with no animal); pass it to every run:
+target with no animal). To use it, **add these flags** to the
+`rpimocap-segment` invocation above:
 
-```bash
-rpimocap-segment ... \
     --flat-field-cam0 calib/flat_cam0.png \
-    --flat-field-cam1 calib/flat_cam1.png
-```
+    --flat-field-cam1 calib/flat_cam1.png \
 
-If no calibration capture exists, synthesise one from the background:
+If no calibration capture exists, synthesise one from the
+background — **add this flag** instead:
 
-```bash
-rpimocap-segment ... --synthesize-flat-field
-```
+    --synthesize-flat-field \
 
 ### Optional: SAM2 video propagation for foreground masks
 
@@ -420,12 +436,11 @@ struggles, replacing bg-subtraction entirely with SAM2 video
 propagation gives the cleanest masks. Requires the `sam2` package
 installed and a downloaded checkpoint.
 
-```bash
-rpimocap-segment ... \
+**Add these flags** to the `rpimocap-segment` invocation above:
+
     --sam2-video-checkpoint /path/to/sam2_hiera_large.pt \
     --sam2-video-config     sam2.1_hiera_l.yaml \
-    --sam2-video-prompt-frame 0
-```
+    --sam2-video-prompt-frame 0 \
 
 How it works:
 
