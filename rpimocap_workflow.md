@@ -153,9 +153,12 @@ mv background/bg.npz background/bg.npz   # already in place
 > `--texture-suppress` to the command above. This bakes a Gabor
 > energy model of the bedding texture into `bg.npz` alongside the
 > intensity background. Without it the `--gabor-refine` flag at
-> tracking time is a silent no-op. Adds ~30 s to background build
-> on a typical session; the cached model is then free to use at
-> tracking time.
+> tracking time is a silent no-op. There is no separate
+> `rpimocap-build-bg` tool — the same `rpimocap-segment
+> --end-frame 0` command builds the background; just add
+> `--texture-suppress` to the flag list. Adds ~30 s to background
+> build on a typical session; the cached model is then free to use
+> at tracking time.
 
 ---
 
@@ -261,15 +264,35 @@ roughly 30 % of bare runtime.
 ### Pre-flight: build a `--texture-suppress` background
 
 The Gabor-edge body contour (`--gabor-refine`) needs a cached Gabor
-model in the `background/bg.npz`. Bake it during background build:
+model in the `background/bg.npz`. There's no separate background-
+build tool — `rpimocap-segment` itself builds the background when
+called with `--end-frame 0`, the same pattern as Step 5. Add
+`--texture-suppress` so the Gabor model is cached alongside the
+intensity background:
 
 ```bash
-rpimocap-build-bg \
-    --cam0 "$raw_dir/cam0_*_raw.tif" \
-    --cam1 "$raw_dir/cam1_*_raw.tif" \
+rpimocap-segment \
+    --cam0                    "${CAM0_ALL[0]}" \
+    --cam1                    "${CAM1_ALL[0]}" \
+    --calib                   calib/calib_from_corners.npz \
+    --bayer-pattern           RGGB \
+    --background-extra-cam0   "${CAM0_ALL[@]:1}" \
+    --background-extra-cam1   "${CAM1_ALL[@]:1}" \
+    --background-frames       100 \
+    --bounds="-140,140,-215,215,0,388" \
+    --threshold               20 \
+    --green-channel --bilateral \
+    --centroid-only \
     --texture-suppress \
-    --out  background/bg.npz
+    --end-frame               0 \
+    --out                     .
+# --end-frame 0 → build the background model and exit without tracking.
+# --texture-suppress → also cache the Gabor energy model in bg.npz,
+#                      required for --gabor-refine at tracking time.
 ```
+
+This can also just be folded into Step 5 by adding `--texture-suppress`
+to that command — there's no harm in always including it.
 
 ### Full robust run
 
