@@ -1,6 +1,15 @@
 # rpimocap Processing Workflow
 _Working directory: `strohA-al-RPICAM/`_
 
+> **Shell compatibility.** Every fenced `bash` block in this doc is
+> written to copy-paste cleanly into **both `bash` and `zsh`** at the
+> project root. The array idioms use the portable `set --`
+> positional-parameter pattern instead of `${arr[0]}` because zsh
+> arrays are 1-indexed and `[0]` returns empty there. Glob-on-no-match
+> errors in zsh are suppressed at the top of each loop block with
+> `setopt NULL_GLOB 2>/dev/null; shopt -s nullglob 2>/dev/null` — the
+> first works in zsh and is a no-op in bash; the second is the reverse.
+
 ---
 
 ## Directory Layout
@@ -108,12 +117,16 @@ rpimocap-calibrate-from-corners \
 ## Step 5 — Background Model  _(built once from ALL sessions)_
 
 ```bash
+# Tolerate globs that don't match (zsh errors by default; bash needs nullglob)
+setopt NULL_GLOB 2>/dev/null; shopt -s nullglob 2>/dev/null
+
 mkdir -p background
 
-# Collect all cam0 and cam1 TIFFs across every session automatically
+# Collect all cam0 and cam1 TIFFs across every session automatically.
 CAM0_ALL=()
 CAM1_ALL=()
 for session_dir in strohA-al-RPICAM-*/; do
+    [ -d "$session_dir" ] || continue
     raw_dir="${session_dir}raw"
     for f in "$raw_dir"/cam0_*_raw.tif; do
         [ -f "$f" ] && CAM0_ALL+=("$f")
@@ -126,65 +139,118 @@ done
 echo "Found ${#CAM0_ALL[@]} cam0 sessions:"
 printf '  %s\n' "${CAM0_ALL[@]}"
 
-# Use the first session as --cam0/--cam1; pass the rest as --background-extra-*
+# Split off the first session for --cam0/--cam1; pass the rest as
+# --background-extra-*.  Done via positional parameters so this works
+# identically in bash (0-indexed arrays) and zsh (1-indexed arrays).
+set -- "${CAM0_ALL[@]}";  CAM0_FIRST="$1"; shift; CAM0_REST=("$@")
+set -- "${CAM1_ALL[@]}";  CAM1_FIRST="$1"; shift; CAM1_REST=("$@")
+
 rpimocap-segment \
-    --cam0                    "${CAM0_ALL[0]}" \
-    --cam1                    "${CAM1_ALL[0]}" \
+    --cam0                    "$CAM0_FIRST" \
+    --cam1                    "$CAM1_FIRST" \
     --calib                   calib/calib_from_corners.npz \
     --bayer-pattern           RGGB \
-    --background-extra-cam0   "${CAM0_ALL[@]:1}" \
-    --background-extra-cam1   "${CAM1_ALL[@]:1}" \
+    --background-extra-cam0   "${CAM0_REST[@]}" \
+    --background-extra-cam1   "${CAM1_REST[@]}" \
     --background-frames       100 \
     --bounds="-140,140,-215,215,0,388" \
     --threshold               20 \
     --green-channel --bilateral \
     --centroid-only \
+    --texture-suppress \
     --end-frame               0 \
     --out                     .
-# --end-frame 0 builds the background model then exits without tracking
-
-mv background/bg.npz background/bg.npz   # already in place
+# --end-frame 0    → build the background model then exit without tracking
+# --texture-suppress → also cache the Gabor energy model in bg.npz
+#                      (required by --gabor-refine; harmless if unused)
 ```
 
 - [ ] `background/bg.npz` created
 - [ ] `background/bg_cam0.png` and `bg_cam1.png` look clean (empty arena)
 
-> **For v0.5.0 Gabor refinement support (Step 6b):** add
-> `--texture-suppress` to the command above. This bakes a Gabor
-> energy model of the bedding texture into `bg.npz` alongside the
-> intensity background. Without it the `--gabor-refine` flag at
-> tracking time is a silent no-op. There is no separate
-> `rpimocap-build-bg` tool — the same `rpimocap-segment
-> --end-frame 0` command builds the background; just add
-> `--texture-suppress` to the flag list. Adds ~30 s to background
-> build on a typical session; the cached model is then free to use
-> at tracking time.
+> The command above includes `--texture-suppress` by default. That
+> bakes a Gabor energy model into `bg.npz` alongside the intensity
+> background and is required by `--gabor-refine` at tracking time.
+> It's safe to keep on even if you don't plan to use `--gabor-refine`
+> — costs about 30 s on a typical session and is otherwise inert.
 
 ---
 
 ## Step 6 — Track Each Session
 
+### Single session (paste once per recording)
+
+For a single recording, fill in the four variables at the top of the
+block and paste:
+
 ```bash
-# Loop over every session/recording automatically
+# Tolerate globs that don't match
+setopt NULL_GLOB 2>/dev/null; shopt -s nullglob 2>/dev/null
+
+# ── EDIT THESE ──────────────────────────────────────────────────────────
+DATE_PART=20260214
+TIME_PART=021722
+SUBJECT_DIR=strohA-al-RPICAM-${DATE_PART}
+# ────────────────────────────────────────────────────────────────────────
+
+raw_dir="${SUBJECT_DIR}/raw"
+cam0_tif="${raw_dir}/cam0_${DATE_PART}_${TIME_PART}_raw.tif"
+cam1_tif="${raw_dir}/cam1_${DATE_PART}_${TIME_PART}_raw.tif"
+session="${SUBJECT_DIR}/${DATE_PART}-${TIME_PART}"
+
+rpimocap-segment \
+    --cam0             "$cam0_tif" \
+    --cam1             "$cam1_tif" \
+    --calib            calib/calib_from_corners.npz \
+    --bayer-pattern    RGGB \
+    --background-model background/bg.npz \
+    --bounds="-140,140,-215,215,0,388" \
+    --threshold        20 \
+    --green-channel --bilateral \
+    --centroid-only \
+    --out              "$session"
+
+rpimocap-preview \
+    --cam0          "$cam0_tif" \
+    --cam1          "$cam1_tif" \
+    --calib         calib/calib_from_corners.npz \
+    --h5            "$session/tracking/reconstruction.h5" \
+    --bayer-pattern RGGB \
+    --out           "$session/tracking/preview.mp4" \
+    --end-frame     500
+```
+
+### Batch (loop over every session under the working directory)
+
+```bash
+setopt NULL_GLOB 2>/dev/null; shopt -s nullglob 2>/dev/null
+
 for session_dir in strohA-al-RPICAM-*/; do
-    DATE=$(echo "$session_dir" | grep -oP '\d{8}(?=-RPICAM)')
-    # Wait — the dir is strohA-al-RPICAM-20260214, so:
+    [ -d "$session_dir" ] || continue
+
+    # Extract DATE_PART from the directory name (strohA-al-RPICAM-20260214)
     DATE_PART="${session_dir#strohA-al-RPICAM-}"
-    DATE_PART="${DATE_PART%/}"   # e.g. 20260214
+    DATE_PART="${DATE_PART%/}"
 
     raw_dir="${session_dir}raw"
 
     for cam0_tif in "$raw_dir"/cam0_*_raw.tif; do
         [ -f "$cam0_tif" ] || continue
-        fname=$(basename "$cam0_tif")                 # cam0_20260214_021722_raw.tif
-        TIME=$(echo "$fname" | grep -oP '(?<=_)\d{6}(?=_raw)')
-        cam1_tif="${raw_dir}/cam1_${DATE_PART}_${TIME}_raw.tif"
-        session="${session_dir}${DATE_PART}-${TIME}"
+
+        # Extract TIME_PART from the filename via parameter expansion
+        # (avoids grep -oP, which is GNU-only and missing on macOS).
+        fname="${cam0_tif##*/}"             # cam0_20260214_021722_raw.tif
+        tmp="${fname#cam0_}"                # 20260214_021722_raw.tif
+        tmp="${tmp%_raw.tif}"               # 20260214_021722
+        TIME_PART="${tmp#*_}"               # 021722
+
+        cam1_tif="${raw_dir}/cam1_${DATE_PART}_${TIME_PART}_raw.tif"
+        session="${session_dir}${DATE_PART}-${TIME_PART}"
 
         echo ""
-        echo "═══ $DATE_PART-$TIME ══════════════════════════════════"
+        echo "═══ $DATE_PART-$TIME_PART ══════════════════════════════════"
 
-        # ── Validate on 50 frames first ──────────────────────────────
+        # ── Validate on 50 frames first ─────────────────────────────────
         rpimocap-segment \
             --cam0             "$cam0_tif" \
             --cam1             "$cam1_tif" \
@@ -198,14 +264,17 @@ for session_dir in strohA-al-RPICAM-*/; do
             --end-frame        50 \
             --out              "$session"
 
-        # ── Quick validity check ──────────────────────────────────────
-        python3 - << PYEOF
-import h5py, numpy as np, sys
-h5 = "$session/tracking/reconstruction.h5"
-with h5py.File(h5) as f:
-    if "animal" not in f.get("skeleton", {}):
-        print("  WARN: no animal key — check background/threshold"); sys.exit(1)
-    g = f["skeleton"]["animal"]
+        # ── Quick validity check ─────────────────────────────────────────
+        python3 - "$session/tracking/reconstruction.h5" << 'PYEOF'
+import sys
+import h5py, numpy as np
+h5path = sys.argv[1]
+with h5py.File(h5path) as f:
+    skel = f.get("skeleton") or {}
+    if "animal" not in skel:
+        print("  WARN: no animal key — check background/threshold")
+        sys.exit(1)
+    g = skel["animal"]
     # Prefer /detected (v0.5.0+): captured pre-post-processing, so
     # gap-filled frames are correctly False even when xyz is non-NaN.
     if "detected" in g:
@@ -215,16 +284,19 @@ with h5py.File(h5) as f:
         xyz = g["xyz"][:]
         v = ~np.isnan(xyz).any(axis=1)
         n_real, n_total = int(v.sum()), int(len(xyz))
-pct = 100*n_real/max(n_total,1)
+pct = 100*n_real/max(n_total, 1)
 print(f"  Validation: {n_real}/{n_total} real frames ({pct:.0f}%)")
 if pct < 60:
-    print("  WARN: < 60% detection — see Troubleshooting (try "
-          "--gabor-refine --kalman --kalman-online)")
+    print("  WARN: < 60% detection — see Troubleshooting "
+          "(try --gabor-refine --kalman --kalman-online)")
     sys.exit(1)
 PYEOF
-        [ $? -ne 0 ] && { echo "  SKIP full run (validation failed)"; continue; }
+        if [ $? -ne 0 ]; then
+            echo "  SKIP full run (validation failed)"
+            continue
+        fi
 
-        # ── Full run ──────────────────────────────────────────────────
+        # ── Full run ─────────────────────────────────────────────────────
         rpimocap-segment \
             --cam0             "$cam0_tif" \
             --cam1             "$cam1_tif" \
@@ -237,7 +309,7 @@ PYEOF
             --centroid-only \
             --out              "$session"
 
-        # ── Preview (first 500 frames) ────────────────────────────────
+        # ── Preview (first 500 frames) ───────────────────────────────────
         rpimocap-preview \
             --cam0          "$cam0_tif" \
             --cam1          "$cam1_tif" \
@@ -264,35 +336,9 @@ roughly 30 % of bare runtime.
 ### Pre-flight: build a `--texture-suppress` background
 
 The Gabor-edge body contour (`--gabor-refine`) needs a cached Gabor
-model in the `background/bg.npz`. There's no separate background-
-build tool — `rpimocap-segment` itself builds the background when
-called with `--end-frame 0`, the same pattern as Step 5. Add
-`--texture-suppress` so the Gabor model is cached alongside the
-intensity background:
-
-```bash
-rpimocap-segment \
-    --cam0                    "${CAM0_ALL[0]}" \
-    --cam1                    "${CAM1_ALL[0]}" \
-    --calib                   calib/calib_from_corners.npz \
-    --bayer-pattern           RGGB \
-    --background-extra-cam0   "${CAM0_ALL[@]:1}" \
-    --background-extra-cam1   "${CAM1_ALL[@]:1}" \
-    --background-frames       100 \
-    --bounds="-140,140,-215,215,0,388" \
-    --threshold               20 \
-    --green-channel --bilateral \
-    --centroid-only \
-    --texture-suppress \
-    --end-frame               0 \
-    --out                     .
-# --end-frame 0 → build the background model and exit without tracking.
-# --texture-suppress → also cache the Gabor energy model in bg.npz,
-#                      required for --gabor-refine at tracking time.
-```
-
-This can also just be folded into Step 5 by adding `--texture-suppress`
-to that command — there's no harm in always including it.
+model in `background/bg.npz`. Step 5 builds it by default (the
+command there already passes `--texture-suppress`). If you built
+`bg.npz` earlier without it, re-run Step 5 to rebake.
 
 ### Full robust run
 
@@ -428,23 +474,34 @@ xyz_real = xyz[det]
 ## Step 7 — Batch Summary
 
 ```bash
-# Print detection stats for every completed session
+setopt NULL_GLOB 2>/dev/null; shopt -s nullglob 2>/dev/null
+
 echo ""
 echo "Session                        valid/total   X mean±std    Y mean±std    Z mean±std"
 echo "─────────────────────────────────────────────────────────────────────────────────"
 
 for h5 in strohA-al-RPICAM-*/*/tracking/reconstruction.h5; do
-    python3 - << PYEOF
+    [ -f "$h5" ] || continue
+    python3 - "$h5" << 'PYEOF'
+import sys
 import h5py, numpy as np
-h5 = "$h5"
-label = "/".join(h5.split("/")[:-2])   # strohA-al-RPICAM-YYYYMMDD/YYYYMMDD-HHMMSS
-with h5py.File(h5) as f:
-    if "animal" not in f.get("skeleton", {}):
-        print(f"  {label:<30s}  no animal key"); exit()
-    xyz = f["skeleton"]["animal"]["xyz"][:]
-v = ~np.isnan(xyz).any(axis=1)
-x,y,z = xyz[v,0], xyz[v,1], xyz[v,2]
-print(f"  {label:<30s}  {v.sum():4d}/{len(xyz):<5d}"
+h5path = sys.argv[1]
+# strohA-al-RPICAM-YYYYMMDD/YYYYMMDD-HHMMSS
+label = "/".join(h5path.split("/")[:-2])
+with h5py.File(h5path) as f:
+    skel = f.get("skeleton") or {}
+    if "animal" not in skel:
+        print(f"  {label:<30s}  no animal key")
+        sys.exit(0)
+    g   = skel["animal"]
+    xyz = g["xyz"][:]
+    # Use /detected (v0.5.0+) when present — accurate post-Kalman.
+    if "detected" in g:
+        v = g["detected"][:]
+    else:
+        v = ~np.isnan(xyz).any(axis=1)
+x, y, z = xyz[v, 0], xyz[v, 1], xyz[v, 2]
+print(f"  {label:<30s}  {int(v.sum()):4d}/{len(xyz):<5d}"
       f"  X={x.mean():+6.0f}±{x.std():4.0f}"
       f"  Y={y.mean():+6.0f}±{y.std():4.0f}"
       f"  Z={z.mean():+6.0f}±{z.std():4.0f}")
