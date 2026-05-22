@@ -42,8 +42,11 @@ import numpy as np
 
 from rpimocap.detection.detectors import Keypoint2D, Pose2DResult
 from rpimocap.detection.segment import (
-    BackgroundModel, ForegroundDetector, ForegroundResult,
-    GeometricLabeller, SAMLabeller, BodyRegion, EpipolarMatcher,
+    BackgroundModel,
+    BodyRegion,
+    EpipolarMatcher,
+    ForegroundDetector,
+    GeometricLabeller,
 )
 from rpimocap.reconstruction.triangulate import Point3D
 
@@ -330,8 +333,7 @@ class SAM2VideoTracker:
                 from sam2.build_sam import build_sam2_video_predictor as build
             except ImportError:
                 # Older API
-                from sam2.sam2_video_predictor import (
-                    SAM2VideoPredictor as build)  # type: ignore
+                from sam2.sam2_video_predictor import SAM2VideoPredictor as build  # type: ignore
             self._predictor = build(self._config, self._ckpt,
                                     device=self._device)
             print(f"  SAM2-video loaded: {Path(self._ckpt).name}  "
@@ -537,7 +539,7 @@ class SAM2Tracker:
 
             return results
 
-        except Exception as e:
+        except Exception:
             # Any SAM2 error → return hints unchanged
             return hint_regions
 
@@ -811,8 +813,7 @@ class SegmentTracker:
         # fallback).
         sam2_fg0 = sam2_fg1 = None
         if self._sam2_mask_cache is not None:
-            from rpimocap.detection.sam2_mask_cache import (
-                foreground_result_from_mask)
+            from rpimocap.detection.sam2_mask_cache import foreground_result_from_mask
             m0, m1 = self._sam2_mask_cache[idx]
             if m0 is not None:
                 sam2_fg0 = foreground_result_from_mask(m0, f0)

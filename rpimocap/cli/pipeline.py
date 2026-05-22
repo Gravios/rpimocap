@@ -56,7 +56,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                     #
 # --------------------------------------------------------------------------- #
@@ -108,9 +107,9 @@ def remap_frame(frame: np.ndarray, mapx: np.ndarray, mapy: np.ndarray) -> np.nda
 def build_detector(args):
     """Instantiate the 2D pose detector based on CLI flags."""
     from rpimocap.detection.detectors import (
-        MediaPipePoseDetector,
         CentroidPoseDetector,
         CSVPoseDetector,
+        MediaPipePoseDetector,
     )
 
     det = args.detector.lower()
@@ -160,15 +159,29 @@ def build_detector(args):
 
 
 def run(args):
-    from rpimocap.detection.detectors import CentroidPoseDetector
-    from rpimocap.reconstruction.triangulate import (triangulate_keypoints, smooth_trajectory,
-                              fill_trajectory_gaps, trajectory_stats)
-    from rpimocap.reconstruction.voxel import (build_voxel_grid, make_bg_subtractor,
-                       extract_silhouette, carve_frame, apply_carving,
-                       occupied_centers, grid_to_mesh)
-    from rpimocap.io.export import (write_ply_pointcloud, write_ply_mesh,
-                        write_ply_skeleton_frame, write_hdf5,
-                        write_viewer_json, write_stats_csv)
+    from rpimocap.io.export import (
+        write_hdf5,
+        write_ply_mesh,
+        write_ply_pointcloud,
+        write_ply_skeleton_frame,
+        write_stats_csv,
+        write_viewer_json,
+    )
+    from rpimocap.reconstruction.triangulate import (
+        fill_trajectory_gaps,
+        smooth_trajectory,
+        trajectory_stats,
+        triangulate_keypoints,
+    )
+    from rpimocap.reconstruction.voxel import (
+        apply_carving,
+        build_voxel_grid,
+        carve_frame,
+        extract_silhouette,
+        grid_to_mesh,
+        make_bg_subtractor,
+        occupied_centers,
+    )
 
     out_dir = Path(args.out)
     ply_dir = out_dir / "ply"
@@ -197,7 +210,7 @@ def run(args):
         R, T = cal["R"], cal["T"]
         P0 = K0 @ np.hstack([np.eye(3), np.zeros((3, 1))])
         P1 = K1 @ np.hstack([R, T.reshape(3, 1)])
-        print(f"  Rectification: OFF  (using raw projection matrices)")
+        print("  Rectification: OFF  (using raw projection matrices)")
 
     # ── Refraction model ──────────────────────────────────────────────────
     # Refraction correction is OFF by default. The current arena has no
@@ -218,7 +231,7 @@ def run(args):
     elif args.enable_refraction and args.refraction_config:
         from rpimocap.reconstruction.refraction import load_arena_config
         arena_model = load_arena_config(args.refraction_config)
-        print(f"\n── Arena refraction model ───────────────────────────")
+        print("\n── Arena refraction model ───────────────────────────")
         print(f"  Loaded {len(arena_model.planes)} walls from "
               f"{args.refraction_config}")
         if do_rectify:
@@ -384,8 +397,11 @@ def run(args):
     align_result = None
     if args.align_points:
         from rpimocap.reconstruction.align import (
-            load_align_csv, kabsch_align,
-            align_skeleton_frames, align_voxel_frames,
+            align_skeleton_frames,
+            align_voxel_frames,
+            kabsch_align,
+            kabsch_align_from_pixels,
+            load_align_csv,
         )
         print(f"\n── Arena alignment ({args.align_points}) ──────────────────────")
         try:
@@ -449,7 +465,7 @@ def run(args):
     )
 
     print(f"\n✓ Done.  Output in: {out_dir}/")
-    print(f"  Open the viewer:  viewer/index.html")
+    print("  Open the viewer:  viewer/index.html")
     print(f"  Copy {out_dir}/viewer_data.json → viewer/data/viewer_data.json")
 
 

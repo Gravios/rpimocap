@@ -417,16 +417,21 @@ def main() -> None:
     # ── Imports ───────────────────────────────────────────────────────────────
     from rpimocap.cli.pipeline import open_video
     from rpimocap.detection.segment import (
-        BackgroundModel, ForegroundDetector,
-        GeometricLabeller, EpipolarMatcher,
+        BackgroundModel,
+        EpipolarMatcher,
+        ForegroundDetector,
+        GeometricLabeller,
         arena_roi_mask,
     )
     from rpimocap.detection.tracker import SegmentTracker
+    from rpimocap.io.export import write_hdf5, write_stats_csv, write_viewer_json
     from rpimocap.reconstruction.kalman import KalmanTracker3D
     from rpimocap.reconstruction.rearing import RearingClassifier
     from rpimocap.reconstruction.triangulate import (
-        smooth_trajectory, fill_trajectory_gaps, trajectory_stats)
-    from rpimocap.io.export import write_hdf5, write_viewer_json, write_stats_csv
+        fill_trajectory_gaps,
+        smooth_trajectory,
+        trajectory_stats,
+    )
 
     out_dir   = Path(args.out)
     bg_dir    = out_dir / "background"
@@ -509,7 +514,10 @@ def main() -> None:
     flat1: "np.ndarray | None" = None
     if args.flat_field_cam0 or args.flat_field_cam1 or args.synthesize_flat_field:
         from rpimocap.detection.vignette import (
-            apply_flat_field, load_flat_field, synthesize_flat_field)
+            apply_flat_field,
+            load_flat_field,
+            synthesize_flat_field,
+        )
         print("\n── Flat-field correction ────────────────────────────")
         if args.flat_field_cam0:
             flat0 = load_flat_field(args.flat_field_cam0)
@@ -538,8 +546,10 @@ def main() -> None:
     align_result = None
     if args.align_points:
         from rpimocap.reconstruction.align import (
-                load_align_csv, kabsch_align,
-                kabsch_align_from_pixels)
+            kabsch_align,
+            kabsch_align_from_pixels,
+            load_align_csv,
+        )
         print(f"\n── Arena alignment ({args.align_points}) ─────────────────────")
         try:
             align_pts = load_align_csv(args.align_points)
@@ -605,11 +615,11 @@ def main() -> None:
                          or (track_dir / "sam2_masks"))
         cache = SAM2MaskCache(cache_dir)
         if cache.exists:
-            print(f"\n── SAM2 video cache ───────────────────────────────────────────")
+            print("\n── SAM2 video cache ───────────────────────────────────────────")
             print(f"  Reusing existing cache at {cache_dir}")
             sam2_mask_cache = cache
         else:
-            print(f"\n── SAM2 video pre-pass ─────────────────────────────────────────")
+            print("\n── SAM2 video pre-pass ─────────────────────────────────────────")
             print(f"  Loading SAM2 video model: {args.sam2_video_checkpoint}")
             svt = SAM2VideoTracker(
                 checkpoint=args.sam2_video_checkpoint,
@@ -662,7 +672,7 @@ def main() -> None:
                     prompt0_xy=p0, prompt1_xy=p1,
                     cache_dir=cache_dir,
                     prompt_frame_idx=args.sam2_video_prompt_frame)
-                print(f"  SAM2 propagation complete")
+                print("  SAM2 propagation complete")
 
     # ── Tracker ──────────────────────────────────────────────────────────────
     print("\n── Tracking ────────────────────────────────────────────────────")
@@ -730,8 +740,7 @@ def main() -> None:
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     if args.diagnostics:
-        from rpimocap.detection.segment import (
-            save_diagnostics, GeometricLabeller)
+        from rpimocap.detection.segment import GeometricLabeller, save_diagnostics
         diag_header = f"\n── Diagnostics -> {args.diagnostics} ──────────────────────"
         print(diag_header)
         # Reset captures to start for diagnostic sampling
@@ -827,7 +836,7 @@ def main() -> None:
     print("\n── Exporting ───────────────────────────────────────────────────")
 
     write_stats_csv(track_dir / "detection_stats.csv", stats)
-    print(f"  detection_stats.csv")
+    print("  detection_stats.csv")
 
     write_hdf5(
         track_dir / "reconstruction.h5",
@@ -846,7 +855,7 @@ def main() -> None:
                                  if align_result else None),
             "sam2_checkpoint":  args.sam2_checkpoint,
         })
-    print(f"  reconstruction.h5")
+    print("  reconstruction.h5")
 
     # Derive keypoint names and skeleton edges from the tracking results
     kp_names = sorted({pt.name for frame in skeleton_frames for pt in frame})
@@ -867,13 +876,13 @@ def main() -> None:
         bounds=bounds,
         fps=fps,
         voxel_frames=None)
-    print(f"  viewer_data.json")
+    print("  viewer_data.json")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     n_det  = sum(1 for r in results if r.detected)
     n_tot  = len(results)
     parts  = set(k for r in results for k in r.xyz)
-    print(f"\n── Done ────────────────────────────────────────────────────────")
+    print("\n── Done ────────────────────────────────────────────────────────")
     print(f"  Processed : {n_tot} frames")
     print(f"  Detected  : {n_det} ({100*n_det/max(n_tot,1):.1f}%)")
     print(f"  Body parts: {sorted(parts)}")

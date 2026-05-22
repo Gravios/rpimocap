@@ -26,7 +26,6 @@ from typing import Optional, Union
 
 import numpy as np
 
-
 # --------------------------------------------------------------------------- #
 #  PLY                                                                         #
 # --------------------------------------------------------------------------- #
@@ -394,8 +393,8 @@ class TiffCapture:
     """
 
     def __init__(self, path: str, bayer_pattern: str = "RGGB") -> None:
-        import tifffile
         import cv2
+        import tifffile
         self._path  = str(path)
         self._cv2   = cv2
         self._tf    = tifffile.TiffFile(str(path))

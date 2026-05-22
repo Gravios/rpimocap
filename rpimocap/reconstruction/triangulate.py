@@ -14,11 +14,10 @@ Also provides:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-
 
 # --------------------------------------------------------------------------- #
 #  Data class                                                                  #
@@ -138,9 +137,7 @@ def triangulate_keypoints(
     )
     if use_refraction:
         # Pre-compute camera centres in world coordinates: C = -R^T T
-        from rpimocap.reconstruction.refraction import (
-            pixel_to_world_ray, triangulate_refracted
-        )
+        from rpimocap.reconstruction.refraction import pixel_to_world_ray, triangulate_refracted
 
     results = []
     for name, kp0 in kps0.items():

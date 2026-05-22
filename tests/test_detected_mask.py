@@ -68,8 +68,9 @@ class TestDetectedMask:
         write_hdf5(tmp_path / "out.h5", frames, fps=25.0)
         with h5py.File(tmp_path / "out.h5", "r") as f:
             det = f["skeleton"]["animal"]["detected"][:]
-        assert det[5] == False
-        assert det[4]; assert det[6]
+        assert not det[5]
+        assert det[4]
+        assert det[6]
 
     def test_shape_validation_raises(self, tmp_path):
         frames = _frames(20)
