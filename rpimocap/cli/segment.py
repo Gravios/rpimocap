@@ -220,6 +220,31 @@ def main() -> None:
                     help="Z threshold to leave the reared state (default "
                          "70 mm). Hysteresis prevents flicker at the "
                          "boundary.")
+    det.add_argument("--sam2-video-checkpoint", type=str, default=None,
+                    metavar="PATH",
+                    help="Enable SAM2 video propagation for per-frame "
+                         "masks. The given checkpoint (e.g. "
+                         "sam2_hiera_large.pt) is loaded into a "
+                         "SAM2VideoTracker; a pre-pass propagates the "
+                         "rat mask across the whole session from a seed "
+                         "centroid (taken from bg-subtraction on the "
+                         "prompt frame). Per-frame masks are cached to "
+                         "disk and consumed by track_sequence instead "
+                         "of bg-subtraction. Requires the `sam2` package "
+                         "and ~30-100 KB/frame disk space for the cache. "
+                         "When unset (default) bg-subtraction is used.")
+    det.add_argument("--sam2-video-config", type=str,
+                    default="sam2.1_hiera_l.yaml", metavar="CFG",
+                    help="SAM2 video config name (default sam2.1_hiera_l.yaml).")
+    det.add_argument("--sam2-video-cache-dir", type=str, default=None,
+                    metavar="DIR",
+                    help="Where to stage the SAM2 mask cache (default: "
+                         "<session>/tracking/sam2_masks/). Cache is "
+                         "reused if it already exists for the session.")
+    det.add_argument("--sam2-video-prompt-frame", type=int, default=0,
+                    metavar="N",
+                    help="Which frame's bg-sub centroid to use as the "
+                         "SAM2 seed prompt (default frame 0).")
     det.add_argument("--min-solidity", type=float, default=0.0,
                     metavar="S",
                     help="Minimum blob solidity = area/hull_area [0–1] "
@@ -570,6 +595,75 @@ def main() -> None:
     else:
         print("  Arena ROI mask disabled (--no-roi-mask)")
 
+    # ── SAM2 video propagation pre-pass (if enabled) ─────────────────────────
+    sam2_mask_cache = None
+    if args.sam2_video_checkpoint:
+        from rpimocap.detection.sam2_mask_cache import SAM2MaskCache
+        from rpimocap.detection.tracker import SAM2VideoTracker
+
+        cache_dir = Path(args.sam2_video_cache_dir
+                         or (track_dir / "sam2_masks"))
+        cache = SAM2MaskCache(cache_dir)
+        if cache.exists:
+            print(f"\n── SAM2 video cache ───────────────────────────────────────────")
+            print(f"  Reusing existing cache at {cache_dir}")
+            sam2_mask_cache = cache
+        else:
+            print(f"\n── SAM2 video pre-pass ─────────────────────────────────────────")
+            print(f"  Loading SAM2 video model: {args.sam2_video_checkpoint}")
+            svt = SAM2VideoTracker(
+                checkpoint=args.sam2_video_checkpoint,
+                config=args.sam2_video_config,
+                device=args.device)
+            if not svt.available:
+                print("  WARN: SAM2VideoTracker not available "
+                      "(sam2 package missing) — falling back to bg-sub")
+            else:
+                # Seed prompts: take the bg-sub centroid on the prompt frame
+                # from each camera.
+                from rpimocap.detection.segment import ForegroundDetector
+                det = ForegroundDetector(
+                    background=bg, threshold=args.threshold,
+                    min_area_px=args.min_area)
+
+                def _frames_iter(cap):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    while True:
+                        ok, f = cap.read()
+                        if not ok:
+                            return
+                        yield f
+
+                def _seed_from_bg(cap, cam):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES,
+                            args.sam2_video_prompt_frame)
+                    ok, f = cap.read()
+                    if not ok:
+                        raise RuntimeError(
+                            f"cam{cam}: cannot read prompt frame "
+                            f"{args.sam2_video_prompt_frame}")
+                    r = det.detect(f, cam)
+                    if r.n_blobs == 0:
+                        raise RuntimeError(
+                            f"cam{cam}: no blobs on prompt frame; "
+                            "cannot seed SAM2")
+                    # Largest blob centroid
+                    ys, xs = np.where(r.label_map == 1)
+                    return float(xs.mean()), float(ys.mean())
+
+                p0 = _seed_from_bg(cap0, 0)
+                p1 = _seed_from_bg(cap1, 1)
+                print(f"  Seed cam0 prompt: ({p0[0]:.0f}, {p0[1]:.0f})")
+                print(f"  Seed cam1 prompt: ({p1[0]:.0f}, {p1[1]:.0f})")
+                print(f"  Propagating masks → {cache_dir}")
+                sam2_mask_cache = SAM2MaskCache.precompute(
+                    svt,
+                    _frames_iter(cap0), _frames_iter(cap1),
+                    prompt0_xy=p0, prompt1_xy=p1,
+                    cache_dir=cache_dir,
+                    prompt_frame_idx=args.sam2_video_prompt_frame)
+                print(f"  SAM2 propagation complete")
+
     # ── Tracker ──────────────────────────────────────────────────────────────
     print("\n── Tracking ────────────────────────────────────────────────────")
     tracker = SegmentTracker(
@@ -625,6 +719,7 @@ def main() -> None:
             z_exit=args.rearing_z_exit)
             if (args.rearing_detection and args.kalman_online) else None),
         fps=float(fps),
+        sam2_mask_cache=sam2_mask_cache,
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

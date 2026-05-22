@@ -613,6 +613,7 @@ class SegmentTracker:
         rearing_classifier:   "Optional[object]" = None,
         rearing_track_name:   str = "animal",
         fps:                  float = 25.0,
+        sam2_mask_cache:      "Optional[object]" = None,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -649,6 +650,12 @@ class SegmentTracker:
         # overrides body_length_mm / body_width_mm on the next frame.
         self._current_posture = None
         self._fps             = float(fps)
+        # SAM2 video propagation cache. When present, _process_frame
+        # prefers cached masks over bg-subtraction. The cache is built
+        # by a pre-pass (see SAM2MaskCache.precompute) and indexed by
+        # the frame counter maintained in track_sequence.
+        self._sam2_mask_cache = sam2_mask_cache
+        self._frame_idx       = 0    # set by track_sequence per iteration
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -790,9 +797,51 @@ class SegmentTracker:
             if self._flat1 is not None:
                 f1 = apply_flat_field(f1, self._flat1, clip=True)
 
+        # ── SAM2 video-propagation mask (if cache available) ──────────
+        # When a SAM2MaskCache is supplied, the per-frame mask comes
+        # from SAM2 video propagation rather than from background
+        # subtraction. Building a synthetic ForegroundResult from the
+        # SAM2 mask and stuffing it into both OpticalFlowTrackers'
+        # _last_fg slot keeps the downstream re-hull / labelling path
+        # unchanged. We still call self._of{0,1}.track() so optical-
+        # flow point tracking stays warm; .track() will re-detect from
+        # bg-sub when its points die and that's fine — by then either
+        # the SAM2 mask is still available (and overwrites _last_fg
+        # again) or it isn't (in which case bg-sub is the desired
+        # fallback).
+        sam2_fg0 = sam2_fg1 = None
+        if self._sam2_mask_cache is not None:
+            from rpimocap.detection.sam2_mask_cache import (
+                foreground_result_from_mask)
+            m0, m1 = self._sam2_mask_cache[idx]
+            if m0 is not None:
+                sam2_fg0 = foreground_result_from_mask(m0, f0)
+            if m1 is not None:
+                sam2_fg1 = foreground_result_from_mask(m1, f1)
+
         # Step 1: optical flow → approximate centroids in both cameras
         regions0 = self._of0.track(f0, 0)
         regions1 = self._of1.track(f1, 1)
+
+        # If SAM2 video masks are available for this frame, OVERRIDE the
+        # optical-flow / bg-sub regions with regions derived from those
+        # masks. The labeller produces BodyRegion list from the synthetic
+        # ForegroundResult, and we stuff that result into the optical-
+        # flow tracker's _last_fg slot so the downstream re-hull step
+        # (which reads _last_fg) sees the SAM2 mask, not the stale bg-
+        # sub one.
+        if sam2_fg0 is not None:
+            try:
+                regions0 = self._lbl.label(sam2_fg0)
+                self._of0._last_fg = sam2_fg0
+            except Exception:
+                pass    # fall back to optical-flow regions
+        if sam2_fg1 is not None:
+            try:
+                regions1 = self._lbl.label(sam2_fg1)
+                self._of1._last_fg = sam2_fg1
+            except Exception:
+                pass
 
         # Step 2: SAM2 mask refinement (if available)
         if self._sam2 is not None and self._sam2.available:

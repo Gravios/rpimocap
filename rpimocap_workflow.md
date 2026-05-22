@@ -326,6 +326,41 @@ If no calibration capture exists, synthesise one from the background:
 rpimocap-segment ... --synthesize-flat-field
 ```
 
+### Optional: SAM2 video propagation for foreground masks
+
+When bedding disturbance is severe enough that even Gabor refinement
+struggles, replacing bg-subtraction entirely with SAM2 video
+propagation gives the cleanest masks. Requires the `sam2` package
+installed and a downloaded checkpoint.
+
+```bash
+rpimocap-segment ... \
+    --sam2-video-checkpoint /path/to/sam2_hiera_large.pt \
+    --sam2-video-config     sam2.1_hiera_l.yaml \
+    --sam2-video-prompt-frame 0
+```
+
+How it works:
+
+1. **Pre-pass.** Before tracking starts, `rpimocap-segment` reads frame
+   `--sam2-video-prompt-frame` (default 0), runs bg-subtraction to find
+   the rat blob's centroid in both cameras, and uses those as point
+   prompts to seed SAM2.
+2. **Propagation.** SAM2's video predictor propagates the mask through
+   the whole session using its appearance-and-motion model.
+3. **Caching.** Per-frame masks are written to
+   `<session>/tracking/sam2_masks/cam{0,1}/NNNNNN.png` (or to
+   `--sam2-video-cache-dir DIR` if set). A second run on the same
+   session reuses the cache and skips the pre-pass.
+4. **Per-frame consumption.** Inside `track_sequence`, the cached mask
+   is loaded instead of running bg-subtraction. Everything downstream
+   (labelling, epipolar matching, hull_centroid with all the v0.5.0
+   refinements, triangulation, post-processing) is unchanged.
+
+When SAM2 loses track on a particular frame the cache returns `None`
+and the pipeline falls back to bg-subtraction for that frame, so a
+partial propagation is still useful.
+
 ### Reading the new `detected` HDF5 field
 
 Every `reconstruction.h5` written by v0.5.0+ carries
