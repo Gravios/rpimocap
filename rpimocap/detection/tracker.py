@@ -588,6 +588,9 @@ class SegmentTracker:
         body_z_mm:        float = 0.0,
         P0:               "Optional[np.ndarray]" = None,
         P1:               "Optional[np.ndarray]" = None,
+        gabor_refine:     bool  = False,
+        canny_low:        float = 30.0,
+        canny_high:       float = 90.0,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -609,6 +612,9 @@ class SegmentTracker:
         self._body_z_mm      = float(body_z_mm)
         self._P0 = P0
         self._P1 = P1
+        self._gabor_refine = bool(gabor_refine)
+        self._canny_low    = float(canny_low)
+        self._canny_high   = float(canny_high)
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -777,7 +783,10 @@ class SegmentTracker:
                     P=self._P0,
                     body_length_mm=self._body_length_mm,
                     body_width_mm=self._body_width_mm,
-                    body_z_mm=self._body_z_mm)
+                    body_z_mm=self._body_z_mm,
+                    gabor_refine=self._gabor_refine,
+                    canny_low=self._canny_low,
+                    canny_high=self._canny_high)
                 r0 = r0.__class__(
                     label=r0.label, cx=hx0, cy=hy0,
                     area_px=r0.area_px, confidence=r0.confidence,
@@ -789,7 +798,10 @@ class SegmentTracker:
                     P=self._P1,
                     body_length_mm=self._body_length_mm,
                     body_width_mm=self._body_width_mm,
-                    body_z_mm=self._body_z_mm)
+                    body_z_mm=self._body_z_mm,
+                    gabor_refine=self._gabor_refine,
+                    canny_low=self._canny_low,
+                    canny_high=self._canny_high)
                 r1 = r1.__class__(
                     label=r1.label, cx=hx1, cy=hy1,
                     area_px=r1.area_px, confidence=r1.confidence,

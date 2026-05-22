@@ -129,6 +129,13 @@ class ForegroundResult:
     frame_gray: np.ndarray
     n_blobs:    int
     label_map:  Optional[np.ndarray] = field(default=None, repr=False)
+    gabor_energy: Optional[np.ndarray] = field(default=None, repr=False)
+    # Per-pixel Gabor energy at bedding scales (normalised to [0, 1]).
+    # Cached by detect() when texture_suppress is active OR when a
+    # background Gabor model is available. Low values = smooth body
+    # region; high values = bedding texture. Consumed by
+    # ForegroundDetector.gabor_body_contour() to find the rat outline
+    # in texture space.
 
 
 # --------------------------------------------------------------------------- #
@@ -869,16 +876,20 @@ class ForegroundDetector:
         # The animal body is a smooth dark blob → low Gabor energy → NOT
         # suppressed.  Disturbed bedding keeps its fibrous texture → high
         # Gabor energy → suppressed even if the pixel value changed.
+        _frame_gabor_n = None
         if self._texture_alpha > 0 and cam in self._bg_gabor:
-            frame_gabor  = gabor_bedding_energy(gray.astype(np.float32))
-            frame_gabor_n = frame_gabor / (np.percentile(frame_gabor, 99) + 1e-6)
-            # Use the minimum of frame and background Gabor energy as the
-            # suppression weight — this catches displaced bedding (frame
-            # energy similar to bg energy) but not novel objects.
+            _fg_energy    = gabor_bedding_energy(gray.astype(np.float32))
+            _frame_gabor_n = _fg_energy / (np.percentile(_fg_energy, 99) + 1e-6)
             suppress_w   = np.minimum(
-                np.clip(frame_gabor_n, 0, 1),
+                np.clip(_frame_gabor_n, 0, 1),
                 np.clip(self._bg_gabor[cam], 0, 1))
             diff = diff * (1.0 - self._texture_alpha * suppress_w)
+        elif cam in self._bg_gabor:
+            # texture_suppress off but bg_gabor exists — still compute the
+            # frame energy so gabor_body_contour() can refine the body
+            # mask later. Computation is cheap relative to bg-subtract.
+            _fg_energy     = gabor_bedding_energy(gray.astype(np.float32))
+            _frame_gabor_n = _fg_energy / (np.percentile(_fg_energy, 99) + 1e-6)
 
         binary = (diff > self.threshold).astype(np.uint8) * 255
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
@@ -920,7 +931,111 @@ class ForegroundDetector:
             blobs=blobs,
             frame_gray=gray.astype(np.uint8),
             n_blobs=len(blobs),
-            label_map=labels)
+            label_map=labels,
+            gabor_energy=_frame_gabor_n)
+
+    def gabor_body_contour(
+            self,
+            result:      ForegroundResult,
+            cx:          float,
+            cy:          float,
+            canny_low:   float = 30.0,
+            canny_high:  float = 90.0,
+            close_k:     int   = 15,
+            energy_pct:  float = 40.0,
+    ) -> Optional[np.ndarray]:
+        """Find the rat body mask using Canny edges on the Gabor energy map.
+
+        The key insight: in the Gabor energy map (computed at bedding
+        spatial frequencies), the rat body appears as a low-energy hole
+        — smooth fur does not excite the bedding-frequency Gabor filters,
+        while the surrounding bedding has high energy. The boundary of
+        that hole is the actual rat outline in texture space, which is
+        more stable than the intensity boundary used by background
+        subtraction.
+
+        Two complementary methods are tried in order:
+
+        Method A — Canny edges on Gabor energy:
+          1. Normalise the Gabor energy map to uint8.
+          2. Smooth lightly (Gaussian, σ=3) to reduce fibre-scale noise.
+          3. Run Canny edge detection — edges appear where the texture
+             gradient is large: at the bedding/body boundary.
+          4. Morphologically close to bridge gaps in the edge contour.
+          5. Select the largest contour that encloses (cx, cy).
+          6. Fill it → refined body mask.
+
+        Method B — Gabor energy thresholding (fallback):
+          If no closed contour encloses the centroid (fragmented
+          edges), threshold the Gabor energy within the foreground
+          blob at ``energy_pct`` percentile. The low-energy region =
+          body. Keep the component containing (cx, cy).
+
+        Returns a uint8 (H, W) mask (255 = rat body) or None on failure.
+        """
+        if result.gabor_energy is None or result.label_map is None:
+            return None
+
+        ix, iy = int(round(cx)), int(round(cy))
+        h, w   = result.label_map.shape
+        ix     = max(0, min(w - 1, ix))
+        iy     = max(0, min(h - 1, iy))
+        lbl    = result.label_map[iy, ix]
+        if lbl == 0:
+            ys, xs = np.where(result.label_map > 0)
+            if len(xs) == 0:
+                return None
+            dists = (xs - ix) ** 2 + (ys - iy) ** 2
+            lbl   = result.label_map[ys[np.argmin(dists)],
+                                     xs[np.argmin(dists)]]
+        blob_mask = (result.label_map == lbl).astype(np.uint8)
+
+        energy_roi = result.gabor_energy * blob_mask
+        energy_u8  = np.clip(energy_roi * 255, 0, 255).astype(np.uint8)
+
+        # ── Method A: Canny edges on the Gabor energy map ─────────────
+        blurred = cv2.GaussianBlur(energy_u8, (7, 7), 3)
+        edges   = cv2.Canny(blurred,
+                            threshold1=canny_low,
+                            threshold2=canny_high)
+
+        if close_k > 0:
+            kc    = cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (close_k, close_k))
+            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kc)
+
+        cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+
+        body_contour = None
+        for cnt in sorted(cnts, key=cv2.contourArea, reverse=True):
+            if cv2.pointPolygonTest(cnt, (float(cx), float(cy)), False) >= 0:
+                body_contour = cnt
+                break
+
+        if body_contour is not None and cv2.contourArea(body_contour) > 100:
+            body_mask_out = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(body_mask_out, [body_contour], -1, 255, cv2.FILLED)
+            return body_mask_out
+
+        # ── Method B: Gabor energy threshold fallback ─────────────────
+        blob_pixels = energy_roi[blob_mask > 0]
+        if len(blob_pixels) == 0:
+            return None
+        thresh = np.percentile(blob_pixels, energy_pct)
+        body   = ((energy_roi <= thresh) & (blob_mask > 0)).astype(np.uint8) * 255
+
+        kc2  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
+        body = cv2.morphologyEx(body, cv2.MORPH_CLOSE, kc2)
+
+        n_b, lbl_b, _, _ = cv2.connectedComponentsWithStats(body)
+        if n_b <= 1:
+            return None
+        lbl_at = lbl_b[iy, ix]
+        if lbl_at == 0:
+            return None
+        out = (lbl_b == lbl_at).astype(np.uint8) * 255
+        return out
 
     def hull_centroid(
             self,
@@ -932,6 +1047,9 @@ class ForegroundDetector:
             body_length_mm:   float = 0.0,
             body_width_mm:    float = 70.0,
             body_z_mm:        float = 0.0,
+            gabor_refine:     bool  = False,
+            canny_low:        float = 30.0,
+            canny_high:       float = 90.0,
     ) -> tuple[float, float]:
         """Refine a centroid, optionally stripping an attached cable first.
 
@@ -1034,6 +1152,24 @@ class ForegroundDetector:
                 else:
                     # Keep the eroded body mask available for step 5
                     eroded_mask = (lbl_e == body_lbl).astype(np.uint8) * 255
+
+        # ── Step 3b: Gabor-edge body contour refinement ───────────────
+        # Use the Gabor energy map cached in ForegroundResult to find
+        # the rat boundary in texture space. The rat body appears as a
+        # low-energy hole in the Gabor map — Canny edges on the map
+        # trace the actual body outline, independent of pixel intensity.
+        # Updates BOTH the body pixel list (xs, ys, consumed by step 4)
+        # AND eroded_mask (consumed by step 5), so the anatomical prior
+        # sees the Gabor-refined body region.
+        if gabor_refine and result.gabor_energy is not None and len(xs) >= 5:
+            gbody = self.gabor_body_contour(
+                result, float(xs.mean()), float(ys.mean()),
+                canny_low=canny_low, canny_high=canny_high)
+            if gbody is not None:
+                gy, gx = np.where(gbody > 0)
+                if len(gx) >= 5:
+                    xs, ys = gx, gy
+                    eroded_mask = gbody
 
         # ── Step 4: ellipse-fit centroid ──────────────────────────────
         pts = np.column_stack([xs, ys]).astype(np.float32)

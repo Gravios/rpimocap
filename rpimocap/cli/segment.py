@@ -171,6 +171,26 @@ def main() -> None:
                     help="Assumed body height above the arena floor in mm. "
                          "Use 0 for a floor-level centroid (default), "
                          "~50 for a body-centre-of-mass model.")
+    det.add_argument("--gabor-refine", action="store_true", default=False,
+                    help="Find the rat body outline using Canny edges on "
+                         "the Gabor energy map. The body appears as a "
+                         "low-energy hole (smooth fur vs fibrous bedding); "
+                         "edges on that map trace the real outline in "
+                         "texture space, independent of pixel intensity. "
+                         "Slots between cable erosion and ellipse fit in "
+                         "hull_centroid, and the Gabor-refined mask then "
+                         "feeds into the anatomical Gaussian prior. "
+                         "Requires a background Gabor model — pass "
+                         "--texture-suppress when building the background "
+                         "so the model is cached.")
+    det.add_argument("--canny-low", type=float, default=30.0, metavar="T",
+                    help="Lower Canny hysteresis on the Gabor energy map "
+                         "(default 30). Lower = more edges detected; drop "
+                         "to 20 if the body contour fragments.")
+    det.add_argument("--canny-high", type=float, default=90.0, metavar="T",
+                    help="Upper Canny hysteresis (default 90). Higher = "
+                         "only strong edges kept; raise to 110 if the "
+                         "contour over-segments into bedding fragments.")
     det.add_argument("--min-solidity", type=float, default=0.0,
                     metavar="S",
                     help="Minimum blob solidity = area/hull_area [0–1] "
@@ -535,6 +555,9 @@ def main() -> None:
             if args.body_length > 0 else None),
         P1=(cal.get("dlt_P1", cal.get("P1", None))
             if args.body_length > 0 else None),
+        gabor_refine=args.gabor_refine,
+        canny_low=args.canny_low,
+        canny_high=args.canny_high,
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector
