@@ -48,6 +48,24 @@ from rpimocap.detection.segment import (
 from rpimocap.reconstruction.triangulate import Point3D
 
 
+def _project_xyz_to_pixel(
+        P: np.ndarray, xyz: np.ndarray
+) -> "tuple[float, float] | None":
+    """Project a world XYZ point to pixel coordinates via a 3×4 P matrix.
+
+    Returns None if the point is behind the camera or on the principal
+    plane (degenerate projection). Used by the online-Kalman wiring to
+    seed the next frame's epipolar prior from the predicted XYZ.
+    """
+    P = np.asarray(P, dtype=np.float64)
+    xyz = np.asarray(xyz, dtype=np.float64).reshape(3)
+    h = P @ np.array([xyz[0], xyz[1], xyz[2], 1.0])
+    if not np.isfinite(h[2]) or abs(h[2]) < 1e-9 or h[2] < 0:
+        return None
+    return float(h[0] / h[2]), float(h[1] / h[2])
+
+
+
 # --------------------------------------------------------------------------- #
 #  Per-frame result                                                            #
 # --------------------------------------------------------------------------- #
@@ -591,6 +609,10 @@ class SegmentTracker:
         gabor_refine:     bool  = False,
         canny_low:        float = 30.0,
         canny_high:       float = 90.0,
+        kalman_online:        "Optional[object]" = None,
+        rearing_classifier:   "Optional[object]" = None,
+        rearing_track_name:   str = "animal",
+        fps:                  float = 25.0,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -615,6 +637,18 @@ class SegmentTracker:
         self._gabor_refine = bool(gabor_refine)
         self._canny_low    = float(canny_low)
         self._canny_high   = float(canny_high)
+        # Online Kalman filter: feeds next-frame trajectory prior and
+        # drives the rearing classifier. The triangulated XYZ is stepped
+        # in after every successful match; the predicted XYZ for the
+        # NEXT frame is back-projected to pixel coords in both cameras
+        # and used to seed the EpipolarMatcher prior.
+        self._kalman_online      = kalman_online
+        self._rearing_classifier = rearing_classifier
+        self._rearing_track_name = str(rearing_track_name)
+        # Current posture (None until first Kalman update); when reared,
+        # overrides body_length_mm / body_width_mm on the next frame.
+        self._current_posture = None
+        self._fps             = float(fps)
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -682,6 +716,13 @@ class SegmentTracker:
         self._of1.reset()
         self._prior_cx0 = None
         self._prior_cx1 = None
+        # Reset online Kalman + posture so each sequence starts fresh
+        if self._kalman_online is not None:
+            self._kalman_online.initialised = False
+            self._kalman_online.x = np.zeros(6, dtype=np.float64)
+        if self._rearing_classifier is not None:
+            self._rearing_classifier.reset()
+        self._current_posture = None
         results: list[TrackResult] = []
         n_frames = len(range(start_frame, end_frame, sample_every))
 
@@ -775,14 +816,26 @@ class SegmentTracker:
         fg0 = getattr(self._of0, '_last_fg', None)
         fg1 = getattr(self._of1, '_last_fg', None)
         refined = []
+        # Posture-adapted body dimensions for hull_centroid. If the
+        # rearing classifier flagged a rear, swap the horizontal body
+        # ellipse for the vertical-posture prior so step 5 doesn't pull
+        # the centroid toward a 180-mm-long horizontal body that isn't
+        # there.
+        _body_L = self._body_length_mm
+        _body_W = self._body_width_mm
+        if (self._current_posture is not None
+                and getattr(self._current_posture, "reared", False)):
+            _body_L = float(self._current_posture.body_length_mm)
+            _body_W = float(self._current_posture.body_width_mm)
+
         for r0, r1 in matches:
             if fg0 is not None:
                 hx0, hy0 = self._det.hull_centroid(
                     fg0, r0.cx, r0.cy,
                     cable_erosion_px=self._cable_erosion,
                     P=self._P0,
-                    body_length_mm=self._body_length_mm,
-                    body_width_mm=self._body_width_mm,
+                    body_length_mm=_body_L,
+                    body_width_mm=_body_W,
                     body_z_mm=self._body_z_mm,
                     gabor_refine=self._gabor_refine,
                     canny_low=self._canny_low,
@@ -796,8 +849,8 @@ class SegmentTracker:
                     fg1, r1.cx, r1.cy,
                     cable_erosion_px=self._cable_erosion,
                     P=self._P1,
-                    body_length_mm=self._body_length_mm,
-                    body_width_mm=self._body_width_mm,
+                    body_length_mm=_body_L,
+                    body_width_mm=_body_W,
                     body_z_mm=self._body_z_mm,
                     gabor_refine=self._gabor_refine,
                     canny_low=self._canny_low,
@@ -811,13 +864,45 @@ class SegmentTracker:
 
         xyz_dict = self._matcher.triangulate(matches, bounds=bounds)
 
+        # ── Online Kalman + rearing classification ───────────────────────
+        # When configured, step the online Kalman with the triangulated XYZ
+        # for our tracked label, then classify the resulting state for
+        # posture. The NEXT frame's hull_centroid will see the posture-
+        # adapted body dimensions, and the next epipolar match will get a
+        # pixel prior derived from the Kalman prediction.
+        kalman_pred_xyz = None
+        if self._kalman_online is not None:
+            z = xyz_dict.get(self._rearing_track_name) if xyz_dict else None
+            if z is not None and not np.any(np.isnan(z)):
+                self._kalman_online.step(np.asarray(z, dtype=np.float64))
+            else:
+                self._kalman_online.step(None)
+            if getattr(self._kalman_online, "initialised", False):
+                # x = [x, y, z, vx, vy, vz]
+                kalman_pred_xyz = self._kalman_online.x[:3].copy()
+                if self._rearing_classifier is not None:
+                    self._current_posture = self._rearing_classifier.classify(
+                        self._kalman_online.x)
+
         # Update trajectory prior centroids from the (possibly refined)
-        # matched pair, so the next frame can score candidates against
-        # this one. Use the hull-refined centroids if available.
-        if self._use_prior and matches:
-            r0_last, r1_last = matches[0]
-            self._prior_cx0 = (r0_last.cx, r0_last.cy)
-            self._prior_cx1 = (r1_last.cx, r1_last.cy)
+        # matched pair OR from the back-projected Kalman prediction.
+        # The Kalman path is preferred when available because (a) it
+        # accounts for velocity and (b) keeps producing predictions
+        # even during gap frames where no match exists.
+        if self._use_prior:
+            used_kalman_prior = False
+            if (kalman_pred_xyz is not None
+                    and self._P0 is not None and self._P1 is not None):
+                p0 = _project_xyz_to_pixel(self._P0, kalman_pred_xyz)
+                p1 = _project_xyz_to_pixel(self._P1, kalman_pred_xyz)
+                if p0 is not None and p1 is not None:
+                    self._prior_cx0 = p0
+                    self._prior_cx1 = p1
+                    used_kalman_prior = True
+            if not used_kalman_prior and matches:
+                r0_last, r1_last = matches[0]
+                self._prior_cx0 = (r0_last.cx, r0_last.cy)
+                self._prior_cx1 = (r1_last.cx, r1_last.cy)
 
         # ── Temporal background adaptation ──────────────────────────────
         # Only adapt on frames with a confirmed (epipolar-validated) match,

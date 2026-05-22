@@ -191,6 +191,35 @@ def main() -> None:
                     help="Upper Canny hysteresis (default 90). Higher = "
                          "only strong edges kept; raise to 110 if the "
                          "contour over-segments into bedding fragments.")
+    det.add_argument("--kalman-online", action="store_true", default=False,
+                    help="Enable an ONLINE per-frame Kalman filter that "
+                         "tracks the body XYZ during segmentation. Its "
+                         "predicted position seeds the next frame's "
+                         "epipolar prior (replacing --trajectory-prior's "
+                         "raw last-centroid seed) so the selector is "
+                         "biased by velocity, not just position, and "
+                         "keeps producing predictions during gap frames. "
+                         "Independent of the offline --kalman/--kalman-no-rts "
+                         "smoother applied after tracking; use both for "
+                         "best results.")
+    det.add_argument("--rearing-detection", action="store_true", default=False,
+                    help="Enable posture classification from the online "
+                         "Kalman state. When the rat is reared (z > 100 mm "
+                         "or vz > 200 mm/s, with hysteresis), the next "
+                         "frame's hull_centroid receives the vertical-"
+                         "posture anatomical prior (~90 × 45 mm) instead "
+                         "of the horizontal one (~180 × 70 mm), so step 5 "
+                         "doesn't pull the centroid toward a horizontal "
+                         "body that isn't there. Requires --kalman-online.")
+    det.add_argument("--rearing-z-enter", type=float, default=100.0,
+                    metavar="MM",
+                    help="Z threshold to enter the reared state (default "
+                         "100 mm). Used with --rearing-detection.")
+    det.add_argument("--rearing-z-exit", type=float, default=70.0,
+                    metavar="MM",
+                    help="Z threshold to leave the reared state (default "
+                         "70 mm). Hysteresis prevents flicker at the "
+                         "boundary.")
     det.add_argument("--min-solidity", type=float, default=0.0,
                     metavar="S",
                     help="Minimum blob solidity = area/hull_area [0–1] "
@@ -368,6 +397,8 @@ def main() -> None:
         arena_roi_mask,
     )
     from rpimocap.detection.tracker import SegmentTracker
+    from rpimocap.reconstruction.kalman import KalmanTracker3D
+    from rpimocap.reconstruction.rearing import RearingClassifier
     from rpimocap.reconstruction.triangulate import (
         smooth_trajectory, fill_trajectory_gaps, trajectory_stats)
     from rpimocap.io.export import write_hdf5, write_viewer_json, write_stats_csv
@@ -583,6 +614,17 @@ def main() -> None:
         gabor_refine=args.gabor_refine,
         canny_low=args.canny_low,
         canny_high=args.canny_high,
+        kalman_online=(KalmanTracker3D(
+            dt=1.0/float(fps),
+            sigma_a=args.kalman_max_accel,
+            sigma_z=args.kalman_noise,
+            mahalanobis_gate=args.kalman_outlier_sigma)
+            if args.kalman_online else None),
+        rearing_classifier=(RearingClassifier(
+            z_enter=args.rearing_z_enter,
+            z_exit=args.rearing_z_exit)
+            if (args.rearing_detection and args.kalman_online) else None),
+        fps=float(fps),
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

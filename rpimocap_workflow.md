@@ -232,6 +232,123 @@ done
 
 ---
 
+## Step 6b — Robust-pipeline invocation (v0.5.0 features)
+
+The bare invocation in Step 6 is the minimum that works. For the
+bedding-disturbance / cable-contamination / wall-reflection edge
+cases the v0.5.0 release added a layered defence-in-depth toolkit.
+Enable as many of the following as suit the recording. Each flag is
+independent and off by default; the cost of enabling them all is
+roughly 30 % of bare runtime.
+
+### Pre-flight: build a `--texture-suppress` background
+
+The Gabor-edge body contour (`--gabor-refine`) needs a cached Gabor
+model in the `background/bg.npz`. Bake it during background build:
+
+```bash
+rpimocap-build-bg \
+    --cam0 "$raw_dir/cam0_*_raw.tif" \
+    --cam1 "$raw_dir/cam1_*_raw.tif" \
+    --texture-suppress \
+    --out  background/bg.npz
+```
+
+### Full robust run
+
+```bash
+rpimocap-segment \
+    --cam0             "$cam0_tif" \
+    --cam1             "$cam1_tif" \
+    --calib            calib/calib_from_corners.npz \
+    --bayer-pattern    RGGB \
+    --background-model background/bg.npz \
+    --bounds="-140,140,-215,215,0,388" \
+    --threshold        20 \
+    --green-channel --bilateral \
+    --centroid-only \
+    --cable-erosion       12 \
+    \
+    `# ── Centroid refinement (steps 3b + 5 of hull_centroid) ──` \
+    --gabor-refine \
+    --canny-low           30   --canny-high   90 \
+    --body-length        180   --body-width   70   --body-z   0 \
+    \
+    `# ── Per-frame selection robustness ──` \
+    --trajectory-prior \
+    --trajectory-prior-lambda 0.05 \
+    --bg-adapt-alpha     0.995 \
+    --bg-adapt-dilate-px 25 \
+    \
+    `# ── Online tracking (per-frame Kalman + rearing) ──` \
+    --kalman-online \
+    --rearing-detection \
+    --rearing-z-enter   100 --rearing-z-exit 70 \
+    \
+    `# ── Offline post-processing (trajectory-level Kalman/RTS) ──` \
+    --kalman \
+    --kalman-fps         25 \
+    --kalman-max-speed   1000 \
+    --kalman-max-accel   2000 \
+    --kalman-noise       8 \
+    --kalman-outlier-sigma 4.0 \
+    \
+    --out              "$session"
+```
+
+### What each flag fixes
+
+| Flag(s) | Problem it addresses |
+|---|---|
+| `--cable-erosion 12` | Headstage cable biases the unweighted centroid toward the cable end |
+| `--gabor-refine` (+ `--canny-low/--canny-high`) | Disturbed bedding makes the intensity boundary noisy; texture-space contour is clean |
+| `--body-length/--body-width/--body-z` | Anatomical Gaussian prior pulls centroid toward the expected body shape, suppressing cable-tip and bedding-edge outliers |
+| `--trajectory-prior` | Wall reflections with low epipolar distance no longer outrank the actual animal blob |
+| `--bg-adapt-alpha` | Bedding moved earlier in the recording gradually becomes part of the background |
+| `--kalman-online` | Velocity-aware blob prior keeps producing predictions through gaps |
+| `--rearing-detection` | Vertical body posture swaps in `90 × 45 mm` body dims so the anatomical prior doesn't pull the centroid toward a horizontal body that isn't there |
+| `--kalman` (offline) | Mahalanobis-gate outlier rejection + RTS backward smoother on the final trajectory |
+
+### Optional: flat-field correction for NIR vignette
+
+Capture a flat-field reference frame at rig assembly (uniform NIR-lit
+target with no animal); pass it to every run:
+
+```bash
+rpimocap-segment ... \
+    --flat-field-cam0 calib/flat_cam0.png \
+    --flat-field-cam1 calib/flat_cam1.png
+```
+
+If no calibration capture exists, synthesise one from the background:
+
+```bash
+rpimocap-segment ... --synthesize-flat-field
+```
+
+### Reading the new `detected` HDF5 field
+
+Every `reconstruction.h5` written by v0.5.0+ carries
+`/skeleton/<name>/detected` (bool, `n_frames`) alongside `xyz`. True
+= genuine triangulated detection in that frame; False = gap-filled
+(Kalman prediction or linear interpolation).
+
+```python
+import h5py, numpy as np
+
+with h5py.File("reconstruction.h5") as f:
+    det = f["skeleton"]["animal"]["detected"][:]
+    xyz = f["skeleton"]["animal"]["xyz"][:]
+
+# Per-frame detection rate
+print(f"{det.sum()}/{len(det)} = {100*det.sum()/len(det):.1f}% real detections")
+
+# Only use frames with genuine detections for downstream analysis
+xyz_real = xyz[det]
+```
+
+---
+
 ## Step 7 — Batch Summary
 
 ```bash
