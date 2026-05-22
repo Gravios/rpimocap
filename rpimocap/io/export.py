@@ -143,6 +143,7 @@ def write_hdf5(
     voxel_frames: Optional[list[Optional[np.ndarray]]] = None,
     fps: float = 30.0,
     metadata: Optional[dict] = None,
+    detected_masks: Optional[dict] = None,
 ):
     """
     Write the full reconstruction to a single HDF5 archive.
@@ -155,6 +156,11 @@ def write_hdf5(
             xyz                (n_frames, 3) float32, NaN = missing
             confidence         (n_frames,)   float32
             reprojection_error (n_frames,)   float32
+            detected           (n_frames,)   bool
+              True  = genuine triangulated detection in this frame
+              False = gap-filled (linear interpolation, Kalman
+                      prediction, or Kalman outlier corrected to
+                      filter estimate)
     /voxels/
         frame_NNNNNN          (N, 3) float32 point cloud per frame
 
@@ -165,6 +171,9 @@ def write_hdf5(
     voxel_frames    : per-frame point clouds (Nx3 arrays), optional
     fps             : recording frame rate (stored as metadata)
     metadata        : additional key→value pairs written as root attributes
+    detected_masks  : dict mapping keypoint name → bool array (n_frames,).
+                      True = real detection, False = gap/Kalman prediction.
+                      If None, derived from confidence + kalman_outlier flag.
     """
     try:
         import h5py
@@ -201,10 +210,29 @@ def write_hdf5(
                         xyz[fi] = pt.xyz.astype(np.float32)
                         conf[fi] = pt.confidence
                         err[fi] = pt.reprojection_error
+            # Build the 'detected' mask:
+            # priority 1 — caller-supplied pre-post-processing mask
+            # priority 2 — kalman_outlier attribute from Kalman filter
+            # priority 3 — confidence > 0 (catches non-Kalman gap-fill)
+            if detected_masks and name in detected_masks:
+                det = np.asarray(detected_masks[name], dtype=bool)
+                if det.shape != (n_frames,):
+                    raise ValueError(
+                        f"detected_masks[{name!r}] has shape {det.shape}; "
+                        f"expected ({n_frames},)")
+            else:
+                det = np.zeros(n_frames, dtype=bool)
+                for fi, frame in enumerate(skeleton_frames):
+                    for pt in frame:
+                        if pt.name == name:
+                            outlier = getattr(pt, "kalman_outlier", False)
+                            det[fi] = (pt.confidence > 0) and not outlier
             g = skel.create_group(name)
-            g.create_dataset("xyz", data=xyz, compression="gzip", compression_opts=4)
-            g.create_dataset("confidence", data=conf)
+            g.create_dataset("xyz", data=xyz,
+                             compression="gzip", compression_opts=4)
+            g.create_dataset("confidence",         data=conf)
             g.create_dataset("reprojection_error", data=err)
+            g.create_dataset("detected",           data=det)
 
         if voxel_frames:
             vox = f.create_group("voxels")

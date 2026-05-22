@@ -636,6 +636,21 @@ def main() -> None:
     # ── Convert to skeleton_frames ────────────────────────────────────────────
     skeleton_frames = SegmentTracker.results_to_skeleton_frames(results)
 
+    # ── Capture detection mask BEFORE post-processing ─────────────────────
+    # True  = genuine triangulated detection in this frame
+    # False = missing (gap) — will be filled by Kalman / interpolation
+    # Computed here so it cannot be corrupted by smoothing / Kalman /
+    # gap-fill steps below.
+    _all_kp = sorted({pt.name for frame in skeleton_frames for pt in frame})
+    detected_masks: dict = {}
+    for _kp in _all_kp:
+        _det = np.zeros(len(skeleton_frames), dtype=bool)
+        for _fi, _fr in enumerate(skeleton_frames):
+            for _pt in _fr:
+                if _pt.name == _kp and not np.isnan(_pt.xyz).any():
+                    _det[_fi] = True
+        detected_masks[_kp] = _det
+
     # ── Smoothing / gap fill ─────────────────────────────────────────────────
     print("\n── Post-processing ─────────────────────────────────────────────")
     if args.kalman and skeleton_frames:
@@ -680,6 +695,7 @@ def main() -> None:
     write_hdf5(
         track_dir / "reconstruction.h5",
         skeleton_frames,
+        detected_masks=detected_masks,
         voxel_frames=None,
         fps=fps,
         metadata={
