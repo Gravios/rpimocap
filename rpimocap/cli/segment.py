@@ -152,6 +152,25 @@ def main() -> None:
                          "component after erosion is used as the body. "
                          "Good starting point: 10–15 px. "
                          "0 = disabled (default).")
+    det.add_argument("--body-length", type=float, default=0.0, metavar="MM",
+                    help="Expected rat body length nose→tail-base in mm "
+                         "(typical 160–220 mm). Enables the anatomical "
+                         "Gaussian prior in hull_centroid (step 5): builds "
+                         "a rotated body-shaped weight map at the ellipse "
+                         "centre, ANDs it with the eroded foreground blob, "
+                         "and returns the weighted centroid of the "
+                         "intersection. Suppresses outliers at the blob "
+                         "boundary (cable tips, bedding-edge artefacts) "
+                         "that lie outside the anatomically expected body. "
+                         "Requires DLT P matrices in the calibration "
+                         "(dlt_P0 / dlt_P1). 0 = disabled (default).")
+    det.add_argument("--body-width", type=float, default=70.0, metavar="MM",
+                    help="Expected rat body width at widest point in mm "
+                         "(typical 55–85 mm). Used by --body-length.")
+    det.add_argument("--body-z", type=float, default=0.0, metavar="MM",
+                    help="Assumed body height above the arena floor in mm. "
+                         "Use 0 for a floor-level centroid (default), "
+                         "~50 for a body-centre-of-mass model.")
     det.add_argument("--min-solidity", type=float, default=0.0,
                     metavar="S",
                     help="Minimum blob solidity = area/hull_area [0–1] "
@@ -509,6 +528,13 @@ def main() -> None:
         trajectory_prior_lambda=args.trajectory_prior_lambda,
         flat_field_cam0=flat0,
         flat_field_cam1=flat1,
+        body_length_mm=args.body_length,
+        body_width_mm=args.body_width,
+        body_z_mm=args.body_z,
+        P0=(cal.get("dlt_P0", cal.get("P0", None))
+            if args.body_length > 0 else None),
+        P1=(cal.get("dlt_P1", cal.get("P1", None))
+            if args.body_length > 0 else None),
         verbose=True)
 
     # Register cam1 masks on the shared ForegroundDetector

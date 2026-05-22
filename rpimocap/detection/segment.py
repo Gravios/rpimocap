@@ -514,6 +514,125 @@ def gabor_bedding_energy(
     return energy
 
 
+def _px_per_mm_at_pixel(
+        P:        np.ndarray,
+        u:        float,
+        v:        float,
+        z_mm:     float,
+) -> float:
+    """Estimate the local pixel/mm scale at image point (u, v) for a
+    world point lying on the plane z = z_mm.
+
+    Used by the anatomical-Gaussian-prior step of hull_centroid to size
+    the body-shaped weight map. Accounts for perspective: the scale at
+    the image periphery is smaller than near the principal point.
+
+    Algorithm
+    ---------
+    1. Back-project (u, v) onto the plane Z = z_mm to get world (X, Y).
+       This is a 2x2 linear solve given the DLT projection matrix P.
+    2. Project (X+1, Y, z_mm) and (X, Y+1, z_mm) into the image.
+    3. The mean of the two pixel-distances per 1-mm world step is the
+       isotropic px/mm scale at that image point.
+
+    Returns NaN on degeneracy (singular intersection, point behind
+    camera, etc.) so callers can fall back gracefully.
+    """
+    P = np.asarray(P, dtype=np.float64)
+    if P.shape != (3, 4):
+        return float("nan")
+
+    # ── Step 1: back-project (u,v) onto plane Z=z_mm ──────────────────
+    a11 = P[0, 0] - u * P[2, 0]
+    a12 = P[0, 1] - u * P[2, 1]
+    a21 = P[1, 0] - v * P[2, 0]
+    a22 = P[1, 1] - v * P[2, 1]
+    rhs_z = P[2, 2] * z_mm + P[2, 3]
+    b1 = u * rhs_z - (P[0, 2] * z_mm + P[0, 3])
+    b2 = v * rhs_z - (P[1, 2] * z_mm + P[1, 3])
+    det = a11 * a22 - a12 * a21
+    if abs(det) < 1e-12:
+        return float("nan")
+    X = (a22 * b1 - a12 * b2) / det
+    Y = (-a21 * b1 + a11 * b2) / det
+
+    def _project(p):
+        h = P @ np.array([p[0], p[1], z_mm, 1.0])
+        if abs(h[2]) < 1e-12:
+            return None
+        return h[0] / h[2], h[1] / h[2]
+
+    px = _project((X + 1.0, Y))
+    py = _project((X, Y + 1.0))
+    if px is None or py is None:
+        return float("nan")
+
+    dx_norm = float(np.hypot(px[0] - u, px[1] - v))
+    dy_norm = float(np.hypot(py[0] - u, py[1] - v))
+    return 0.5 * (dx_norm + dy_norm)
+
+
+def _anatomical_prior_centroid(
+        blob_mask:      np.ndarray,
+        ellipse_cx:     float,
+        ellipse_cy:     float,
+        theta_rad:      float,
+        P:              np.ndarray,
+        body_length_mm: float,
+        body_width_mm:  float,
+        body_z_mm:      float,
+) -> Optional[tuple]:
+    """Step 5 of hull_centroid — anatomical Gaussian shape prior.
+
+    Builds a rotated 2D Gaussian centred on the ellipse-fit position
+    with axes derived from the known rat body dimensions, AND it with
+    the foreground blob mask, and returns the weighted centroid of the
+    intersection. Returns None on degeneracy so the caller falls back
+    to the ellipse / hull centroid.
+    """
+    h, w = blob_mask.shape
+    px_per_mm = _px_per_mm_at_pixel(P, ellipse_cx, ellipse_cy, body_z_mm)
+    if not np.isfinite(px_per_mm) or px_per_mm <= 0:
+        return None
+
+    sigma_major = body_length_mm * px_per_mm / 3.0
+    sigma_minor = body_width_mm  * px_per_mm / 3.0
+    if sigma_major < 1.0 or sigma_minor < 1.0:
+        return None
+
+    # Bound the Gaussian to a ±3σ box around the centroid to keep the
+    # computation O(body_area_px) rather than O(image_area).
+    radius = int(3.0 * max(sigma_major, sigma_minor)) + 1
+    x0 = max(0, int(ellipse_cx) - radius)
+    x1 = min(w, int(ellipse_cx) + radius + 1)
+    y0 = max(0, int(ellipse_cy) - radius)
+    y1 = min(h, int(ellipse_cy) + radius + 1)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return None
+
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    dx = xx - ellipse_cx
+    dy = yy - ellipse_cy
+    cos_t = float(np.cos(theta_rad))
+    sin_t = float(np.sin(theta_rad))
+    # Project (dx, dy) onto the major-axis direction (cos_t, sin_t)
+    # and the perpendicular minor-axis direction.
+    dx_r =  cos_t * dx + sin_t * dy
+    dy_r = -sin_t * dx + cos_t * dy
+    gauss = np.exp(-(dx_r ** 2 / (2.0 * sigma_major ** 2)
+                    + dy_r ** 2 / (2.0 * sigma_minor ** 2)))
+
+    blob_roi = (blob_mask[y0:y1, x0:x1] > 0).astype(np.float32)
+    weights  = gauss * blob_roi
+    total    = float(weights.sum())
+    if total < 1e-6:
+        return None
+
+    cx_r = float((weights * xx).sum() / total)
+    cy_r = float((weights * yy).sum() / total)
+    return cx_r, cy_r
+
+
 class ForegroundDetector:
     """Subtract background and return binary foreground masks.
 
@@ -809,6 +928,10 @@ class ForegroundDetector:
             cx: float,
             cy: float,
             cable_erosion_px: int = 0,
+            P:                "Optional[np.ndarray]" = None,
+            body_length_mm:   float = 0.0,
+            body_width_mm:    float = 70.0,
+            body_z_mm:        float = 0.0,
     ) -> tuple[float, float]:
         """Refine a centroid, optionally stripping an attached cable first.
 
@@ -825,8 +948,24 @@ class ForegroundDetector:
                component after erosion is the body.
         4. Fit an ellipse to the (possibly eroded) body pixels.
                The ellipse centre sits at the geometric body centre
-               regardless of cable direction.
-        5. Fall back to convex-hull centroid, then pixel mean.
+               regardless of cable direction.  The ellipse orientation θ
+               is also captured for use by step 5.
+        5. **Anatomical Gaussian prior** (P + body_length_mm > 0):
+               Use the DLT projection matrix P to compute the pixel/mm
+               scale at the estimated body position.  Build a rotated
+               Gaussian weight map centred on the ellipse centre with
+               axes derived from the known body dimensions:
+                   σ_major = body_length_mm × px_per_mm / 3
+                   σ_minor = body_width_mm  × px_per_mm / 3
+               AND the Gaussian soft mask with the eroded foreground
+               blob → pixels that are both (a) foreground and (b)
+               within the anatomically plausible body region get high
+               weight.  The weighted centroid of this intersection is
+               the refined estimate.  This follows the actual visual
+               structure of the rat (only uses pixels truly in the
+               foreground) while suppressing outliers at the blob
+               boundary that lie outside the anatomically expected body.
+        6. Fall back to hull centroid → pixel mean.
 
         Parameters
         ----------
@@ -836,10 +975,19 @@ class ForegroundDetector:
                            Good starting point: half the visible cable
                            width in pixels.  Typically 8–15 px for a
                            chronic headstage cable at 1–2 m camera distance.
+        P                : 3×4 DLT projection matrix for this camera.
+                           Required for the anatomical prior (step 5).
+                           Skip step 5 if None.
+        body_length_mm   : Expected rat body length nose→tail-base in mm.
+                           Typical: 160–220 mm.  0 = skip step 5.
+        body_width_mm    : Expected rat body width at widest point in mm.
+                           Typical: 55–85 mm.  Default 70.
+        body_z_mm        : Assumed body height above arena floor in mm.
+                           Use 0 for floor-level centroid, ~50 for body CoM.
 
         Returns
         -------
-        (cx_refined, cy_refined) — falls back to (cx, cy) on any failure.
+        (cx_refined, cy_refined) — falls back through 4 → 6 on any failure.
         """
         if result.label_map is None:
             return cx, cy
@@ -863,6 +1011,7 @@ class ForegroundDetector:
 
         # ── Step 2: build binary blob mask ────────────────────────────
         blob_mask = (result.label_map == lbl).astype(np.uint8) * 255
+        eroded_mask = blob_mask                       # used by step 5
 
         # ── Step 3: cable erosion ─────────────────────────────────────
         if cable_erosion_px > 0:
@@ -882,17 +1031,42 @@ class ForegroundDetector:
                 if len(xs) < 3:
                     # erosion was too aggressive — fall back to full blob
                     ys, xs = np.where(blob_mask > 0)
+                else:
+                    # Keep the eroded body mask available for step 5
+                    eroded_mask = (lbl_e == body_lbl).astype(np.uint8) * 255
 
         # ── Step 4: ellipse-fit centroid ──────────────────────────────
         pts = np.column_stack([xs, ys]).astype(np.float32)
+        ellipse_cx = ellipse_cy = None
+        theta_rad  = 0.0
         if len(pts) >= 5:
             try:
                 ellipse = cv2.fitEllipse(pts)
-                return float(ellipse[0][0]), float(ellipse[0][1])
+                ellipse_cx, ellipse_cy = float(ellipse[0][0]), float(ellipse[0][1])
+                # cv2.fitEllipse returns (cx, cy), (minor, major), angle_deg
+                # where angle is the rotation of the bounding box; the
+                # major axis direction is angle + 90° measured from the
+                # x-axis. Empirically `np.deg2rad(angle - 90)` gives the
+                # major-axis orientation we want.
+                theta_rad = float(np.deg2rad(ellipse[2] - 90.0))
             except cv2.error:
                 pass
 
-        # ── Step 5: hull centroid fallback ────────────────────────────
+        # ── Step 5: anatomical Gaussian prior ─────────────────────────
+        if (ellipse_cx is not None and P is not None
+                and body_length_mm > 0.0 and body_width_mm > 0.0):
+            ap = _anatomical_prior_centroid(
+                eroded_mask, ellipse_cx, ellipse_cy, theta_rad,
+                P, body_length_mm, body_width_mm, body_z_mm)
+            if ap is not None:
+                return ap
+
+        # If step 5 was skipped or failed but step 4 produced an ellipse,
+        # return the ellipse centroid (the previous behaviour).
+        if ellipse_cx is not None:
+            return ellipse_cx, ellipse_cy
+
+        # ── Step 6: hull centroid fallback ────────────────────────────
         hull = cv2.convexHull(pts)
         M    = cv2.moments(hull)
         if M['m00'] < 1e-6:

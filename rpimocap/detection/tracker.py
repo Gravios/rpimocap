@@ -583,6 +583,11 @@ class SegmentTracker:
         trajectory_prior_lambda: float = 0.05,
         flat_field_cam0:  "Optional[np.ndarray]" = None,
         flat_field_cam1:  "Optional[np.ndarray]" = None,
+        body_length_mm:   float = 0.0,
+        body_width_mm:    float = 70.0,
+        body_z_mm:        float = 0.0,
+        P0:               "Optional[np.ndarray]" = None,
+        P1:               "Optional[np.ndarray]" = None,
     ):
         self._matcher        = matcher
         self._verbose        = verbose
@@ -599,6 +604,11 @@ class SegmentTracker:
         self._use_prior:    bool  = bool(use_trajectory_prior)
         self._flat0 = flat_field_cam0
         self._flat1 = flat_field_cam1
+        self._body_length_mm = float(body_length_mm)
+        self._body_width_mm  = float(body_width_mm)
+        self._body_z_mm      = float(body_z_mm)
+        self._P0 = P0
+        self._P1 = P1
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -763,7 +773,11 @@ class SegmentTracker:
             if fg0 is not None:
                 hx0, hy0 = self._det.hull_centroid(
                     fg0, r0.cx, r0.cy,
-                    cable_erosion_px=self._cable_erosion)
+                    cable_erosion_px=self._cable_erosion,
+                    P=self._P0,
+                    body_length_mm=self._body_length_mm,
+                    body_width_mm=self._body_width_mm,
+                    body_z_mm=self._body_z_mm)
                 r0 = r0.__class__(
                     label=r0.label, cx=hx0, cy=hy0,
                     area_px=r0.area_px, confidence=r0.confidence,
@@ -771,7 +785,11 @@ class SegmentTracker:
             if fg1 is not None:
                 hx1, hy1 = self._det.hull_centroid(
                     fg1, r1.cx, r1.cy,
-                    cable_erosion_px=self._cable_erosion)
+                    cable_erosion_px=self._cable_erosion,
+                    P=self._P1,
+                    body_length_mm=self._body_length_mm,
+                    body_width_mm=self._body_width_mm,
+                    body_z_mm=self._body_z_mm)
                 r1 = r1.__class__(
                     label=r1.label, cx=hx1, cy=hy1,
                     area_px=r1.area_px, confidence=r1.confidence,
