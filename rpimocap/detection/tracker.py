@@ -725,10 +725,13 @@ class SegmentTracker:
         self._of1.reset()
         self._prior_cx0 = None
         self._prior_cx1 = None
-        # Reset online Kalman + posture so each sequence starts fresh
+        # Reset online Kalman + posture so each sequence starts fresh.
+        # Critical: a stale converged covariance from a previous sequence
+        # would make the filter under-weight the first frames of the new
+        # one. KalmanTracker3D.reset() restores x, P, and the
+        # initialised flag to their construction-time state.
         if self._kalman_online is not None:
-            self._kalman_online.initialised = False
-            self._kalman_online.x = np.zeros(6, dtype=np.float64)
+            self._kalman_online.reset()
         if self._rearing_classifier is not None:
             self._rearing_classifier.reset()
         self._current_posture = None
@@ -962,15 +965,24 @@ class SegmentTracker:
         # the new background.
         if (self._bg_adapt_alpha is not None
                 and xyz_dict
-                and fg0 is not None and fg1 is not None):
+                and fg0 is not None and fg1 is not None
+                and getattr(fg0, "mask", None) is not None
+                and getattr(fg1, "mask", None) is not None):
             try:
                 import cv2 as _cv2
                 k = max(1, 2 * self._bg_adapt_dilate_px + 1)
                 kern = _cv2.getStructuringElement(_cv2.MORPH_ELLIPSE, (k, k))
+                # fg0/fg1 are ForegroundResult objects (cached on the
+                # OpticalFlowTracker as _last_fg); their .mask attribute
+                # is the uint8 0/255 foreground mask. The previous code
+                # called .astype() on the ForegroundResult itself, which
+                # silently raised AttributeError every frame and was
+                # swallowed by the broad except below — bg-adapt has
+                # been a no-op since the feature shipped.
                 m0 = _cv2.dilate(
-                    fg0.astype(np.uint8), kern).astype(bool)
+                    fg0.mask.astype(np.uint8), kern).astype(bool)
                 m1 = _cv2.dilate(
-                    fg1.astype(np.uint8), kern).astype(bool)
+                    fg1.mask.astype(np.uint8), kern).astype(bool)
                 self._background.update(
                     f0, f1, mask0=m0, mask1=m1,
                     alpha=self._bg_adapt_alpha)

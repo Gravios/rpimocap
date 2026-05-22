@@ -136,6 +136,35 @@ class KalmanTracker3D:
 
     # ------------------------------------------------------------------ #
 
+    def reset(self, initial_state: "Optional[np.ndarray]" = None) -> None:
+        """Reset the filter to a pristine state.
+
+        Used between independent recordings (e.g. by
+        SegmentTracker.track_sequence) so a converged covariance from
+        the previous run doesn't carry over and under-weight new
+        measurements. Without this, a second sequence with the same
+        tracker would inherit a small ``P`` and effectively ignore its
+        own first valid observation.
+
+        Parameters
+        ----------
+        initial_state : Optional (6,) array. If supplied, the filter
+                        is initialised from it; otherwise it goes back
+                        to uninitialised and waits for the first valid
+                        measurement to bootstrap.
+        """
+        if initial_state is None:
+            self.x = np.zeros(6, dtype=np.float64)
+            self.initialised = False
+        else:
+            self.x = np.asarray(
+                initial_state, dtype=np.float64).reshape(6).copy()
+            self.initialised = True
+        self.P = np.diag([1e4, 1e4, 1e4, 1e4, 1e4, 1e4])
+        self._last_mahal = 0.0
+
+    # ------------------------------------------------------------------ #
+
     def predict(self) -> None:
         """Run the time-update step (predict)."""
         self.x = self.F @ self.x
