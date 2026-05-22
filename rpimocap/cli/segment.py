@@ -501,8 +501,17 @@ def main() -> None:
                 method=args.background_method,
                 start_frame=args.background_start,
                 verbose=True)
+        if args.texture_suppress:
+            print("  Caching Gabor bedding-energy maps in bg.npz "
+                  "(for --gabor-refine at tracking time) ...")
+            bg.compute_gabor(
+                lambdas=tuple(args.texture_lambdas),
+                n_orientations=4)   # matches ForegroundDetector default
         bg.save(bg_npz)
-        print(f"  Saved: {bg_npz}")
+        if bg.bg_gabor0 is not None:
+            print(f"  Saved: {bg_npz}  (incl. Gabor model)")
+        else:
+            print(f"  Saved: {bg_npz}")
 
     # Save background images for inspection
     for img, name in [(bg.bg0, "bg_cam0.png"), (bg.bg1, "bg_cam1.png")]:

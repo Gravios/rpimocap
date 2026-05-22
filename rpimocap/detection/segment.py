@@ -152,10 +152,48 @@ class BackgroundModel:
     """
 
     def __init__(self, bg0: np.ndarray, bg1: np.ndarray,
-                 method: str = "median"):
+                 method: str = "median",
+                 bg_gabor0: Optional[np.ndarray] = None,
+                 bg_gabor1: Optional[np.ndarray] = None):
         self.bg0    = bg0.astype(np.float32)
         self.bg1    = bg1.astype(np.float32)
         self.method = method
+        # Optional cached Gabor bedding-energy maps, normalised to [0, 1].
+        # Populated by compute_gabor() and persisted by save() so the
+        # ForegroundDetector can skip the per-instance recomputation at
+        # tracking time. Both are present together or not at all.
+        self.bg_gabor0: Optional[np.ndarray] = (
+            None if bg_gabor0 is None else bg_gabor0.astype(np.float32))
+        self.bg_gabor1: Optional[np.ndarray] = (
+            None if bg_gabor1 is None else bg_gabor1.astype(np.float32))
+
+    def compute_gabor(
+            self,
+            lambdas:        "tuple" = (4.0, 8.0, 16.0),
+            n_orientations: int     = 6,
+    ) -> None:
+        """Compute and cache the Gabor bedding-energy maps for both cameras.
+
+        Used by --texture-suppress at BG-build time so the resulting
+        bg.npz is self-contained for --gabor-refine at tracking time.
+        Idempotent: a second call recomputes from the current bg0/bg1.
+        """
+        bg0_gray = self.bg0
+        if bg0_gray.ndim == 3:
+            bg0_gray = cv2.cvtColor(bg0_gray.astype(np.uint8),
+                                    cv2.COLOR_BGR2GRAY).astype(np.float32)
+        bg1_gray = self.bg1
+        if bg1_gray.ndim == 3:
+            bg1_gray = cv2.cvtColor(bg1_gray.astype(np.uint8),
+                                    cv2.COLOR_BGR2GRAY).astype(np.float32)
+        bg0_e = gabor_bedding_energy(bg0_gray, lambdas=lambdas,
+                                     n_orientations=n_orientations)
+        bg1_e = gabor_bedding_energy(bg1_gray, lambdas=lambdas,
+                                     n_orientations=n_orientations)
+        self.bg_gabor0 = (bg0_e / (np.percentile(bg0_e, 99) + 1e-6)).astype(
+            np.float32)
+        self.bg_gabor1 = (bg1_e / (np.percentile(bg1_e, 99) + 1e-6)).astype(
+            np.float32)
 
     # ------------------------------------------------------------------ #
 
@@ -281,16 +319,34 @@ class BackgroundModel:
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "BackgroundModel":
-        """Load a saved background model."""
+        """Load a saved background model.
+
+        Backward-compatible with older .npz files that have only
+        bg0/bg1/method — the bg_gabor* fields default to None when
+        absent.
+        """
         d = np.load(path)
-        return cls(d["bg0"], d["bg1"], str(d["method"]))
+        files = set(d.files)
+        bg_gabor0 = d["bg_gabor0"] if "bg_gabor0" in files else None
+        bg_gabor1 = d["bg_gabor1"] if "bg_gabor1" in files else None
+        return cls(d["bg0"], d["bg1"], str(d["method"]),
+                   bg_gabor0=bg_gabor0, bg_gabor1=bg_gabor1)
 
     def save(self, path: str | Path) -> None:
-        """Save background arrays to a .npz file."""
+        """Save background arrays to a .npz file.
+
+        Persists the Gabor bedding-energy maps when present (i.e.
+        when compute_gabor() has been called or --texture-suppress
+        was used at BG-build time). Backward-compatible: readers
+        that pre-date the Gabor caching ignore the extra keys.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(path, bg0=self.bg0, bg1=self.bg1,
-                            method=self.method)
+        kw = dict(bg0=self.bg0, bg1=self.bg1, method=self.method)
+        if self.bg_gabor0 is not None and self.bg_gabor1 is not None:
+            kw["bg_gabor0"] = self.bg_gabor0
+            kw["bg_gabor1"] = self.bg_gabor1
+        np.savez_compressed(path, **kw)
 
     # ------------------------------------------------------------------ #
     #  Temporal adaptation                                                #
@@ -741,12 +797,24 @@ class ForegroundDetector:
         self._roi_masks:   dict = {0: roi_mask, 1: None}
         self._wall_weights: dict = {0: wall_weight, 1: None}
 
-        # Gabor bedding-texture suppression
-        # Pre-compute the background's Gabor energy once at init time.
-        # This is the per-pixel "how much bedding texture exists here in
-        # the background" map, used as a suppression weight in detect().
+        # Gabor bedding-texture suppression.
+        # The per-pixel "how much bedding texture exists here in the
+        # background" map is used (a) as a suppression weight in detect()
+        # when --texture-suppress is on, and (b) by gabor_body_contour()
+        # for --gabor-refine. Preference order:
+        #   1. background.bg_gabor* already cached in bg.npz (free)
+        #   2. compute from background.bg0/bg1 here (slow on first call)
+        # Caching means a user who builds the BG with --texture-suppress
+        # gets --gabor-refine support for free at tracking time without
+        # having to also pass --texture-suppress to every tracking run.
         self._texture_alpha = texture_alpha if texture_suppress else 0.0
-        if texture_suppress:
+        if (getattr(background, "bg_gabor0", None) is not None
+                and getattr(background, "bg_gabor1", None) is not None):
+            self._bg_gabor: dict = {
+                0: background.bg_gabor0,
+                1: background.bg_gabor1,
+            }
+        elif texture_suppress:
             bg0_gray = background.bg0
             if bg0_gray.ndim == 3:
                 bg0_gray = cv2.cvtColor(
