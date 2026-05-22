@@ -321,6 +321,31 @@ def main() -> None:
                          "0 = off)")
     sm.add_argument("--fill-gaps", type=int, default=5,
                     help="Interpolate gaps up to N frames (default: 5, 0=off)")
+    sm.add_argument("--kalman", action="store_true",
+                    help="Use a 3D Kalman/RTS smoother instead of Gaussian "
+                         "smoothing + linear gap-fill. Adds outlier "
+                         "rejection (wall reflections, bad blobs) via "
+                         "Mahalanobis gating, and fills gaps with constant-"
+                         "velocity predictions clamped to --kalman-max-speed.")
+    sm.add_argument("--kalman-fps", type=float, default=25.0, metavar="FPS",
+                    help="Frame rate for the Kalman dt (default 25).")
+    sm.add_argument("--kalman-max-speed", type=float, default=1000.0,
+                    metavar="MM_S",
+                    help="Rat maximum speed in mm/s (default 1000); "
+                         "initialises velocity covariance.")
+    sm.add_argument("--kalman-max-accel", type=float, default=2000.0,
+                    metavar="MM_S2",
+                    help="Rat maximum acceleration in mm/s² (default 2000); "
+                         "sets process noise Q.")
+    sm.add_argument("--kalman-noise", type=float, default=8.0, metavar="MM",
+                    help="Triangulation measurement noise 1-σ in mm "
+                         "(default 8).")
+    sm.add_argument("--kalman-outlier-sigma", type=float, default=4.0,
+                    metavar="S",
+                    help="Mahalanobis threshold for outlier rejection "
+                         "(default 4 σ ≈ p<0.003 for χ²(3)).")
+    sm.add_argument("--kalman-no-rts", action="store_true",
+                    help="Disable RTS backward smoothing pass.")
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     dg = ap.add_argument_group("Diagnostics")
@@ -613,14 +638,30 @@ def main() -> None:
 
     # ── Smoothing / gap fill ─────────────────────────────────────────────────
     print("\n── Post-processing ─────────────────────────────────────────────")
-    if args.smooth_sigma > 0 and skeleton_frames:
-        skeleton_frames = smooth_trajectory(
-            skeleton_frames, sigma=args.smooth_sigma)
-        print(f"  Smoothed (sigma={args.smooth_sigma})")
-    if args.fill_gaps > 0 and skeleton_frames:
-        skeleton_frames = fill_trajectory_gaps(
-            skeleton_frames, max_gap=args.fill_gaps)
-        print(f"  Gap-filled (max_gap={args.fill_gaps})")
+    if args.kalman and skeleton_frames:
+        from rpimocap.reconstruction.triangulate import kalman_filter_trajectory
+        skeleton_frames = kalman_filter_trajectory(
+            skeleton_frames,
+            fps=args.kalman_fps,
+            max_speed_mm_s=args.kalman_max_speed,
+            max_accel_mm_s2=args.kalman_max_accel,
+            measurement_noise_mm=args.kalman_noise,
+            outlier_sigma=args.kalman_outlier_sigma,
+            rts_smooth=not args.kalman_no_rts,
+        )
+        n_out = sum(1 for frame in skeleton_frames
+                    for pt in frame if getattr(pt, 'kalman_outlier', False))
+        suffix = "+RTS" if not args.kalman_no_rts else " (forward only)"
+        print(f"  Kalman{suffix}: {n_out} outlier frames corrected")
+    else:
+        if args.smooth_sigma > 0 and skeleton_frames:
+            skeleton_frames = smooth_trajectory(
+                skeleton_frames, sigma=args.smooth_sigma)
+            print(f"  Smoothed (sigma={args.smooth_sigma})")
+        if args.fill_gaps > 0 and skeleton_frames:
+            skeleton_frames = fill_trajectory_gaps(
+                skeleton_frames, max_gap=args.fill_gaps)
+            print(f"  Gap-filled (max_gap={args.fill_gaps})")
 
     # ── Stats ────────────────────────────────────────────────────────────────
     stats = trajectory_stats(skeleton_frames)

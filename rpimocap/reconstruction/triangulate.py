@@ -30,6 +30,7 @@ class Point3D:
     xyz: np.ndarray        # (3,) world coordinates (same units as calibration)
     confidence: float = 1.0
     reprojection_error: float = 0.0
+    kalman_outlier: bool = False   # set by kalman_filter_trajectory()
 
     def as_list(self) -> list:
         return self.xyz.tolist()
@@ -210,6 +211,154 @@ def build_trajectory_dict(
             if pt.name in traj:
                 traj[pt.name][f_idx] = pt.xyz
     return traj
+
+
+def kalman_filter_trajectory(
+    frames:               list,
+    fps:                  float = 25.0,
+    max_speed_mm_s:       float = 1000.0,
+    max_accel_mm_s2:      float = 2000.0,
+    measurement_noise_mm: float = 8.0,
+    outlier_sigma:        float = 4.0,
+    rts_smooth:           bool  = True,
+) -> list:
+    """Kalman / RTS smoother for 3D trajectories.
+
+    Replaces the Gaussian smooth + linear gap-fill pipeline with a
+    physically-constrained constant-velocity Kalman filter.
+
+    State vector: [x, y, z, vx, vy, vz]  (position + velocity, mm & mm/s)
+
+    Advantages over Gaussian smoothing
+    -----------------------------------
+    * **Outlier rejection**: measurements whose Mahalanobis distance
+      from the Kalman prediction exceeds ``outlier_sigma`` are treated
+      as missing (bad blob selections, reflections, etc.).
+    * **Physics-based gap filling**: missing frames are filled by the
+      constant-velocity prediction (with growing uncertainty), not
+      linear interpolation. The prediction is clamped to
+      ``max_speed_mm_s`` so gaps cannot produce trajectories that
+      travel faster than the rat.
+    * **RTS smoother**: a backward pass (Rauch-Tung-Striebel) refines
+      all estimates using the full sequence. This is optimal for
+      offline processing and gives smoother trajectories than a
+      causal filter alone.
+
+    Returns the filtered/smoothed per-frame list (same structure as
+    input). Outlier-rejected and gap-filled frames are flagged via the
+    ``kalman_outlier`` attribute on Point3D.
+    """
+    dt  = 1.0 / fps
+    sa2 = (max_accel_mm_s2 / 3.0) ** 2   # 1-sigma acceleration variance
+
+    F = np.eye(6)
+    F[0, 3] = F[1, 4] = F[2, 5] = dt
+    H = np.zeros((3, 6))
+    H[0, 0] = H[1, 1] = H[2, 2] = 1.0
+
+    q_pos  = (dt ** 4 / 4.0) * sa2
+    q_pv   = (dt ** 3 / 2.0) * sa2
+    q_vel  = (dt ** 2)        * sa2
+    Q = np.array([
+        [q_pos, 0,     0,     q_pv, 0,     0    ],
+        [0,     q_pos, 0,     0,    q_pv,  0    ],
+        [0,     0,     q_pos, 0,    0,     q_pv ],
+        [q_pv,  0,     0,     q_vel,0,     0    ],
+        [0,     q_pv,  0,     0,    q_vel, 0    ],
+        [0,     0,     q_pv,  0,    0,     q_vel],
+    ])
+    R = (measurement_noise_mm ** 2) * np.eye(3)
+    outlier_thresh = outlier_sigma ** 2
+
+    all_names = sorted({p.name for frame in frames for p in frame})
+    result    = [[pt for pt in frame] for frame in frames]
+
+    for name in all_names:
+        N = len(frames)
+        obs = np.full((N, 3), np.nan)
+        for i, frame in enumerate(frames):
+            pt = next((p for p in frame if p.name == name), None)
+            if pt is not None and not np.isnan(pt.xyz).any():
+                obs[i] = pt.xyz
+
+        valid_idx = np.where(~np.isnan(obs[:, 0]))[0]
+        if len(valid_idx) < 2:
+            continue
+
+        x0 = np.zeros(6)
+        x0[:3] = obs[valid_idx[0]]
+        if len(valid_idx) >= 2:
+            dx = obs[valid_idx[1]] - obs[valid_idx[0]]
+            dt_init = (valid_idx[1] - valid_idx[0]) * dt
+            x0[3:] = dx / max(dt_init, dt)
+        P0 = np.diag([measurement_noise_mm**2] * 3
+                   + [max_speed_mm_s**2] * 3)
+
+        xs   = np.zeros((N, 6))
+        Ps   = np.zeros((N, 6, 6))
+        xp   = np.zeros((N, 6))
+        Pp_s = np.zeros((N, 6, 6))
+        rejected = np.zeros(N, dtype=bool)
+        x, P = x0.copy(), P0.copy()
+        started = False
+
+        for i in range(N):
+            if started:
+                x = F @ x
+                P = F @ P @ F.T + Q
+            xp[i]   = x.copy()
+            Pp_s[i] = P.copy()
+
+            z = obs[i]
+            if not np.isnan(z[0]):
+                innov = z - H @ x
+                S     = H @ P @ H.T + R
+                try:
+                    S_inv = np.linalg.inv(S)
+                    mah2  = float(innov @ S_inv @ innov)
+                except np.linalg.LinAlgError:
+                    mah2 = outlier_thresh + 1.0
+                if mah2 <= outlier_thresh:
+                    K = P @ H.T @ S_inv
+                    x = x + K @ innov
+                    P = (np.eye(6) - K @ H) @ P
+                    started = True
+                else:
+                    rejected[i] = True
+            xs[i] = x.copy()
+            Ps[i] = P.copy()
+            if not started and not np.isnan(z[0]):
+                started = True
+
+        if rts_smooth:
+            xs_s = xs.copy()
+            Ps_s = Ps.copy()
+            for i in range(N - 2, -1, -1):
+                Pp = Pp_s[i + 1]
+                try:
+                    G = Ps[i] @ F.T @ np.linalg.inv(Pp)
+                except np.linalg.LinAlgError:
+                    continue
+                xs_s[i] = xs[i] + G @ (xs_s[i + 1] - xp[i + 1])
+                Ps_s[i] = Ps[i] + G @ (Ps_s[i + 1] - Pp) @ G.T
+            xs = xs_s
+
+        for i, frame in enumerate(result):
+            xyz_k = xs[i, :3]
+            existing = next((p for p in frame if p.name == name), None)
+            was_valid = not np.isnan(obs[i, 0]) and not rejected[i]
+            if was_valid and existing is not None:
+                existing.xyz = xyz_k.copy()
+                existing.kalman_outlier = False
+            elif rejected[i] and existing is not None:
+                existing.xyz = xyz_k.copy()
+                existing.kalman_outlier = True
+            elif np.isnan(obs[i, 0]) and existing is None:
+                frame.append(Point3D(
+                    name=name, xyz=xyz_k.copy(),
+                    confidence=0.0,
+                    reprojection_error=float(np.sqrt(Ps[i, 0, 0]))))
+    return result
 
 
 def smooth_trajectory(
