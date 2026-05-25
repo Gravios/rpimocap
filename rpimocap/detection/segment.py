@@ -1011,6 +1011,7 @@ class ForegroundDetector:
             canny_high:  float = 90.0,
             close_k:     int   = 15,
             energy_pct:  float = 40.0,
+            blob_mask:   "Optional[np.ndarray]" = None,
     ) -> Optional[np.ndarray]:
         """Find the rat body mask using Canny edges on the Gabor energy map.
 
@@ -1039,6 +1040,21 @@ class ForegroundDetector:
           blob at ``energy_pct`` percentile. The low-energy region =
           body. Keep the component containing (cx, cy).
 
+        Parameters
+        ----------
+        blob_mask : optional (H, W) array. When supplied, restricts the
+                    Gabor work to this mask instead of reconstructing
+                    the blob from ``result.label_map``. Used by
+                    ``hull_centroid`` step 3b to pass the cable-eroded
+                    body mask from step 3 — without this, the Gabor
+                    refinement runs on the ORIGINAL blob (including
+                    the cable), and Method B in particular can
+                    re-include cable pixels its caller had explicitly
+                    eroded out. Any non-zero value is treated as
+                    foreground; the array is normalised to uint8 {0,1}.
+                    Shape must match ``result.label_map`` or it is
+                    silently ignored (falls back to labelmap path).
+
         Returns a uint8 (H, W) mask (255 = rat body) or None on failure.
         """
         if result.gabor_energy is None or result.label_map is None:
@@ -1048,15 +1064,28 @@ class ForegroundDetector:
         h, w   = result.label_map.shape
         ix     = max(0, min(w - 1, ix))
         iy     = max(0, min(h - 1, iy))
-        lbl    = result.label_map[iy, ix]
-        if lbl == 0:
-            ys, xs = np.where(result.label_map > 0)
-            if len(xs) == 0:
-                return None
-            dists = (xs - ix) ** 2 + (ys - iy) ** 2
-            lbl   = result.label_map[ys[np.argmin(dists)],
-                                     xs[np.argmin(dists)]]
-        blob_mask = (result.label_map == lbl).astype(np.uint8)
+
+        # Resolve the blob mask: caller-supplied (cable-eroded) takes
+        # precedence over the labelmap reconstruction.
+        bm_arr: "Optional[np.ndarray]" = None
+        if blob_mask is not None:
+            cand = np.asarray(blob_mask)
+            if cand.shape == result.label_map.shape:
+                bm_arr = (cand > 0).astype(np.uint8)
+            # else: shape mismatch → silently fall through to labelmap
+
+        if bm_arr is None:
+            lbl = result.label_map[iy, ix]
+            if lbl == 0:
+                ys, xs = np.where(result.label_map > 0)
+                if len(xs) == 0:
+                    return None
+                dists = (xs - ix) ** 2 + (ys - iy) ** 2
+                lbl   = result.label_map[ys[np.argmin(dists)],
+                                         xs[np.argmin(dists)]]
+            bm_arr = (result.label_map == lbl).astype(np.uint8)
+
+        blob_mask = bm_arr   # downstream code uses this name unchanged
 
         energy_roi = result.gabor_energy * blob_mask
         energy_u8  = np.clip(energy_roi * 255, 0, 255).astype(np.uint8)
@@ -1229,10 +1258,17 @@ class ForegroundDetector:
         # Updates BOTH the body pixel list (xs, ys, consumed by step 4)
         # AND eroded_mask (consumed by step 5), so the anatomical prior
         # sees the Gabor-refined body region.
+        #
+        # We pass eroded_mask through to gabor_body_contour so the
+        # Gabor work happens INSIDE the cable-eroded region from step 3
+        # (when --cable-erosion succeeded). Without this, Method B's
+        # percentile threshold runs on the original blob and can re-
+        # include cable pixels that step 3 explicitly removed.
         if gabor_refine and result.gabor_energy is not None and len(xs) >= 5:
             gbody = self.gabor_body_contour(
                 result, float(xs.mean()), float(ys.mean()),
-                canny_low=canny_low, canny_high=canny_high)
+                canny_low=canny_low, canny_high=canny_high,
+                blob_mask=eroded_mask)
             if gbody is not None:
                 gy, gx = np.where(gbody > 0)
                 if len(gx) >= 5:
