@@ -1147,6 +1147,7 @@ class ForegroundDetector:
             gabor_refine:     bool  = False,
             canny_low:        float = 30.0,
             canny_high:       float = 90.0,
+            stats:            "Optional[dict]" = None,
     ) -> tuple[float, float]:
         """Refine a centroid, optionally stripping an attached cable first.
 
@@ -1230,6 +1231,9 @@ class ForegroundDetector:
 
         # ── Step 3: cable erosion ─────────────────────────────────────
         if cable_erosion_px > 0:
+            if stats is not None:
+                stats["cable_erosion_attempted"] = (
+                    stats.get("cable_erosion_attempted", 0) + 1)
             r   = int(cable_erosion_px)
             k   = cv2.getStructuringElement(
                       cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
@@ -1249,6 +1253,9 @@ class ForegroundDetector:
                 else:
                     # Keep the eroded body mask available for step 5
                     eroded_mask = (lbl_e == body_lbl).astype(np.uint8) * 255
+                    if stats is not None:
+                        stats["cable_erosion_succeeded"] = (
+                            stats.get("cable_erosion_succeeded", 0) + 1)
 
         # ── Step 3b: Gabor-edge body contour refinement ───────────────
         # Use the Gabor energy map cached in ForegroundResult to find
@@ -1265,6 +1272,9 @@ class ForegroundDetector:
         # percentile threshold runs on the original blob and can re-
         # include cable pixels that step 3 explicitly removed.
         if gabor_refine and result.gabor_energy is not None and len(xs) >= 5:
+            if stats is not None:
+                stats["gabor_refine_attempted"] = (
+                    stats.get("gabor_refine_attempted", 0) + 1)
             gbody = self.gabor_body_contour(
                 result, float(xs.mean()), float(ys.mean()),
                 canny_low=canny_low, canny_high=canny_high,
@@ -1274,6 +1284,9 @@ class ForegroundDetector:
                 if len(gx) >= 5:
                     xs, ys = gx, gy
                     eroded_mask = gbody
+                    if stats is not None:
+                        stats["gabor_refine_succeeded"] = (
+                            stats.get("gabor_refine_succeeded", 0) + 1)
 
         # ── Step 4: ellipse-fit centroid ──────────────────────────────
         pts = np.column_stack([xs, ys]).astype(np.float32)
@@ -1295,18 +1308,29 @@ class ForegroundDetector:
         # ── Step 5: anatomical Gaussian prior ─────────────────────────
         if (ellipse_cx is not None and P is not None
                 and body_length_mm > 0.0 and body_width_mm > 0.0):
+            if stats is not None:
+                stats["anatomical_prior_attempted"] = (
+                    stats.get("anatomical_prior_attempted", 0) + 1)
             ap = _anatomical_prior_centroid(
                 eroded_mask, ellipse_cx, ellipse_cy, theta_rad,
                 P, body_length_mm, body_width_mm, body_z_mm)
             if ap is not None:
+                if stats is not None:
+                    stats["anatomical_prior_succeeded"] = (
+                        stats.get("anatomical_prior_succeeded", 0) + 1)
                 return ap
 
         # If step 5 was skipped or failed but step 4 produced an ellipse,
         # return the ellipse centroid (the previous behaviour).
         if ellipse_cx is not None:
+            if stats is not None:
+                stats["fallback_ellipse"] = (
+                    stats.get("fallback_ellipse", 0) + 1)
             return ellipse_cx, ellipse_cy
 
         # ── Step 6: hull centroid fallback ────────────────────────────
+        if stats is not None:
+            stats["fallback_hull"] = stats.get("fallback_hull", 0) + 1
         hull = cv2.convexHull(pts)
         M    = cv2.moments(hull)
         if M['m00'] < 1e-6:

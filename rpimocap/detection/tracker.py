@@ -658,6 +658,12 @@ class SegmentTracker:
         # the frame counter maintained in track_sequence.
         self._sam2_mask_cache = sam2_mask_cache
         self._frame_idx       = 0    # set by track_sequence per iteration
+        # Pipeline-step counters populated in _process_frame and inside
+        # hull_centroid (which mutates the dict in place). Counters are
+        # per-camera-refinement, not per-frame: cable_erosion_attempted
+        # increments by 2 per frame when both cameras have valid blobs.
+        # Reset at the start of every track_sequence call.
+        self._step_stats: dict = {}
 
         self._det  = ForegroundDetector(
             background, threshold=threshold,
@@ -689,6 +695,22 @@ class SegmentTracker:
             self._det, self._lbl, redetect_every=redetect_every)
         self._of1 = OpticalFlowTracker(
             self._det, self._lbl, redetect_every=redetect_every)
+
+    # ------------------------------------------------------------------ #
+
+    @property
+    def step_stats(self) -> dict:
+        """Per-step diagnostic counters from the most recent track_sequence.
+
+        Counter keys are stable; absent keys are treated as 0. Per-camera
+        counters (cable_erosion_attempted, gabor_refine_attempted,
+        anatomical_prior_attempted, etc.) sum to ~2 × frame-count when
+        both cameras have valid blobs. Per-frame counters
+        (frames_with_match, kalman_with_measurement, kalman_gap,
+        rearing_frames, sam2_mask_hits, bg_adapt_updates) sum to ≤
+        frame-count.
+        """
+        return dict(self._step_stats)
 
     # ------------------------------------------------------------------ #
 
@@ -735,6 +757,7 @@ class SegmentTracker:
         if self._rearing_classifier is not None:
             self._rearing_classifier.reset()
         self._current_posture = None
+        self._step_stats = {}            # fresh counters per sequence
         results: list[TrackResult] = []
         n_frames = len(range(start_frame, end_frame, sample_every))
 
@@ -881,6 +904,15 @@ class SegmentTracker:
             _body_L = float(self._current_posture.body_length_mm)
             _body_W = float(self._current_posture.body_width_mm)
 
+        # Frame-visible counters: things _process_frame can see without
+        # peering into hull_centroid's internals.
+        if sam2_fg0 is not None or sam2_fg1 is not None:
+            self._step_stats["sam2_mask_hits"] = (
+                self._step_stats.get("sam2_mask_hits", 0) + 1)
+        if matches:
+            self._step_stats["frames_with_match"] = (
+                self._step_stats.get("frames_with_match", 0) + 1)
+
         for r0, r1 in matches:
             if fg0 is not None:
                 hx0, hy0 = self._det.hull_centroid(
@@ -892,7 +924,8 @@ class SegmentTracker:
                     body_z_mm=self._body_z_mm,
                     gabor_refine=self._gabor_refine,
                     canny_low=self._canny_low,
-                    canny_high=self._canny_high)
+                    canny_high=self._canny_high,
+                    stats=self._step_stats)
                 r0 = r0.__class__(
                     label=r0.label, cx=hx0, cy=hy0,
                     area_px=r0.area_px, confidence=r0.confidence,
@@ -907,7 +940,8 @@ class SegmentTracker:
                     body_z_mm=self._body_z_mm,
                     gabor_refine=self._gabor_refine,
                     canny_low=self._canny_low,
-                    canny_high=self._canny_high)
+                    canny_high=self._canny_high,
+                    stats=self._step_stats)
                 r1 = r1.__class__(
                     label=r1.label, cx=hx1, cy=hy1,
                     area_px=r1.area_px, confidence=r1.confidence,
@@ -928,14 +962,21 @@ class SegmentTracker:
             z = xyz_dict.get(self._rearing_track_name) if xyz_dict else None
             if z is not None and not np.any(np.isnan(z)):
                 self._kalman_online.step(np.asarray(z, dtype=np.float64))
+                self._step_stats["kalman_with_measurement"] = (
+                    self._step_stats.get("kalman_with_measurement", 0) + 1)
             else:
                 self._kalman_online.step(None)
+                self._step_stats["kalman_gap"] = (
+                    self._step_stats.get("kalman_gap", 0) + 1)
             if getattr(self._kalman_online, "initialised", False):
                 # x = [x, y, z, vx, vy, vz]
                 kalman_pred_xyz = self._kalman_online.x[:3].copy()
                 if self._rearing_classifier is not None:
                     self._current_posture = self._rearing_classifier.classify(
                         self._kalman_online.x)
+                    if getattr(self._current_posture, "reared", False):
+                        self._step_stats["rearing_frames"] = (
+                            self._step_stats.get("rearing_frames", 0) + 1)
 
         # Update trajectory prior centroids from the (possibly refined)
         # matched pair OR from the back-projected Kalman prediction.
@@ -986,6 +1027,8 @@ class SegmentTracker:
                 self._background.update(
                     f0, f1, mask0=m0, mask1=m1,
                     alpha=self._bg_adapt_alpha)
+                self._step_stats["bg_adapt_updates"] = (
+                    self._step_stats.get("bg_adapt_updates", 0) + 1)
             except Exception:
                 # Adaptation is best-effort; never let it abort tracking.
                 pass

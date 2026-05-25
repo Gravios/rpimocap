@@ -897,6 +897,52 @@ def main() -> None:
     print(f"  Body parts: {sorted(parts)}")
     print(f"  Output    : {track_dir}/")
 
+    # Pipeline diagnostics — which refinement steps actually fired
+    # and how often. Helps tune flag combinations: low gabor_refine
+    # success means the texture model isn't seeing a clean low-energy
+    # body; low cable_erosion success means cable_erosion_px is too
+    # aggressive; many kalman_gap frames means the body is being lost
+    # often; etc.
+    ss = tracker.step_stats
+    if ss:
+        print("\n── Pipeline diagnostics ────────────────────────────────────────")
+        print(f"  Frames with stereo match : {ss.get('frames_with_match', 0)}"
+              f" / {n_tot}")
+
+        def _pct(num_key, den_key):
+            num = ss.get(num_key, 0)
+            den = ss.get(den_key, 0)
+            return f"{num} / {den} ({100*num/den:.1f}%)" if den else "—"
+
+        if ss.get('cable_erosion_attempted', 0):
+            print(f"  Cable erosion            : "
+                  f"{_pct('cable_erosion_succeeded', 'cable_erosion_attempted')}")
+        if ss.get('gabor_refine_attempted', 0):
+            print(f"  Gabor refinement         : "
+                  f"{_pct('gabor_refine_succeeded', 'gabor_refine_attempted')}")
+        if ss.get('anatomical_prior_attempted', 0):
+            print(f"  Anatomical prior         : "
+                  f"{_pct('anatomical_prior_succeeded', 'anatomical_prior_attempted')}")
+        fb_e = ss.get('fallback_ellipse', 0)
+        fb_h = ss.get('fallback_hull', 0)
+        if fb_e or fb_h:
+            print(f"  Fallbacks                : "
+                  f"ellipse={fb_e}, hull={fb_h}")
+        if ss.get('kalman_with_measurement', 0) or ss.get('kalman_gap', 0):
+            print(f"  Online Kalman            : "
+                  f"{ss.get('kalman_with_measurement', 0)} measured, "
+                  f"{ss.get('kalman_gap', 0)} gap")
+        if ss.get('rearing_frames', 0):
+            print(f"  Rearing posture          : "
+                  f"{ss['rearing_frames']} / {n_tot} "
+                  f"({100*ss['rearing_frames']/max(n_tot,1):.1f}%)")
+        if ss.get('sam2_mask_hits', 0):
+            print(f"  SAM2 mask cache hits     : "
+                  f"{ss['sam2_mask_hits']} / {n_tot}")
+        if ss.get('bg_adapt_updates', 0):
+            print(f"  Background adaptation    : "
+                  f"{ss['bg_adapt_updates']} updates")
+
 
 if __name__ == "__main__":
     main()
