@@ -222,8 +222,30 @@ def main() -> None:
     d1   = np.ravel(cal.get("dist1", np.zeros(5)))
     R    = cal["R"]
     T    = cal["T"].ravel()
-    P0   = cal.get("P0", K0 @ np.hstack([np.eye(3),  np.zeros((3, 1))]))
-    P1   = cal.get("P1", K1 @ np.hstack([R, T.reshape(3, 1)]))
+    # P matrix priority matches EpipolarMatcher.from_calibration:
+    #   1. dlt_P0/dlt_P1  → DLT fit on annotated arena corners
+    #      (this is what produced the H5 xyz, so it's the only set
+    #      that will project them back to the same pixels)
+    #   2. P0/P1          → some other source (e.g. an older calib
+    #      pre-DLT). Will produce a coordinate-frame mismatch with
+    #      DLT-based triangulation; warn the user.
+    #   3. K + R + T      → constructed from scratch; almost certainly
+    #      mis-aligned with the DLT H5; warn loudly.
+    if "dlt_P0" in cal.files and "dlt_P1" in cal.files:
+        P0 = cal["dlt_P0"]
+        P1 = cal["dlt_P1"]
+        _p_source = "dlt_P0/dlt_P1 (matches segmentation triangulation)"
+    elif "P0" in cal.files and "P1" in cal.files:
+        P0 = cal["P0"]
+        P1 = cal["P1"]
+        _p_source = ("P0/P1 (autocalib-style — WARN if H5 came from a "
+                     "DLT-based run, dots will be mis-aligned)")
+    else:
+        P0 = K0 @ np.hstack([np.eye(3),  np.zeros((3, 1))])
+        P1 = K1 @ np.hstack([R, T.reshape(3, 1)])
+        _p_source = ("K + R + T composition (no P matrices in calib npz "
+                     "— ALMOST CERTAINLY MIS-ALIGNED with DLT-based H5)")
+    print(f"  P matrices source: {_p_source}")
 
     # ── Inverse arena alignment (arena mm → calibration world frame) ──────
     # Coordinates stored in h5 are in arena space if --align-points was used
@@ -400,14 +422,36 @@ def main() -> None:
             sanity_printed = True
             print(f"\n── Projection sanity check (frame {frame_idx}) ──")
             print(f"  cam0 frame size : {f0.shape[1]} × {f0.shape[0]}")
-            for n, (u, v) in kp0.items():
-                inside = 0 <= u < f0.shape[1] and 0 <= v < f0.shape[0]
-                tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
-                print(f"  cam0 '{n}'      : ({u}, {v})  [{tag}]")
-            for n, (u, v) in kp1.items():
-                inside = 0 <= u < f1.shape[1] and 0 <= v < f1.shape[0]
-                tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
-                print(f"  cam1 '{n}'      : ({u}, {v})  [{tag}]")
+            for name in sorted(set(list(kp0) + list(kp1))):
+                # Re-fetch the source xyz (and the post-inv-alignment one)
+                # so the user can compare H5 values against the projection.
+                xyz_src = xyz_dict[name][frame_idx]
+                xyz_cal = inv_R @ xyz_src + inv_t
+                print(f"  '{name}'  H5 xyz       : "
+                      f"({xyz_src[0]:+8.1f}, {xyz_src[1]:+8.1f}, "
+                      f"{xyz_src[2]:+8.1f})  mm  (calibration-world frame)")
+                if not np.allclose(xyz_cal, xyz_src):
+                    print(f"  '{name}'  post-inv-align: "
+                          f"({xyz_cal[0]:+8.1f}, {xyz_cal[1]:+8.1f}, "
+                          f"{xyz_cal[2]:+8.1f})  mm")
+                if name in kp0:
+                    u, v = kp0[name]
+                    inside = 0 <= u < f0.shape[1] and 0 <= v < f0.shape[0]
+                    tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
+                    print(f"  '{name}'  cam0 pixel   : "
+                          f"({u}, {v})  [{tag}]")
+                if name in kp1:
+                    u, v = kp1[name]
+                    inside = 0 <= u < f1.shape[1] and 0 <= v < f1.shape[0]
+                    tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
+                    print(f"  '{name}'  cam1 pixel   : "
+                          f"({u}, {v})  [{tag}]")
+            # And the matrices we used (one row each — distinctive enough
+            # to tell DLT-fit-on-corners from autocalib-from-K-R-T)
+            print(f"  P0 row 0       : "
+                  f"[{P0[0,0]:+.2f}, {P0[0,1]:+.2f}, {P0[0,2]:+.2f}, {P0[0,3]:+.2f}]")
+            print(f"  P1 row 0       : "
+                  f"[{P1[0,0]:+.2f}, {P1[0,1]:+.2f}, {P1[0,2]:+.2f}, {P1[0,3]:+.2f}]")
             print()
 
         # Draw overlays
