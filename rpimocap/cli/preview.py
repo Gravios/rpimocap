@@ -84,13 +84,21 @@ def _draw_skeleton(
     dot_r:      int   = 12,
     line_w:     int   = 2,
     alpha:      float = 0.85,
-) -> np.ndarray:
-    """Draw skeleton dots and connecting lines onto canvas (in-place overlay).
+) -> tuple[np.ndarray, int, int]:
+    """Draw skeleton dots and connecting lines onto canvas.
 
-    Uses an alpha-blended overlay so the original image shows through.
+    Returns
+    -------
+    (drawn_canvas, n_drawn, n_dropped)
+      n_drawn   : keypoints that landed inside the canvas and were drawn
+      n_dropped : keypoints whose projected (u, v) was outside the canvas
+                  bounds (silent before; counted now so callers can warn
+                  the user when projection is mis-configured).
     """
     h, w = canvas.shape[:2]
     overlay = canvas.copy()
+    n_drawn   = 0
+    n_dropped = 0
 
     # Edges first (drawn under dots)
     for a, b in _ALL_EDGES:
@@ -108,12 +116,15 @@ def _draw_skeleton(
     # Dots
     for name, (u, v) in kp_px.items():
         if not _in_frame(u, v, w, h):
+            n_dropped += 1
             continue
         col = _colour(name)
         cv2.circle(overlay, (u, v), dot_r,     col, -1, cv2.LINE_AA)
         cv2.circle(overlay, (u, v), dot_r + 1, (0, 0, 0), 1, cv2.LINE_AA)
+        n_drawn += 1
 
-    return cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0)
+    return cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0), \
+           n_drawn, n_dropped
 
 
 def _load_h5(path: str) -> tuple[dict[str, np.ndarray], float, int]:
@@ -259,8 +270,16 @@ def main() -> None:
 
     out_w  = int(vid_w  * args.scale)
     out_h  = int(vid_h  * args.scale)
-    dot_r  = max(1, int(args.dot_radius * args.scale))
-    line_w = max(1, int(args.line_width * args.scale))
+    # Dot / line widths are specified in OUTPUT pixels. Drawing happens
+    # at the native frame resolution, then the whole frame is cv2.resize'd
+    # by args.scale. So we must PRE-multiply by (1/scale) here so the
+    # final on-screen size matches what the user asked for. The previous
+    # 'args.X * args.scale' was backwards: with --dot-radius 6 --scale 0.5,
+    # users saw 1.5-px dots in the output instead of 6-px ones — often
+    # invisible against textured bedding.
+    inv_s  = 1.0 / max(args.scale, 1e-6)
+    dot_r  = max(2, int(args.dot_radius * inv_s))
+    line_w = max(1, int(args.line_width * inv_s))
 
     # ── Output writer ──────────────────────────────────────────────────────
     import shutil, subprocess as _sp
@@ -334,6 +353,13 @@ def main() -> None:
     cap0.set(cv2.CAP_PROP_POS_FRAMES, start)
     cap1.set(cv2.CAP_PROP_POS_FRAMES, start)
 
+    # Accumulators for end-of-run sanity report
+    sanity_printed   = False
+    total_drawn_0    = 0
+    total_drawn_1    = 0
+    total_dropped_0  = 0
+    total_dropped_1  = 0
+
     for fi, frame_idx in enumerate(range(start, end)):
         ret0, f0 = cap0.read()
         ret1, f1 = cap1.read()
@@ -364,9 +390,33 @@ def main() -> None:
             kp0[name] = (u0, v0)
             kp1[name] = (u1, v1)
 
+        # First-frame sanity check: on the first frame where any
+        # keypoint has valid xyz, print the projected pixel coords and
+        # the canvas size. If projected u/v is wildly outside [0, W]
+        # × [0, H], dots will be silently dropped and the preview will
+        # look 'empty' — but now the user gets a clear diagnostic line
+        # telling them exactly that.
+        if not sanity_printed and (kp0 or kp1):
+            sanity_printed = True
+            print(f"\n── Projection sanity check (frame {frame_idx}) ──")
+            print(f"  cam0 frame size : {f0.shape[1]} × {f0.shape[0]}")
+            for n, (u, v) in kp0.items():
+                inside = 0 <= u < f0.shape[1] and 0 <= v < f0.shape[0]
+                tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
+                print(f"  cam0 '{n}'      : ({u}, {v})  [{tag}]")
+            for n, (u, v) in kp1.items():
+                inside = 0 <= u < f1.shape[1] and 0 <= v < f1.shape[0]
+                tag    = "in-frame" if inside else "OFF-FRAME — bad calib?"
+                print(f"  cam1 '{n}'      : ({u}, {v})  [{tag}]")
+            print()
+
         # Draw overlays
-        f0 = _draw_skeleton(f0, kp0, dot_r, line_w, args.alpha)
-        f1 = _draw_skeleton(f1, kp1, dot_r, line_w, args.alpha)
+        f0, d0, dr0 = _draw_skeleton(f0, kp0, dot_r, line_w, args.alpha)
+        f1, d1, dr1 = _draw_skeleton(f1, kp1, dot_r, line_w, args.alpha)
+        total_drawn_0   += d0
+        total_drawn_1   += d1
+        total_dropped_0 += dr0
+        total_dropped_1 += dr1
 
         # Add frame counter
         for frame, label in [(f0, "CAM0"), (f1, "CAM1")]:
@@ -401,6 +451,20 @@ def main() -> None:
         writer.release()
     cap0.release()
     cap1.release()
+    # End-of-run draw count. If dropped >> drawn, the user knows the
+    # projection is mis-aligned (most dots fell outside the frame).
+    print(f"\n── Skeleton draw summary ──")
+    print(f"  cam0 : drawn={total_drawn_0}  dropped(out-of-frame)={total_dropped_0}")
+    print(f"  cam1 : drawn={total_drawn_1}  dropped(out-of-frame)={total_dropped_1}")
+    if total_drawn_0 == 0 and total_drawn_1 == 0 and (
+            total_dropped_0 > 0 or total_dropped_1 > 0):
+        print("  WARNING: every keypoint projected OUTSIDE the frame. "
+              "Possible causes: wrong --calib, --align-points missing, "
+              "or H5 coords in a different frame than DLT P matrices.")
+    elif total_drawn_0 == 0 and total_drawn_1 == 0:
+        print("  WARNING: no keypoints drawn at all. The H5 may contain "
+              "only NaN xyz (no detections), or the H5 frame indices "
+              "don't overlap with the requested --start-frame/--end-frame.")
     print(f"Done → {out_path}")
 
 
