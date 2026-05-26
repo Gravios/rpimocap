@@ -185,6 +185,15 @@ def main() -> None:
                      help="Overlay opacity 0-1 (default: 0.85)")
     vis.add_argument("--codec",      default="XVID",
                      help="FourCC codec (default: mp4v)")
+    vis.add_argument("--undistort",  action="store_true", default=False,
+                     help="Apply K+dist undistortion to frames before "
+                          "drawing. OFF by default because "
+                          "rpimocap-calibrate-from-corners fits the DLT "
+                          "projection matrices on the raw (distorted) "
+                          "corner-annotation pixels — projecting those Ps "
+                          "onto undistorted frames puts dots in the wrong "
+                          "place, often far off-screen for fisheye lenses. "
+                          "Enable only with a K-based projection chain.")
 
     seq = ap.add_argument_group("Sequence")
     vis.add_argument("--no-ffmpeg", action="store_true",
@@ -294,11 +303,30 @@ def main() -> None:
             sys.exit(1)
         print(f"  Using MJPG AVI → {out_path}")
 
-    # ── Distortion maps (precomputed for speed) ────────────────────────────
-    map0x, map0y = cv2.initUndistortRectifyMap(
-        K0, d0.reshape(1,-1), None, K0, (vid_w, vid_h), cv2.CV_32FC1)
-    map1x, map1y = cv2.initUndistortRectifyMap(
-        K1, d1.reshape(1,-1), None, K1, (vid_w, vid_h), cv2.CV_32FC1)
+    # ── No undistortion ────────────────────────────────────────────────────
+    # The DLT projection matrices (dlt_P0, dlt_P1) are fit in
+    # rpimocap-calibrate-from-corners on the RAW corner-annotation pixel
+    # coordinates — i.e., on distorted frames. If we undistort the frames
+    # here but project through the same P, dots land at distorted pixel
+    # positions on an undistorted canvas → visible offset of tens to
+    # hundreds of pixels depending on radial distortion magnitude.
+    # Fisheye lenses can put projected points entirely off-screen at
+    # the periphery, which looks like "the preview isn't drawing dots
+    # at all". Fix: draw on the original distorted frame; project
+    # through P; everything stays in the same coord system.
+    #
+    # The cv2.initUndistortRectifyMap maps below remain available
+    # behind --undistort for users who want the rectified view AND
+    # are using a K-based projection chain (kept off by default).
+    if args.undistort:
+        map0x, map0y = cv2.initUndistortRectifyMap(
+            K0, d0.reshape(1,-1), None, K0, (vid_w, vid_h), cv2.CV_32FC1)
+        map1x, map1y = cv2.initUndistortRectifyMap(
+            K1, d1.reshape(1,-1), None, K1, (vid_w, vid_h), cv2.CV_32FC1)
+        print("  --undistort: WARNING — dots will be offset because DLT "
+              "was fit on distorted corners. Use only for K-projection.")
+    else:
+        map0x = map0y = map1x = map1y = None
 
     print(f"Rendering {n_out} frames → {out_path}  "
           f"({canvas_w}×{out_h} @ {fps:.1f} fps) ...")
@@ -312,9 +340,11 @@ def main() -> None:
         if not ret0 or not ret1:
             break
 
-        # Undistort frames
-        f0 = cv2.remap(f0, map0x, map0y, cv2.INTER_LINEAR)
-        f1 = cv2.remap(f1, map1x, map1y, cv2.INTER_LINEAR)
+        # Undistort frames only if explicitly opted in (default off:
+        # DLT projection expects distorted pixel coords)
+        if map0x is not None:
+            f0 = cv2.remap(f0, map0x, map0y, cv2.INTER_LINEAR)
+            f1 = cv2.remap(f1, map1x, map1y, cv2.INTER_LINEAR)
 
         # Build per-camera projected keypoints
         kp0: dict[str, tuple[int, int]] = {}

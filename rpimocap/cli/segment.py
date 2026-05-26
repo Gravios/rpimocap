@@ -132,6 +132,17 @@ def main() -> None:
     det.add_argument("--threshold", type=float, default=25.0,
                      help="Foreground detection threshold 0-255 "
                           "(default: 25)")
+    det.add_argument("--polarity", choices=["either", "bright", "dark"],
+                     default="either",
+                     help="Background-subtraction polarity. 'either' "
+                          "(default) catches both brighter-than-bg and "
+                          "darker-than-bg pixels — also catches the "
+                          "animal's own cast shadow as foreground. "
+                          "'bright' catches only pixels brighter than "
+                          "the background → suppresses shadows entirely "
+                          "(use for NIR captures where the animal is "
+                          "bright fur on dark/textured bedding). "
+                          "'dark' is the mirror case.")
     det.add_argument("--min-area", type=int, default=1500,
                     metavar="PX2",
                     help="Minimum blob area px² (default 1500). "
@@ -711,6 +722,7 @@ def main() -> None:
         texture_suppress=args.texture_suppress,
         texture_lambdas=tuple(args.texture_lambdas),
         texture_alpha=args.texture_alpha,
+        polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,
         use_trajectory_prior=args.trajectory_prior,

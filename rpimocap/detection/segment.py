@@ -779,6 +779,7 @@ class ForegroundDetector:
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
         texture_n_orient:  int   = 4,
+        polarity:          str   = "either",
     ):
         self.bg                = background
         self.threshold         = threshold
@@ -789,6 +790,18 @@ class ForegroundDetector:
         self.bilateral         = bilateral
         self.bilateral_d       = bilateral_d
         self.bilateral_sigma   = bilateral_sigma
+        # Background-subtraction polarity. 'either' (default, back-compat)
+        # uses |frame - bg| and catches both bright-on-dark and dark-on-bright
+        # changes — but also catches shadows the animal casts on the floor.
+        # 'bright' uses max(frame - bg, 0) so only pixels BRIGHTER than the
+        # background contribute → suppresses cast shadows entirely (useful
+        # for NIR setups where the animal is bright fur on dark/textured
+        # bedding). 'dark' is the mirror case (animal darker than bg).
+        if polarity not in ("either", "bright", "dark"):
+            raise ValueError(
+                f"polarity must be 'either', 'bright', or 'dark'; "
+                f"got {polarity!r}")
+        self.polarity = polarity
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -917,7 +930,16 @@ class ForegroundDetector:
             pass
 
         # ── Diff ─────────────────────────────────────────────────────
-        diff = np.abs(gray - bg)
+        # Polarity-aware: with 'bright' (NIR animal on dark bedding),
+        # only pixels brighter than the background contribute — cast
+        # shadows are zeroed out and can't masquerade as foreground.
+        # Default 'either' keeps the symmetric |frame - bg| behaviour.
+        if self.polarity == "bright":
+            diff = np.clip(gray - bg, 0, None)
+        elif self.polarity == "dark":
+            diff = np.clip(bg - gray, 0, None)
+        else:    # 'either' (default, back-compat)
+            diff = np.abs(gray - bg)
 
         # ── CLAHE on the DIFF (not the frame) ────────────────────────
         # Applying CLAHE here amplifies the animal blob (high diff signal)

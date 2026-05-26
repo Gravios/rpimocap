@@ -597,6 +597,7 @@ class SegmentTracker:
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
         texture_n_orient:  int   = 4,
+        polarity:          str   = "either",
         bg_adapt_alpha:    "Optional[float]" = None,
         bg_adapt_dilate_px: int  = 25,
         use_trajectory_prior: bool = False,
@@ -679,7 +680,8 @@ class SegmentTracker:
             texture_suppress=texture_suppress,
             texture_lambdas=texture_lambdas,
             texture_alpha=texture_alpha,
-            texture_n_orient=texture_n_orient)
+            texture_n_orient=texture_n_orient,
+            polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
         # Try SAM2 (used as mask refiner on top of optical flow)
