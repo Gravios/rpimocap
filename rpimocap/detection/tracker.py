@@ -99,7 +99,30 @@ class TrackResult:
 
     @property
     def pose3d(self) -> list[Point3D]:
-        return [Point3D(name=k, xyz=v) for k, v in self.xyz.items()]
+        # Propagate reproj_err and confidence into the Point3D instances
+        # so they round-trip into the H5. The matcher returns the per-
+        # camera errors as a (err0, err1) tuple; we combine via RMS so
+        # the H5 column holds one comparable scalar per frame. Without
+        # this lookup, Point3D's defaults (reprojection_error=0.0,
+        # confidence=1.0) silently overwrite the measured values and
+        # the H5's /reprojection_error column stays at 0.00 for every
+        # frame — exactly what we saw debugging this run.
+        pts: list[Point3D] = []
+        for k, v in self.xyz.items():
+            rerr = 0.0
+            if k in self.reproj_err:
+                e0, e1 = self.reproj_err[k]
+                rerr = float(np.sqrt(0.5 * (e0 * e0 + e1 * e1)))
+            # Cameras agree on confidence; pick from cam0 if present
+            conf = 1.0
+            for r in self.regions_cam0:
+                if r.label == k:
+                    conf = float(r.confidence)
+                    break
+            pts.append(Point3D(name=k, xyz=v,
+                               confidence=conf,
+                               reprojection_error=rerr))
+        return pts
 
     @property
     def pose2d_cam0(self) -> Pose2DResult:
