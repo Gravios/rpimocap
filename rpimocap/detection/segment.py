@@ -1261,23 +1261,50 @@ class ForegroundDetector:
                       cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
             eroded = cv2.erode(blob_mask, k, iterations=1)
 
-            # Largest connected component of the eroded mask = body
+            # Pick the connected component CLOSEST TO the labeller's
+            # centroid (cx, cy), NOT the largest CC. Rationale: when
+            # the rat body is fragmented by fur texture but the cable
+            # is contiguous, the cable can end up as the largest CC
+            # after erosion. The labeller centroid (cx, cy) reliably
+            # sits on the rat body because the full pre-erosion blob
+            # is dominated by rat pixels — so the closest-to-labeller
+            # CC is the right rat fragment to refine, not the cable.
             n_e, lbl_e, stats_e, cent_e = cv2.connectedComponentsWithStats(
                 eroded, connectivity=8)
             if n_e > 1:
-                # component 0 is background; pick largest foreground one
-                body_lbl = 1 + np.argmax(
-                    stats_e[1:, cv2.CC_STAT_AREA])
-                ys, xs = np.where(lbl_e == body_lbl)
-                if len(xs) < 3:
-                    # erosion was too aggressive — fall back to full blob
+                # Skip background (label 0); examine foreground CCs only
+                fg_centroids = cent_e[1:]                  # (n_e-1, 2)
+                fg_areas     = stats_e[1:, cv2.CC_STAT_AREA]
+                # Distance from each CC centroid to the labeller centroid
+                dx = fg_centroids[:, 0] - cx
+                dy = fg_centroids[:, 1] - cy
+                dists = np.hypot(dx, dy)
+                # Require a minimum area so we don't pick a 1-pixel
+                # spec right next to the labeller centroid. 50 px is
+                # the smallest plausible rat-body fragment after a
+                # 6-12 px erosion of a real rat.
+                min_cc_area = 50
+                valid = fg_areas >= min_cc_area
+                if not valid.any():
+                    # Erosion was too aggressive — every CC is tiny.
+                    # Fall back to full pre-erosion blob.
                     ys, xs = np.where(blob_mask > 0)
                 else:
-                    # Keep the eroded body mask available for step 5
-                    eroded_mask = (lbl_e == body_lbl).astype(np.uint8) * 255
-                    if stats is not None:
-                        stats["cable_erosion_succeeded"] = (
-                            stats.get("cable_erosion_succeeded", 0) + 1)
+                    # Among valid CCs, pick the one closest to labeller
+                    masked_dists = np.where(valid, dists, np.inf)
+                    body_idx = int(np.argmin(masked_dists))
+                    body_lbl = body_idx + 1   # +1 because we skipped bg
+                    ys, xs = np.where(lbl_e == body_lbl)
+                    if len(xs) < 3:
+                        # Selected CC was still tiny — fall back
+                        ys, xs = np.where(blob_mask > 0)
+                    else:
+                        # Keep the rat-region mask for step 5 / Gabor
+                        eroded_mask = (
+                            (lbl_e == body_lbl).astype(np.uint8) * 255)
+                        if stats is not None:
+                            stats["cable_erosion_succeeded"] = (
+                                stats.get("cable_erosion_succeeded", 0) + 1)
 
         # ── Step 3b: Gabor-edge body contour refinement ───────────────
         # Use the Gabor energy map cached in ForegroundResult to find
