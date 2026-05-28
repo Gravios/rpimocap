@@ -2150,9 +2150,18 @@ class EpipolarMatcher:
         (err0_px, err1_px) — RMS pixel error in each camera
         """
         from rpimocap.reconstruction.triangulate import reprojection_error
-        return reprojection_error(xyz, self.P0, self.P1,
-                                   np.array([r0.cx, r0.cy]),
-                                   np.array([r1.cx, r1.cy]))
+        # The module-level reprojection_error has signature
+        # (P, X, pt) and returns a single float for ONE camera. We
+        # call it once per camera. The previous code called it as
+        # reprojection_error(xyz, P0, P1, pt0, pt1) — 5 args against a
+        # 3-arg signature — which raised TypeError every frame. That
+        # exception was silently swallowed by the try/except in
+        # SegmentTracker._process_frame, leaving reproj_err empty and
+        # the H5 /reprojection_error column stuck at 0.00 regardless
+        # of patch 0015.
+        err0 = reprojection_error(self.P0, xyz, (float(r0.cx), float(r0.cy)))
+        err1 = reprojection_error(self.P1, xyz, (float(r1.cx), float(r1.cy)))
+        return (err0, err1)
 
 
 # =========================================================================== #
