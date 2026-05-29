@@ -2293,12 +2293,42 @@ def save_diagnostics(
             regions = labeller.label(fg)
             for r in regions:
                 col = _PART_COLOURS.get(r.label, (200, 200, 200))
+                # ── Dot #1: RAW labeller centroid (r.cx, r.cy) ─────────
+                # This is the unrefined connected-component centroid of
+                # the pre-erosion blob. Drawn solid colour so it's the
+                # obvious marker.
                 cx, cy = int(r.cx), int(r.cy)
                 cv2.circle(overlay, (cx, cy), 6, col, -1)
                 cv2.circle(overlay, (cx, cy), 7, (0, 0, 0), 1)
-                cv2.putText(overlay, r.label, (cx + 8, cy - 4),
+                cv2.putText(overlay, r.label + ":raw", (cx + 8, cy - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                             col, 1, cv2.LINE_AA)
+                # ── Dot #2: REFINED hull_centroid output ───────────────
+                # This is the actual centroid sent to triangulation,
+                # after cable_erosion + Gabor + ellipse fit. If this
+                # diverges from the raw labeller centroid, the
+                # refinement is shifting the picked point — that's the
+                # signal we need to see (e.g. cable-midpoint drift).
+                try:
+                    refined = detector.hull_centroid(
+                        fg, float(r.cx), float(r.cy),
+                        cable_erosion_px=6)
+                    rx, ry = int(refined[0]), int(refined[1])
+                    # Crosshair (not a filled dot) so it's visually
+                    # distinct from the raw centroid.
+                    cv2.drawMarker(overlay, (rx, ry), (0, 255, 255),
+                                   markerType=cv2.MARKER_CROSS,
+                                   markerSize=18, thickness=2)
+                    cv2.putText(overlay, "refined", (rx + 10, ry + 14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                                (0, 255, 255), 1, cv2.LINE_AA)
+                    # Yellow line connecting raw → refined so the
+                    # shift direction/magnitude is immediately visible.
+                    if (rx, ry) != (cx, cy):
+                        cv2.line(overlay, (cx, cy), (rx, ry),
+                                 (0, 255, 255), 1, cv2.LINE_AA)
+                except Exception:
+                    pass
             cv2.imwrite(str(prefix) + "_overlay.png", overlay)
 
             # 6. 4-up composite: raw | enhanced | diff | overlay
