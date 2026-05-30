@@ -313,6 +313,32 @@ def main() -> None:
                          "the failure mode where the cable wins the "
                          "largest-CC pick because the rat is "
                          "fragmented. Disabled by default.")
+    det.add_argument("--mahalanobis-k", type=float, default=0.0,
+                    metavar="K",
+                    help="Use per-pixel Mahalanobis-style "
+                         "background subtraction: fg = (frame - "
+                         "bg)/max(σ_pixel, σ_floor) > k, where "
+                         "σ_pixel is the per-pixel std built into "
+                         "the background model. Trouble regions "
+                         "(cable mount, headstage specular spots, "
+                         "acrylic wall edges) have high σ and need "
+                         "a larger excursion to register as "
+                         "foreground; stable regions keep effective "
+                         "sensitivity ≈ k pixels. With "
+                         "--bg-adapt-alpha set, both σ AND μ adapt "
+                         "online so illumination drift over a long "
+                         "recording is tracked. Requires a bg.npz "
+                         "built with this version (older files "
+                         "lack the σ field; in that case this flag "
+                         "is a silent no-op). Typical values: 3-5. "
+                         "Disabled by default (0.0).")
+    det.add_argument("--sigma-floor", type=float, default=1.0,
+                    metavar="S",
+                    help="Floor for per-pixel σ in Mahalanobis "
+                         "mode (units: pixel intensity). Prevents "
+                         "divide-by-zero / extreme sensitivity at "
+                         "pixels that happened to have near-zero "
+                         "variance in the bg sample. Default 1.0.")
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
@@ -747,6 +773,8 @@ def main() -> None:
         texture_alpha=args.texture_alpha,
         fur_gabor_min=args.fur_gabor_min,
         max_aspect_ratio=args.max_aspect_ratio,
+        mahalanobis_k=args.mahalanobis_k,
+        sigma_floor=args.sigma_floor,
         polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,

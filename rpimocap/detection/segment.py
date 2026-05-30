@@ -154,10 +154,25 @@ class BackgroundModel:
     def __init__(self, bg0: np.ndarray, bg1: np.ndarray,
                  method: str = "median",
                  bg_gabor0: Optional[np.ndarray] = None,
-                 bg_gabor1: Optional[np.ndarray] = None):
+                 bg_gabor1: Optional[np.ndarray] = None,
+                 std0: Optional[np.ndarray] = None,
+                 std1: Optional[np.ndarray] = None):
         self.bg0    = bg0.astype(np.float32)
         self.bg1    = bg1.astype(np.float32)
         self.method = method
+        # Per-pixel standard deviation maps. When present, enable
+        # Mahalanobis-style background subtraction in ForegroundDetector
+        # via --mahalanobis-k: pixels in regions with high baseline
+        # variability (cable mount, headstage reflections, specular
+        # acrylic) need a larger frame-to-mean excursion before
+        # counting as foreground. Computed at build time from the same
+        # N sample frames used for the mean. Optional for backward
+        # compatibility — older bg.npz files have None here and the
+        # detector falls back to the global absolute threshold.
+        self.std0:  Optional[np.ndarray] = (
+            None if std0 is None else std0.astype(np.float32))
+        self.std1:  Optional[np.ndarray] = (
+            None if std1 is None else std1.astype(np.float32))
         # Optional cached Gabor bedding-energy maps, normalised to [0, 1].
         # Populated by compute_gabor() and persisted by save() so the
         # ForegroundDetector can skip the per-instance recomputation at
@@ -244,13 +259,32 @@ class BackgroundModel:
             raise RuntimeError("No frames could be read for background model")
 
         fn = np.median if method == "median" else np.mean
-        bg0 = fn(np.stack(stack0, axis=0), axis=0).astype(np.float32)
-        bg1 = fn(np.stack(stack1, axis=0), axis=0).astype(np.float32)
+        stack0_arr = np.stack(stack0, axis=0)
+        stack1_arr = np.stack(stack1, axis=0)
+        bg0 = fn(stack0_arr, axis=0).astype(np.float32)
+        bg1 = fn(stack1_arr, axis=0).astype(np.float32)
+        # Per-pixel scale estimator computed from the same stack. For
+        # median-based bg, use MAD * 1.4826 (the consistent estimator
+        # of σ for Gaussian data) so a few stray frames where the rat
+        # appears at this pixel don't inflate the estimate. For
+        # mean-based bg, use the usual std.
+        if method == "median":
+            mad0 = np.median(np.abs(stack0_arr - bg0[None, ...]), axis=0)
+            mad1 = np.median(np.abs(stack1_arr - bg1[None, ...]), axis=0)
+            std0 = (mad0 * 1.4826).astype(np.float32)
+            std1 = (mad1 * 1.4826).astype(np.float32)
+        else:
+            std0 = stack0_arr.std(axis=0).astype(np.float32)
+            std1 = stack1_arr.std(axis=0).astype(np.float32)
 
         if verbose:
             print(f"  Background model built  ({method}, {len(stack0)} frames)")
+            print(f"    per-pixel σ  cam0: median {np.median(std0):.2f}  "
+                  f"95th pct {np.percentile(std0, 95):.2f}")
+            print(f"    per-pixel σ  cam1: median {np.median(std1):.2f}  "
+                  f"95th pct {np.percentile(std1, 95):.2f}")
 
-        return cls(bg0, bg1, method)
+        return cls(bg0, bg1, method, std0=std0, std1=std1)
 
     @classmethod
     def from_multiple_captures(
@@ -307,30 +341,48 @@ class BackgroundModel:
             raise RuntimeError("No frames could be read for background model")
 
         fn = np.median if method == "median" else np.mean
-        bg0 = fn(np.stack(stack0, axis=0), axis=0).astype(np.float32)
-        bg1 = fn(np.stack(stack1, axis=0), axis=0).astype(np.float32)
+        stack0_arr = np.stack(stack0, axis=0)
+        stack1_arr = np.stack(stack1, axis=0)
+        bg0 = fn(stack0_arr, axis=0).astype(np.float32)
+        bg1 = fn(stack1_arr, axis=0).astype(np.float32)
+        # Same per-pixel scale estimator as from_captures.
+        if method == "median":
+            mad0 = np.median(np.abs(stack0_arr - bg0[None, ...]), axis=0)
+            mad1 = np.median(np.abs(stack1_arr - bg1[None, ...]), axis=0)
+            std0 = (mad0 * 1.4826).astype(np.float32)
+            std1 = (mad1 * 1.4826).astype(np.float32)
+        else:
+            std0 = stack0_arr.std(axis=0).astype(np.float32)
+            std1 = stack1_arr.std(axis=0).astype(np.float32)
 
         total_frames = len(stack0)
         n_sessions   = len(caps0)
         if verbose:
             print(f"  Background model built  "
                   f"({method}, {total_frames} frames, {n_sessions} sessions)")
-        return cls(bg0, bg1, method)
+            print(f"    per-pixel σ  cam0: median {np.median(std0):.2f}  "
+                  f"95th pct {np.percentile(std0, 95):.2f}")
+            print(f"    per-pixel σ  cam1: median {np.median(std1):.2f}  "
+                  f"95th pct {np.percentile(std1, 95):.2f}")
+        return cls(bg0, bg1, method, std0=std0, std1=std1)
 
     @classmethod
     def from_npz(cls, path: str | Path) -> "BackgroundModel":
         """Load a saved background model.
 
         Backward-compatible with older .npz files that have only
-        bg0/bg1/method — the bg_gabor* fields default to None when
-        absent.
+        bg0/bg1/method — the bg_gabor* and std* fields default to
+        None when absent.
         """
         d = np.load(path)
         files = set(d.files)
         bg_gabor0 = d["bg_gabor0"] if "bg_gabor0" in files else None
         bg_gabor1 = d["bg_gabor1"] if "bg_gabor1" in files else None
+        std0      = d["std0"] if "std0" in files else None
+        std1      = d["std1"] if "std1" in files else None
         return cls(d["bg0"], d["bg1"], str(d["method"]),
-                   bg_gabor0=bg_gabor0, bg_gabor1=bg_gabor1)
+                   bg_gabor0=bg_gabor0, bg_gabor1=bg_gabor1,
+                   std0=std0, std1=std1)
 
     def save(self, path: str | Path) -> None:
         """Save background arrays to a .npz file.
@@ -346,6 +398,9 @@ class BackgroundModel:
         if self.bg_gabor0 is not None and self.bg_gabor1 is not None:
             kw["bg_gabor0"] = self.bg_gabor0
             kw["bg_gabor1"] = self.bg_gabor1
+        if self.std0 is not None and self.std1 is not None:
+            kw["std0"] = self.std0
+            kw["std1"] = self.std1
         np.savez_compressed(path, **kw)
 
     # ------------------------------------------------------------------ #
@@ -400,15 +455,38 @@ class BackgroundModel:
                 f"background {self.bg0.shape}/{self.bg1.shape}")
 
         if mask0 is None:
+            # Variance EMA before mean EMA so the residual is taken
+            # against the OLD mean (consistent estimator of σ given
+            # the bg before this frame's update).
+            if self.std0 is not None:
+                var0 = self.std0.astype(np.float32) ** 2
+                resid0_sq = (g0 - self.bg0) ** 2
+                var0 = alpha * var0 + (1.0 - alpha) * resid0_sq
+                self.std0 = np.sqrt(var0).astype(np.float32)
             self.bg0 = alpha * self.bg0 + (1.0 - alpha) * g0
         else:
             m0 = ~np.asarray(mask0, dtype=bool)   # update where NOT animal
+            if self.std0 is not None:
+                var0 = self.std0.astype(np.float32) ** 2
+                resid0_sq = (g0[m0] - self.bg0[m0]) ** 2
+                var0[m0] = alpha * var0[m0] + (1.0 - alpha) * resid0_sq
+                self.std0 = np.sqrt(var0).astype(np.float32)
             self.bg0[m0] = alpha * self.bg0[m0] + (1.0 - alpha) * g0[m0]
 
         if mask1 is None:
+            if self.std1 is not None:
+                var1 = self.std1.astype(np.float32) ** 2
+                resid1_sq = (g1 - self.bg1) ** 2
+                var1 = alpha * var1 + (1.0 - alpha) * resid1_sq
+                self.std1 = np.sqrt(var1).astype(np.float32)
             self.bg1 = alpha * self.bg1 + (1.0 - alpha) * g1
         else:
             m1 = ~np.asarray(mask1, dtype=bool)
+            if self.std1 is not None:
+                var1 = self.std1.astype(np.float32) ** 2
+                resid1_sq = (g1[m1] - self.bg1[m1]) ** 2
+                var1[m1] = alpha * var1[m1] + (1.0 - alpha) * resid1_sq
+                self.std1 = np.sqrt(var1).astype(np.float32)
             self.bg1[m1] = alpha * self.bg1[m1] + (1.0 - alpha) * g1[m1]
 
     # ------------------------------------------------------------------ #
@@ -799,6 +877,22 @@ class ForegroundDetector:
         # A threshold of 6-10 rejects cables cleanly. Disabled by
         # default (None).
         max_aspect_ratio:  "Optional[float]" = None,
+        # When > 0 AND the BackgroundModel has per-pixel std0/std1,
+        # use Mahalanobis-style background subtraction:
+        #   fg = (frame - bg) / max(std, sigma_floor) > mahalanobis_k
+        # instead of the global absolute threshold. Pixels in regions
+        # with high baseline variability (cable mount, headstage
+        # specular reflections, edges of acrylic walls) need a larger
+        # excursion to count as foreground — exactly the regions that
+        # were producing false detections. Typical useful values:
+        # 3.0 to 5.0 (units of σ). Disabled by default (0.0); when
+        # disabled, the existing absolute threshold is used.
+        mahalanobis_k:     float = 0.0,
+        # Floor for the per-pixel σ in Mahalanobis mode, to avoid
+        # divide-by-zero or extreme sensitivity in regions where the
+        # bg sample happened to have near-zero variance (a few
+        # identical pixel values). Set in raw pixel intensity units.
+        sigma_floor:       float = 1.0,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -824,6 +918,14 @@ class ForegroundDetector:
         self.polarity = polarity
         self._fur_gabor_min = float(max(0.0, fur_gabor_min))
         self.max_aspect_ratio = max_aspect_ratio
+        # Per-pixel Mahalanobis-style background subtraction. Active
+        # only when mahalanobis_k > 0 AND the BackgroundModel has
+        # per-pixel std maps. The std values are read directly from
+        # self.bg.std0/std1 on each detect() call so that online
+        # adaptation (bg_adapt_alpha — which updates std² in
+        # BackgroundModel.update) is picked up immediately.
+        self._mahalanobis_k = float(max(0.0, mahalanobis_k))
+        self._sigma_floor   = float(max(0.001, sigma_floor))
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -1007,7 +1109,30 @@ class ForegroundDetector:
             _fg_energy     = gabor_bedding_energy(gray.astype(np.float32))
             _frame_gabor_n = _fg_energy / (np.percentile(_fg_energy, 99) + 1e-6)
 
-        binary = (diff > self.threshold).astype(np.uint8) * 255
+        # Threshold step. Two modes:
+        #
+        # 1) Mahalanobis-style per-pixel (self._mahalanobis_k > 0 AND
+        #    self._stds[cam] is not None): the threshold is
+        #
+        #       fg = diff / max(σ_pixel, σ_floor) > k
+        #
+        #    where σ_pixel comes from the bg-build sample (and is
+        #    optionally adapted online). Regions with high baseline
+        #    variability — cable mount glints, headstage specular
+        #    spots, acrylic wall edges — need a larger excursion to
+        #    register as foreground, while genuinely-stable regions
+        #    keep effective sensitivity ≈ k pixel units. This is the
+        #    intended fix for the "smooth surfaces with edges that
+        #    get included into the blobs" problem.
+        #
+        # 2) Absolute (legacy, the default): diff > self.threshold.
+        std_map = self.bg.std0 if cam == 0 else self.bg.std1
+        if self._mahalanobis_k > 0 and std_map is not None:
+            denom = np.maximum(std_map, self._sigma_floor)
+            mahal = diff / denom
+            binary = (mahal > self._mahalanobis_k).astype(np.uint8) * 255
+        else:
+            binary = (diff > self.threshold).astype(np.uint8) * 255
 
         # Fur-texture gate. Optional: when self._fur_gabor_min > 0, mask
         # out pixels whose normalized Gabor energy falls below the

@@ -622,6 +622,8 @@ class SegmentTracker:
         texture_n_orient:  int   = 4,
         fur_gabor_min:     float = 0.0,
         max_aspect_ratio:  "Optional[float]" = None,
+        mahalanobis_k:     float = 0.0,
+        sigma_floor:       float = 1.0,
         polarity:          str   = "either",
         bg_adapt_alpha:    "Optional[float]" = None,
         bg_adapt_dilate_px: int  = 25,
@@ -708,6 +710,8 @@ class SegmentTracker:
             texture_n_orient=texture_n_orient,
             fur_gabor_min=fur_gabor_min,
             max_aspect_ratio=max_aspect_ratio,
+            mahalanobis_k=mahalanobis_k,
+            sigma_floor=sigma_floor,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
