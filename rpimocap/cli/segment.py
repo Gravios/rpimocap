@@ -290,6 +290,29 @@ def main() -> None:
                     default=[8, 12, 16], metavar="PX",
                     help="Gabor wavelengths in px targeting the bedding "
                          "fibre scale (default: 8 12 16 px).")
+    det.add_argument("--fur-gabor-min", type=float, default=0.0,
+                    metavar="T",
+                    help="Require a minimum normalized Gabor energy "
+                         "(0-1, after 99th-percentile normalization) "
+                         "for a pixel to remain in the foreground "
+                         "mask. Suppresses WIDE smooth surfaces — "
+                         "acrylic walls, large reflective panels — "
+                         "but is ineffective for thin features like a "
+                         "tether cable (the Gabor edge response fills "
+                         "the entire object width). For thin features "
+                         "use --max-aspect-ratio. Typical useful "
+                         "values when applicable: 0.03 to 0.15. "
+                         "Disabled by default (0.0).")
+    det.add_argument("--max-aspect-ratio", type=float, default=None,
+                    metavar="R",
+                    help="Reject blobs whose long:short axis ratio "
+                         "(from minimum bounding rectangle) exceeds "
+                         "this value. Tether cables typically have "
+                         "aspect 10-30, rat bodies are closer to "
+                         "1.5-3. Recommended: 6-10. PRIMARY FIX for "
+                         "the failure mode where the cable wins the "
+                         "largest-CC pick because the rat is "
+                         "fragmented. Disabled by default.")
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
@@ -722,6 +745,8 @@ def main() -> None:
         texture_suppress=args.texture_suppress,
         texture_lambdas=tuple(args.texture_lambdas),
         texture_alpha=args.texture_alpha,
+        fur_gabor_min=args.fur_gabor_min,
+        max_aspect_ratio=args.max_aspect_ratio,
         polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,

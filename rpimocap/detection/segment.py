@@ -779,6 +779,26 @@ class ForegroundDetector:
         texture_lambdas:   tuple = (8, 12, 16),
         texture_alpha:     float = 0.7,
         texture_n_orient:  int   = 4,
+        # When > 0, require pixels to have at least this much normalized
+        # Gabor energy (0-1, after 99th-percentile normalization) to
+        # remain in the foreground mask. Suppresses smooth surfaces like
+        # the tether cable, headstage hardware, and acrylic walls — they
+        # have near-zero Gabor energy regardless of how bright they are.
+        # Rat fur has a strong oriented-bristle Gabor signature so it
+        # passes easily. Typical useful range: 0.03 to 0.15.
+        # NOTE: only effective on smooth surfaces wider than ~2x the
+        # largest Gabor wavelength (default 16 px, so ~32 px). For
+        # narrower features like a thin tether cable, the edge response
+        # of the Gabor filter fills the entire object width and the gate
+        # cannot distinguish it. Use --max-aspect-ratio for thin
+        # elongated features instead.
+        fur_gabor_min:     float = 0.0,
+        # When > 0, reject blobs whose long-axis-to-short-axis ratio
+        # (from cv2.minAreaRect) exceeds this value. The tether cable
+        # typically has aspect 10-30, the rat body is closer to 1.5-3.
+        # A threshold of 6-10 rejects cables cleanly. Disabled by
+        # default (None).
+        max_aspect_ratio:  "Optional[float]" = None,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -802,6 +822,8 @@ class ForegroundDetector:
                 f"polarity must be 'either', 'bright', or 'dark'; "
                 f"got {polarity!r}")
         self.polarity = polarity
+        self._fur_gabor_min = float(max(0.0, fur_gabor_min))
+        self.max_aspect_ratio = max_aspect_ratio
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -974,14 +996,39 @@ class ForegroundDetector:
                 np.clip(_frame_gabor_n, 0, 1),
                 np.clip(self._bg_gabor[cam], 0, 1))
             diff = diff * (1.0 - self._texture_alpha * suppress_w)
-        elif cam in self._bg_gabor:
+        elif cam in self._bg_gabor or self._fur_gabor_min > 0:
             # texture_suppress off but bg_gabor exists — still compute the
             # frame energy so gabor_body_contour() can refine the body
             # mask later. Computation is cheap relative to bg-subtract.
+            # Also unconditionally compute when --fur-gabor-min is set
+            # so the gate below has the data it needs even if BG was
+            # built without --texture-suppress (and thus bg.npz has no
+            # cached bg_gabor field).
             _fg_energy     = gabor_bedding_energy(gray.astype(np.float32))
             _frame_gabor_n = _fg_energy / (np.percentile(_fg_energy, 99) + 1e-6)
 
         binary = (diff > self.threshold).astype(np.uint8) * 255
+
+        # Fur-texture gate. Optional: when self._fur_gabor_min > 0, mask
+        # out pixels whose normalized Gabor energy falls below the
+        # threshold. The cable, headstage hardware, and smooth acrylic
+        # wall regions return near-zero Gabor energy because they have
+        # no oriented texture, regardless of how bright they appear in
+        # the bg-subtracted diff. Rat fur is densely textured (oriented
+        # bristles) and easily exceeds typical thresholds (0.03 - 0.15).
+        # This catches the failure mode where the cable wins the
+        # largest-CC pick because the rat blob fragmented but the cable
+        # remained contiguous — the gate removes the cable from the
+        # mask entirely so it can never be a CC candidate.
+        #
+        # Applied BEFORE morph operations so that morph-close cannot
+        # subsequently re-fill the gated regions. The subsequent
+        # morph-open will clean up any thin Gabor-edge fragments left
+        # at the perimeter of smooth surfaces.
+        if self._fur_gabor_min > 0 and _frame_gabor_n is not None:
+            gabor_gate = (_frame_gabor_n >= self._fur_gabor_min).astype(np.uint8) * 255
+            binary = cv2.bitwise_and(binary, gabor_gate)
+
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)
 
@@ -1014,6 +1061,25 @@ class ForegroundDetector:
                     solidity  = area / (hull_area + 1e-6)
                     if solidity < self.min_solidity:
                         continue
+            # Aspect-ratio filter: reject highly elongated thin blobs
+            # such as the tether cable. The cable typically has an
+            # aspect ratio of 10-30 (length:width), while the rat body
+            # is closer to 1.5-3. Setting --max-aspect-ratio 8 rejects
+            # cables and similar linear features cleanly. Computed on
+            # the minimum bounding rectangle (cv2.minAreaRect) which
+            # tightly fits the blob regardless of orientation.
+            if self.max_aspect_ratio is not None and self.max_aspect_ratio > 0:
+                ys, xs = np.where(labels == i)
+                if len(xs) >= 5:
+                    pts = np.column_stack([xs, ys]).astype(np.float32)
+                    rect = cv2.minAreaRect(pts)
+                    (_, _), (w, h), _ = rect
+                    short = min(w, h)
+                    long  = max(w, h)
+                    if short > 0:
+                        aspect = long / short
+                        if aspect > self.max_aspect_ratio:
+                            continue
             blobs.append((stats[i], centroids[i]))
 
         return ForegroundResult(
