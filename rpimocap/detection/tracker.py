@@ -41,6 +41,7 @@ import cv2
 import numpy as np
 
 from rpimocap.detection.detectors import Keypoint2D, Pose2DResult
+from rpimocap.detection.rat_tracker import EdgeMotionRatTracker
 from rpimocap.detection.segment import (
     BackgroundModel,
     BodyRegion,
@@ -194,7 +195,8 @@ class OpticalFlowTracker:
         self._labels = []
         self._frames_since_detect = 0
 
-    def track(self, frame: np.ndarray, cam: int) -> list[BodyRegion]:
+    def track(self, frame: np.ndarray, cam: int,
+              extra_roi_mask: "np.ndarray | None" = None) -> list[BodyRegion]:
         """Track one frame.  Returns BodyRegion list."""
         gray = cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_BGR2GRAY)
         need_detect = (
@@ -205,7 +207,7 @@ class OpticalFlowTracker:
         )
 
         if need_detect:
-            fg = self._det.detect(frame, cam)
+            fg = self._det.detect(frame, cam, extra_roi_mask=extra_roi_mask)
             self._last_fg = fg          # expose for post-match re-hulling
             regions = self._lbl.label(fg)
             if regions:
@@ -626,6 +628,27 @@ class SegmentTracker:
         sigma_floor:       float = 1.0,
         motion_min:        float = 0.0,
         motion_method:     str   = "flow",
+        # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
+        # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
+        # instance is maintained per session. Each frame, the tracker
+        # produces a Kalman-stabilized hull mask which is AND'd with
+        # the bg-sub binary inside ForegroundDetector.detect(). The
+        # cable mount, plexiglass reflections, and other static
+        # bright features outside the rat's spatial extent get
+        # eliminated before connected-components labelling sees them.
+        # Especially important after patch 0021 — Farneback flow's
+        # aperture problem wipes out the rat's smooth interior; KLT
+        # operates on edges where flow is well-conditioned and
+        # builds the rat hull from those points.
+        use_rat_tracker_roi: bool = False,
+        rat_body_half_width_px: int = 60,
+        rat_motion_min:    float = 0.5,
+        rat_min_cluster:   int   = 5,
+        rat_max_klt:       int   = 300,
+        rat_refresh_every: int   = 30,
+        rat_dbscan_eps_xy: float = 40.0,
+        rat_dbscan_eps_v:  float = 2.0,
+        rat_seed_roi_radius_px: Optional[int] = None,
         polarity:          str   = "either",
         bg_adapt_alpha:    "Optional[float]" = None,
         bg_adapt_dilate_px: int  = 25,
@@ -732,6 +755,23 @@ class SegmentTracker:
             self._det, self._lbl, redetect_every=redetect_every)
         self._of1 = OpticalFlowTracker(
             self._det, self._lbl, redetect_every=redetect_every)
+
+        # EdgeMotionRatTracker — provides a Kalman-stabilized hull
+        # mask per frame as an ROI gate. Initialized lazily on the
+        # first frame when its frame_shape is known.
+        self._use_rat_tracker_roi = bool(use_rat_tracker_roi)
+        self._rat_tracker: Optional["EdgeMotionRatTracker"] = None
+        # Store the params so we can construct the tracker on first frame
+        self._rat_tracker_kw = dict(
+            body_half_width_px=rat_body_half_width_px,
+            motion_min=rat_motion_min,
+            min_cluster_points=rat_min_cluster,
+            max_klt_points=rat_max_klt,
+            refresh_every=rat_refresh_every,
+            dbscan_eps_xy=rat_dbscan_eps_xy,
+            dbscan_eps_v=rat_dbscan_eps_v,
+            seed_roi_radius_px=rat_seed_roi_radius_px,
+        )
 
     # ------------------------------------------------------------------ #
 
@@ -883,9 +923,50 @@ class SegmentTracker:
             if m1 is not None:
                 sam2_fg1 = foreground_result_from_mask(m1, f1)
 
-        # Step 1: optical flow → approximate centroids in both cameras
-        regions0 = self._of0.track(f0, 0)
-        regions1 = self._of1.track(f1, 1)
+        # Step 1: optical flow → approximate centroids in both cameras.
+        #
+        # When --use-rat-tracker-roi is on, the EdgeMotionRatTracker
+        # computes a per-camera ROI mask (Kalman-stabilized hull
+        # around the moving rat from clustered KLT corners). This
+        # mask is AND'd with the bg-sub binary inside
+        # ForegroundDetector.detect() before connected-components
+        # labelling, so the cable mount and other static features
+        # outside the rat hull never become candidate CCs.
+        rat_roi_mask0 = rat_roi_mask1 = None
+        if self._use_rat_tracker_roi:
+            # Lazy-init on first frame (need frame shape)
+            if self._rat_tracker is None:
+                gray_for_init = cv2.cvtColor(f0.astype(np.uint8),
+                                              cv2.COLOR_BGR2GRAY)
+                self._rat_tracker = EdgeMotionRatTracker(
+                    frame_shape=gray_for_init.shape,
+                    **self._rat_tracker_kw)
+            gray0_rt = cv2.cvtColor(f0.astype(np.uint8),
+                                     cv2.COLOR_BGR2GRAY)
+            gray1_rt = cv2.cvtColor(f1.astype(np.uint8),
+                                     cv2.COLOR_BGR2GRAY)
+            obs0 = self._rat_tracker.step(gray0_rt, cam=0, frame_idx=idx)
+            obs1 = self._rat_tracker.step(gray1_rt, cam=1, frame_idx=idx)
+            if obs0 is not None:
+                rat_roi_mask0 = obs0.mask
+                # Diagnostic counter
+                self._step_stats["rat_tracker_obs_cam0"] = (
+                    self._step_stats.get("rat_tracker_obs_cam0", 0)
+                    + (0 if obs0.from_kalman_only else 1))
+                self._step_stats["rat_tracker_kalman_only_cam0"] = (
+                    self._step_stats.get("rat_tracker_kalman_only_cam0", 0)
+                    + (1 if obs0.from_kalman_only else 0))
+            if obs1 is not None:
+                rat_roi_mask1 = obs1.mask
+                self._step_stats["rat_tracker_obs_cam1"] = (
+                    self._step_stats.get("rat_tracker_obs_cam1", 0)
+                    + (0 if obs1.from_kalman_only else 1))
+                self._step_stats["rat_tracker_kalman_only_cam1"] = (
+                    self._step_stats.get("rat_tracker_kalman_only_cam1", 0)
+                    + (1 if obs1.from_kalman_only else 0))
+
+        regions0 = self._of0.track(f0, 0, extra_roi_mask=rat_roi_mask0)
+        regions1 = self._of1.track(f1, 1, extra_roi_mask=rat_roi_mask1)
 
         # If SAM2 video masks are available for this frame, OVERRIDE the
         # optical-flow / bg-sub regions with regions derived from those

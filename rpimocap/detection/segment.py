@@ -1052,7 +1052,8 @@ class ForegroundDetector:
 
     # ------------------------------------------------------------------ #
 
-    def detect(self, frame: np.ndarray, cam: int = 0) -> ForegroundResult:
+    def detect(self, frame: np.ndarray, cam: int = 0,
+                extra_roi_mask: "np.ndarray | None" = None) -> ForegroundResult:
         """Detect foreground regions in one frame.
 
         Parameters
@@ -1233,6 +1234,18 @@ class ForegroundDetector:
         _mask = self._roi_masks.get(cam)
         if _mask is not None:
             binary = cv2.bitwise_and(binary, _mask)
+
+        # Per-frame extra ROI mask supplied by the caller. Used by the
+        # EdgeMotionRatTracker integration in SegmentTracker: the
+        # tracker computes a Kalman-stabilized hull around the rat
+        # from KLT corner clusters, and passes it here so the
+        # connected-components labeller never sees blobs outside the
+        # rat's spatial extent. The cable mount, plexiglass
+        # reflections, etc — all of which the rat tracker excludes
+        # by virtue of not being where the rat is — vanish before
+        # they can win the largest-CC pick.
+        if extra_roi_mask is not None:
+            binary = cv2.bitwise_and(binary, extra_roi_mask)
 
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary, connectivity=8)

@@ -362,6 +362,65 @@ def main() -> None:
                          "'framediff' = abs(frame - prev); cheap "
                          "(~3 ms) but catches intensity changes too "
                          "(less discriminative). Default 'flow'.")
+    # ── EdgeMotionRatTracker ROI ───────────────────────────────────
+    rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
+    rt.add_argument("--use-rat-tracker-roi", action="store_true",
+                    default=False,
+                    help="Enable the EdgeMotionRatTracker: tracks "
+                         "sparse Shi-Tomasi corners with KLT, clusters "
+                         "moving corners by space+velocity, builds a "
+                         "convex-hull ROI around the rat cluster, and "
+                         "Kalman-stabilizes the hull over time. The "
+                         "ROI mask is AND'd with the bg-sub binary "
+                         "before connected-components labelling. "
+                         "Solves the aperture-problem failure of "
+                         "Farneback flow (which wipes the rat's "
+                         "smooth interior) and the cable-wins-pick "
+                         "failure (cable mount lies outside the hull "
+                         "so never becomes a CC candidate). "
+                         "Disabled by default.")
+    rt.add_argument("--rat-body-half-width-px", type=int, default=60,
+                    metavar="PX",
+                    help="Dilation radius applied to the KLT-derived "
+                         "convex hull to produce the full-body ROI "
+                         "mask. Roughly the rat's body half-width in "
+                         "pixels. Default 60.")
+    rt.add_argument("--rat-motion-min", type=float, default=0.5,
+                    metavar="PX",
+                    help="Minimum per-point KLT flow magnitude "
+                         "(px/frame) to consider a point 'moving'. "
+                         "Static-but-textured features (e.g. bedding "
+                         "fiber endpoints) fall below this. Default 0.5.")
+    rt.add_argument("--rat-min-cluster", type=int, default=5,
+                    metavar="N",
+                    help="Minimum points in a coherent-motion "
+                         "cluster to count as a candidate rat. "
+                         "Default 5.")
+    rt.add_argument("--rat-max-klt", type=int, default=300,
+                    metavar="N",
+                    help="Max Shi-Tomasi corners to track per "
+                         "camera. Default 300.")
+    rt.add_argument("--rat-refresh-every", type=int, default=30,
+                    metavar="N",
+                    help="Refresh the corner pool every N frames "
+                         "regardless of survival, to keep the point "
+                         "set adapted as the rat changes pose. "
+                         "Default 30.")
+    rt.add_argument("--rat-dbscan-eps-xy", type=float, default=40.0,
+                    metavar="PX",
+                    help="Spatial neighborhood radius for clustering "
+                         "moving KLT points (px). Default 40.")
+    rt.add_argument("--rat-dbscan-eps-v", type=float, default=2.0,
+                    metavar="PX/F",
+                    help="Velocity neighborhood radius for clustering "
+                         "moving KLT points (px/frame). Default 2.0.")
+    rt.add_argument("--rat-seed-roi-radius-px", type=int, default=None,
+                    metavar="PX",
+                    help="On the first frame, restrict initial "
+                         "corner seeding to a disc of this radius "
+                         "around the frame center. Helps avoid "
+                         "locking onto a cable mount that's near a "
+                         "frame edge. Default None (seed whole frame).")
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
@@ -800,6 +859,15 @@ def main() -> None:
         sigma_floor=args.sigma_floor,
         motion_min=args.motion_min,
         motion_method=args.motion_method,
+        use_rat_tracker_roi=args.use_rat_tracker_roi,
+        rat_body_half_width_px=args.rat_body_half_width_px,
+        rat_motion_min=args.rat_motion_min,
+        rat_min_cluster=args.rat_min_cluster,
+        rat_max_klt=args.rat_max_klt,
+        rat_refresh_every=args.rat_refresh_every,
+        rat_dbscan_eps_xy=args.rat_dbscan_eps_xy,
+        rat_dbscan_eps_v=args.rat_dbscan_eps_v,
+        rat_seed_roi_radius_px=args.rat_seed_roi_radius_px,
         polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,
