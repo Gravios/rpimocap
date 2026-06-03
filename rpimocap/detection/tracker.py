@@ -624,6 +624,8 @@ class SegmentTracker:
         max_aspect_ratio:  "Optional[float]" = None,
         mahalanobis_k:     float = 0.0,
         sigma_floor:       float = 1.0,
+        motion_min:        float = 0.0,
+        motion_method:     str   = "flow",
         polarity:          str   = "either",
         bg_adapt_alpha:    "Optional[float]" = None,
         bg_adapt_dilate_px: int  = 25,
@@ -712,6 +714,8 @@ class SegmentTracker:
             max_aspect_ratio=max_aspect_ratio,
             mahalanobis_k=mahalanobis_k,
             sigma_floor=sigma_floor,
+            motion_min=motion_min,
+            motion_method=motion_method,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 

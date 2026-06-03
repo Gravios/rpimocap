@@ -893,6 +893,22 @@ class ForegroundDetector:
         # bg sample happened to have near-zero variance (a few
         # identical pixel values). Set in raw pixel intensity units.
         sigma_floor:       float = 1.0,
+        # When > 0, require pixels to have at least this much
+        # frame-to-frame motion (px/frame) to remain in the foreground
+        # mask. Eliminates physically-fixed bright features — the
+        # cable mount hardware, headstage attachment bolt, acrylic
+        # specular highlights, plexiglass reflections — which appear
+        # as foreground in bg-sub but have zero optical flow because
+        # they don't move. The rat has nonzero flow because it's
+        # actually translating between frames. Typical useful values:
+        # 0.5 to 3.0 px/frame. Disabled by default (0.0).
+        motion_min:        float = 0.0,
+        # How to compute motion. "flow" uses cv2.calcOpticalFlowFarneback
+        # (dense, more accurate, ~30-50 ms per frame at 2028x1080).
+        # "framediff" uses abs(frame - prev_frame) (cheap, ~3 ms, but
+        # catches intensity changes — flickering reflections, not just
+        # actual translation). Default "flow".
+        motion_method:     str   = "flow",
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -926,6 +942,18 @@ class ForegroundDetector:
         # BackgroundModel.update) is picked up immediately.
         self._mahalanobis_k = float(max(0.0, mahalanobis_k))
         self._sigma_floor   = float(max(0.001, sigma_floor))
+        # Per-camera previous-frame buffer for motion gating. Stores
+        # the previous grayscale (post-bayer-demosaic, post-bilateral,
+        # but pre-bg-sub) frame so the next detect() call can compute
+        # optical flow or absolute diff against it. First frame's
+        # motion gate is a no-op (no previous to compare against).
+        self._motion_min    = float(max(0.0, motion_min))
+        if motion_method not in ("flow", "framediff"):
+            raise ValueError(
+                f"motion_method must be 'flow' or 'framediff', "
+                f"got {motion_method!r}")
+        self._motion_method = motion_method
+        self._prev_frame:   dict = {0: None, 1: None}
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -1153,6 +1181,48 @@ class ForegroundDetector:
         if self._fur_gabor_min > 0 and _frame_gabor_n is not None:
             gabor_gate = (_frame_gabor_n >= self._fur_gabor_min).astype(np.uint8) * 255
             binary = cv2.bitwise_and(binary, gabor_gate)
+
+        # Motion gate. When self._motion_min > 0, require pixels to
+        # have at least this much frame-to-frame motion in order to
+        # remain in the foreground mask. Eliminates *physically fixed*
+        # bright features — cable mount hardware, attachment bolts,
+        # acrylic specular highlights, plexiglass reflections — that
+        # appear as foreground in bg-sub but have zero motion because
+        # they don't actually move. The rat translates between frames
+        # and so retains motion; even the cable wire has nonzero
+        # motion through most of its length (it's attached to the
+        # moving rat at one end, only the mount end is stationary).
+        #
+        # Two methods, set by self._motion_method:
+        #   "flow"      — dense optical flow via Farneback. True pixel
+        #                 translation; a static pixel that flickers
+        #                 in brightness has flow=0. ~30-50 ms / frame
+        #                 at 2028x1080.
+        #   "framediff" — abs(frame - prev). Cheap (~3 ms) but treats
+        #                 intensity changes as motion. Use only if
+        #                 flow computation is too slow.
+        #
+        # Skipped on the first frame per camera (no previous to
+        # compare against). Applied BEFORE morph so morph can't
+        # subsequently re-fill the gated regions.
+        if self._motion_min > 0:
+            prev = self._prev_frame.get(cam)
+            if prev is not None and prev.shape == gray.shape:
+                if self._motion_method == "flow":
+                    flow = cv2.calcOpticalFlowFarneback(
+                        prev, gray, None,
+                        pyr_scale=0.5, levels=3, winsize=15,
+                        iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+                    motion_mag = np.sqrt(
+                        flow[..., 0] ** 2 + flow[..., 1] ** 2)
+                else:   # framediff
+                    motion_mag = np.abs(
+                        gray.astype(np.float32) - prev.astype(np.float32))
+                motion_gate = (motion_mag >= self._motion_min).astype(np.uint8) * 255
+                binary = cv2.bitwise_and(binary, motion_gate)
+            # Stash current frame for the next call. Copy to decouple
+            # from any in-place mutation the caller might do later.
+            self._prev_frame[cam] = gray.copy()
 
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  self._kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, self._kernel)

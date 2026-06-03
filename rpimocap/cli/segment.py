@@ -339,6 +339,29 @@ def main() -> None:
                          "divide-by-zero / extreme sensitivity at "
                          "pixels that happened to have near-zero "
                          "variance in the bg sample. Default 1.0.")
+    det.add_argument("--motion-min", type=float, default=0.0,
+                    metavar="PX",
+                    help="Require pixels to have at least this much "
+                         "frame-to-frame motion (px/frame) to remain "
+                         "in the foreground mask. Eliminates "
+                         "physically-fixed bright features — cable "
+                         "mount hardware, attachment bolts, acrylic "
+                         "specular highlights, plexiglass "
+                         "reflections — which appear as foreground "
+                         "in bg-sub but have zero optical flow "
+                         "because they don't move. The rat retains "
+                         "motion. Typical useful values: 0.5 to 3.0 "
+                         "px/frame. Disabled by default (0.0). "
+                         "Adds ~30-50 ms per frame at 2028x1080 "
+                         "when --motion-method=flow.")
+    det.add_argument("--motion-method", default="flow",
+                    choices=["flow", "framediff"],
+                    help="Motion estimator. 'flow' = dense optical "
+                         "flow (Farneback); true pixel translation, "
+                         "static-but-flickering features get flow=0. "
+                         "'framediff' = abs(frame - prev); cheap "
+                         "(~3 ms) but catches intensity changes too "
+                         "(less discriminative). Default 'flow'.")
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
@@ -775,6 +798,8 @@ def main() -> None:
         max_aspect_ratio=args.max_aspect_ratio,
         mahalanobis_k=args.mahalanobis_k,
         sigma_floor=args.sigma_floor,
+        motion_min=args.motion_min,
+        motion_method=args.motion_method,
         polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,
         bg_adapt_dilate_px=args.bg_adapt_dilate_px,
