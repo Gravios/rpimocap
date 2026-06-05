@@ -391,11 +391,13 @@ def main() -> None:
                          "(px/frame) to consider a point 'moving'. "
                          "Static-but-textured features (e.g. bedding "
                          "fiber endpoints) fall below this. Default 0.5.")
-    rt.add_argument("--rat-min-cluster", type=int, default=5,
+    rt.add_argument("--rat-min-cluster", type=int, default=15,
                     metavar="N",
                     help="Minimum points in a coherent-motion "
                          "cluster to count as a candidate rat. "
-                         "Default 5.")
+                         "Default 15 — high enough to reject small "
+                         "spurious clusters from KLT corners along "
+                         "the cable wire.")
     rt.add_argument("--rat-max-klt", type=int, default=300,
                     metavar="N",
                     help="Max Shi-Tomasi corners to track per "
@@ -414,6 +416,14 @@ def main() -> None:
                     metavar="PX/F",
                     help="Velocity neighborhood radius for clustering "
                          "moving KLT points (px/frame). Default 2.0.")
+    rt.add_argument("--rat-cluster-max-aspect-ratio", type=float,
+                    default=4.0, metavar="R",
+                    help="Reject KLT clusters whose long:short axis "
+                         "ratio (from cv2.minAreaRect) exceeds this. "
+                         "Cable-wire KLT clusters are highly "
+                         "elongated (aspect 10-30 along the wire). "
+                         "Rat body KLT clusters are roundish (1.5-3). "
+                         "Default 4.0; set negative to disable.")
     rt.add_argument("--rat-seed-roi-radius-px", type=int, default=None,
                     metavar="PX",
                     help="On the first frame, restrict initial "
@@ -867,6 +877,11 @@ def main() -> None:
         rat_refresh_every=args.rat_refresh_every,
         rat_dbscan_eps_xy=args.rat_dbscan_eps_xy,
         rat_dbscan_eps_v=args.rat_dbscan_eps_v,
+        rat_cluster_max_aspect_ratio=(
+            None
+            if args.rat_cluster_max_aspect_ratio is not None
+            and args.rat_cluster_max_aspect_ratio < 0
+            else args.rat_cluster_max_aspect_ratio),
         rat_seed_roi_radius_px=args.rat_seed_roi_radius_px,
         polarity=args.polarity,
         bg_adapt_alpha=args.bg_adapt_alpha,

@@ -234,13 +234,14 @@ class EdgeMotionRatTracker:
                  frame_shape:           tuple[int, int],
                  body_half_width_px:    int   = 60,
                  motion_min:            float = 0.5,
-                 min_cluster_points:    int   = 5,
+                 min_cluster_points:    int   = 15,
                  max_klt_points:        int   = 300,
                  refresh_every:         int   = 30,
                  process_noise:         float = 5.0,
                  meas_noise:            float = 3.0,
                  dbscan_eps_xy:         float = 40.0,
                  dbscan_eps_v:          float = 2.0,
+                 cluster_max_aspect_ratio: Optional[float] = 4.0,
                  seed_roi_radius_px:    Optional[int] = None):
         self.H, self.W = frame_shape
         self.body_half_width_px = int(body_half_width_px)
@@ -252,6 +253,9 @@ class EdgeMotionRatTracker:
         self.meas_noise         = float(meas_noise)
         self.dbscan_eps_xy      = float(dbscan_eps_xy)
         self.dbscan_eps_v       = float(dbscan_eps_v)
+        self.cluster_max_aspect_ratio = (
+            None if cluster_max_aspect_ratio is None
+            else float(cluster_max_aspect_ratio))
         self.seed_roi_radius_px = seed_roi_radius_px
 
         self._cams: dict[int, CamTrackerState] = {
@@ -455,7 +459,12 @@ class EdgeMotionRatTracker:
             return None  # all noise
 
         # Pick the cluster whose mean position is nearest pred (or,
-        # if Kalman hasn't locked on yet, the LARGEST cluster)
+        # if Kalman hasn't locked on yet, the LARGEST cluster). Reject
+        # clusters whose 2D extent is highly elongated — these are
+        # KLT points lying along the tether cable wire, which has
+        # high-contrast specular edges that make it a Shi-Tomasi
+        # magnet. The rat's KLT cluster has aspect 1.5-3; the
+        # cable's is 10-30 (long axis along the wire).
         kalman_locked = (self._cams[0].last_obs_idx >= 0
                           or self._cams[1].last_obs_idx >= 0)
         best_label = -1
@@ -464,8 +473,23 @@ class EdgeMotionRatTracker:
             mask = labels == lbl
             if mask.sum() < self.min_cluster_points:
                 continue
-            cx_ = float(m_points[mask, 0].mean())
-            cy_ = float(m_points[mask, 1].mean())
+            pts_lbl = m_points[mask]
+            # Aspect-ratio filter on the cluster's minimum bounding
+            # rectangle. Falls back to NOT applying when there are
+            # too few points for a meaningful rect.
+            if (self.cluster_max_aspect_ratio is not None
+                    and self.cluster_max_aspect_ratio > 0
+                    and len(pts_lbl) >= 5):
+                rect = cv2.minAreaRect(pts_lbl.astype(np.float32))
+                (_, _), (w, h), _ = rect
+                short_axis = min(w, h)
+                long_axis  = max(w, h)
+                if short_axis > 0:
+                    aspect = long_axis / short_axis
+                    if aspect > self.cluster_max_aspect_ratio:
+                        continue   # reject elongated cluster (cable)
+            cx_ = float(pts_lbl[:, 0].mean())
+            cy_ = float(pts_lbl[:, 1].mean())
             if kalman_locked:
                 score = np.hypot(cx_ - pred_cx, cy_ - pred_cy)
             else:

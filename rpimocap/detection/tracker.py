@@ -648,6 +648,7 @@ class SegmentTracker:
         rat_refresh_every: int   = 30,
         rat_dbscan_eps_xy: float = 40.0,
         rat_dbscan_eps_v:  float = 2.0,
+        rat_cluster_max_aspect_ratio: Optional[float] = 4.0,
         rat_seed_roi_radius_px: Optional[int] = None,
         polarity:          str   = "either",
         bg_adapt_alpha:    "Optional[float]" = None,
@@ -770,6 +771,7 @@ class SegmentTracker:
             refresh_every=rat_refresh_every,
             dbscan_eps_xy=rat_dbscan_eps_xy,
             dbscan_eps_v=rat_dbscan_eps_v,
+            cluster_max_aspect_ratio=rat_cluster_max_aspect_ratio,
             seed_roi_radius_px=rat_seed_roi_radius_px,
         )
 
