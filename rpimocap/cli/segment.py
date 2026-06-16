@@ -362,6 +362,35 @@ def main() -> None:
                          "'framediff' = abs(frame - prev); cheap "
                          "(~3 ms) but catches intensity changes too "
                          "(less discriminative). Default 'flow'.")
+    det.add_argument("--luminance-correct", action="store_true",
+                    default=False,
+                    help="Per-frame multiplicative luminance "
+                         "correction on the background. Each frame, "
+                         "estimate g = median(frame/bg) over the "
+                         "non-animal arena pixels and use g*bg as "
+                         "the effective background for diff. Handles "
+                         "fast IR illumination drift that "
+                         "--bg-adapt-alpha is too slow to track. "
+                         "Independent of and complementary to "
+                         "--mahalanobis-k. Disabled by default.")
+    det.add_argument("--luminance-correct-min-bg", type=float,
+                    default=10.0, metavar="I",
+                    help="Pixels with bg below this intensity are "
+                         "excluded from the per-frame g estimate "
+                         "(avoid divide-by-tiny). Default 10.0 "
+                         "(out of 255).")
+    det.add_argument("--luminance-correct-clip-lo", type=float,
+                    default=0.5, metavar="R",
+                    help="Lower clip on frame/bg ratios before "
+                         "taking the median for g estimation. "
+                         "Rejects extreme outliers (dark anomalies). "
+                         "Default 0.5.")
+    det.add_argument("--luminance-correct-clip-hi", type=float,
+                    default=2.0, metavar="R",
+                    help="Upper clip on frame/bg ratios before "
+                         "taking the median for g estimation. "
+                         "Rejects animal/cable/specular pixels (which "
+                         "are typically 3-5x bg). Default 2.0.")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -869,6 +898,10 @@ def main() -> None:
         sigma_floor=args.sigma_floor,
         motion_min=args.motion_min,
         motion_method=args.motion_method,
+        luminance_correct=args.luminance_correct,
+        luminance_correct_min_bg=args.luminance_correct_min_bg,
+        luminance_correct_clip_lo=args.luminance_correct_clip_lo,
+        luminance_correct_clip_hi=args.luminance_correct_clip_hi,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,

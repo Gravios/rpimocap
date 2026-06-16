@@ -628,6 +628,12 @@ class SegmentTracker:
         sigma_floor:       float = 1.0,
         motion_min:        float = 0.0,
         motion_method:     str   = "flow",
+        # Per-frame multiplicative luminance correction passthrough.
+        # See ForegroundDetector for documentation.
+        luminance_correct: bool  = False,
+        luminance_correct_min_bg: float = 10.0,
+        luminance_correct_clip_lo: float = 0.5,
+        luminance_correct_clip_hi: float = 2.0,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -740,6 +746,10 @@ class SegmentTracker:
             sigma_floor=sigma_floor,
             motion_min=motion_min,
             motion_method=motion_method,
+            luminance_correct=luminance_correct,
+            luminance_correct_min_bg=luminance_correct_min_bg,
+            luminance_correct_clip_lo=luminance_correct_clip_lo,
+            luminance_correct_clip_hi=luminance_correct_clip_hi,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 

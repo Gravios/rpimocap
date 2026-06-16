@@ -909,6 +909,28 @@ class ForegroundDetector:
         # catches intensity changes — flickering reflections, not just
         # actual translation). Default "flow".
         motion_method:     str   = "flow",
+        # Per-frame multiplicative luminance correction. When True,
+        # detect() estimates a global scalar g such that g*bg ≈ frame
+        # on the non-animal pixels of the arena ROI, then uses g*bg
+        # as the effective background. Handles fast illumination drift
+        # (IR LED variation between frames, AGC blips, ambient
+        # changes) that --bg-adapt-alpha is too slow to track.
+        # Combined effect: bg-adapt handles slow trend over seconds,
+        # this handles single-frame fluctuations. Disabled by default
+        # for back-compat.
+        luminance_correct: bool  = False,
+        # Pixels with bg below this intensity are excluded from the g
+        # estimation. Dividing frame by a near-zero bg gives huge
+        # ratios that dominate the median. Default 10 (out of 255).
+        luminance_correct_min_bg: float = 10.0,
+        # Per-frame estimation of g uses the median of frame[mask] /
+        # bg[mask] inside the arena ROI. To make the median robust to
+        # the animal (which is bright vs bg) and to specular outliers,
+        # we additionally clip the ratio range before taking the
+        # median. Defaults [0.5, 2.0] tolerate up to ±100% drift but
+        # reject most rat/cable pixels (which are typically 3-5x bg).
+        luminance_correct_clip_lo: float = 0.5,
+        luminance_correct_clip_hi: float = 2.0,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -954,6 +976,14 @@ class ForegroundDetector:
                 f"got {motion_method!r}")
         self._motion_method = motion_method
         self._prev_frame:   dict = {0: None, 1: None}
+        # Per-frame luminance correction state. self._last_g[cam]
+        # holds the most recent estimated correction factor (for
+        # diagnostics / step_stats). 1.0 = no correction needed.
+        self._luminance_correct        = bool(luminance_correct)
+        self._luminance_correct_min_bg = float(luminance_correct_min_bg)
+        self._luminance_correct_clip_lo = float(luminance_correct_clip_lo)
+        self._luminance_correct_clip_hi = float(luminance_correct_clip_hi)
+        self._last_g:       dict = {0: 1.0, 1: 1.0}
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -1081,6 +1111,39 @@ class ForegroundDetector:
         if self.use_green_channel:
             # bg_raw is already single-channel gray — use as-is
             pass
+
+        # ── Per-frame luminance correction ──────────────────────────
+        # Estimate a global scalar g such that g*bg ≈ frame over the
+        # non-animal pixels of the arena ROI. Replaces bg with g*bg
+        # for the rest of detect(). Handles IR illumination drift
+        # that bg-adapt is too slow to track.
+        if self._luminance_correct:
+            # Build sample mask: arena ROI ∩ (bg above minimum)
+            sample_mask = (bg > self._luminance_correct_min_bg)
+            arena_roi = self._roi_masks.get(cam)
+            if arena_roi is not None:
+                sample_mask = sample_mask & (arena_roi > 0)
+            if sample_mask.any():
+                ratio = gray[sample_mask] / bg[sample_mask]
+                # Clip the ratio range to reject animal/cable/specular
+                # outliers BEFORE taking the median (more robust than
+                # post-median rejection).
+                in_range = (ratio > self._luminance_correct_clip_lo) & (
+                    ratio < self._luminance_correct_clip_hi)
+                if in_range.any():
+                    g = float(np.median(ratio[in_range]))
+                else:
+                    # All ratios out of range — frame is very different
+                    # from bg (rare; possibly a flicker). Skip correction.
+                    g = 1.0
+            else:
+                g = 1.0
+            self._last_g[cam] = g
+            # Apply correction. Note: we modify the local bg only,
+            # NOT self.bg.bg0/bg1 — the model itself stays untouched.
+            bg = bg * g
+        else:
+            self._last_g[cam] = 1.0
 
         # ── Diff ─────────────────────────────────────────────────────
         # Polarity-aware: with 'bright' (NIR animal on dark bedding),
