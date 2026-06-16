@@ -634,6 +634,7 @@ class SegmentTracker:
         luminance_correct_min_bg: float = 10.0,
         luminance_correct_clip_lo: float = 0.5,
         luminance_correct_clip_hi: float = 2.0,
+        diff_median_k:     int   = 0,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -750,6 +751,7 @@ class SegmentTracker:
             luminance_correct_min_bg=luminance_correct_min_bg,
             luminance_correct_clip_lo=luminance_correct_clip_lo,
             luminance_correct_clip_hi=luminance_correct_clip_hi,
+            diff_median_k=diff_median_k,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 

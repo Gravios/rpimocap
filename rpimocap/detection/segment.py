@@ -931,6 +931,16 @@ class ForegroundDetector:
         # reject most rat/cable pixels (which are typically 3-5x bg).
         luminance_correct_clip_lo: float = 0.5,
         luminance_correct_clip_hi: float = 2.0,
+        # Median filter applied to the (post-luminance-correction)
+        # diff map BEFORE thresholding. Removes salt-and-pepper
+        # outliers — single-pixel bright spots from bedding texture
+        # variation, camera read noise, residual specular flicker —
+        # that survive bg-sub but pull labeller centroids away from
+        # the rat blob. Kernel must be odd; 3 or 5 is typical. The
+        # filter operates on the diff in uint8 (cv2.medianBlur
+        # limitation), so values are clipped to [0, 255] first.
+        # Default 0 (disabled).
+        diff_median_k:     int   = 0,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -984,6 +994,13 @@ class ForegroundDetector:
         self._luminance_correct_clip_lo = float(luminance_correct_clip_lo)
         self._luminance_correct_clip_hi = float(luminance_correct_clip_hi)
         self._last_g:       dict = {0: 1.0, 1: 1.0}
+        # Diff median filter kernel (0 disables, else odd integer ≥ 3)
+        dmk = int(max(0, diff_median_k))
+        if dmk > 0:
+            dmk = dmk | 1   # force odd
+            if dmk < 3:
+                dmk = 3
+        self._diff_median_k = dmk
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -1156,6 +1173,18 @@ class ForegroundDetector:
             diff = np.clip(bg - gray, 0, None)
         else:    # 'either' (default, back-compat)
             diff = np.abs(gray - bg)
+
+        # ── Diff outlier removal ───────────────────────────────────
+        # Median filter on the diff map BEFORE thresholding kills
+        # salt-and-pepper outliers (single-pixel bright spots from
+        # bedding texture variation, camera read noise, residual
+        # specular flicker) while preserving the rat blob's edges.
+        # Operates in uint8 (cv2.medianBlur limitation for kernels
+        # > 5). Diff values are clipped to [0, 255] first.
+        if self._diff_median_k > 0:
+            diff_u8 = np.clip(diff, 0, 255).astype(np.uint8)
+            diff_u8 = cv2.medianBlur(diff_u8, self._diff_median_k)
+            diff    = diff_u8.astype(np.float32)
 
         # ── CLAHE on the DIFF (not the frame) ────────────────────────
         # Applying CLAHE here amplifies the animal blob (high diff signal)

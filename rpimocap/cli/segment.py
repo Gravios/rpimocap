@@ -391,6 +391,15 @@ def main() -> None:
                          "taking the median for g estimation. "
                          "Rejects animal/cable/specular pixels (which "
                          "are typically 3-5x bg). Default 2.0.")
+    det.add_argument("--diff-median-k", type=int, default=0,
+                    metavar="K",
+                    help="Median filter kernel applied to the diff "
+                         "map BEFORE thresholding. Removes "
+                         "salt-and-pepper outliers (single-pixel "
+                         "bright spots from bedding texture, camera "
+                         "noise, residual specular flicker) while "
+                         "preserving the rat blob's edges. Must be "
+                         "odd; 3 or 5 typical. Default 0 (off).")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -902,6 +911,7 @@ def main() -> None:
         luminance_correct_min_bg=args.luminance_correct_min_bg,
         luminance_correct_clip_lo=args.luminance_correct_clip_lo,
         luminance_correct_clip_hi=args.luminance_correct_clip_hi,
+        diff_median_k=args.diff_median_k,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,
