@@ -367,6 +367,132 @@ class RatTextureBank:
         end of session before save."""
         return self._refit_from_buffer()
 
+    def refine_blob_mask(self,
+                          gray:           np.ndarray,
+                          hull_mask:      np.ndarray,
+                          expand_px:      int   = 30,
+                          score_threshold: float = 0.15,
+                          smooth_window:  int   = 7
+                          ) -> np.ndarray:
+        """Grow an initial blob mask outward, including pixels
+        whose local Gabor texture matches the bank, stopping where
+        texture diverges. The result is a mask that snaps to the
+        actual texture boundary of the rat rather than its convex
+        hull.
+
+        Parameters
+        ----------
+        gray            : (H, W) uint8 grayscale frame
+        hull_mask       : (H, W) uint8 starting mask (e.g. the
+                          merged convex hull). Pixels with value > 0
+                          are seeds — they're always kept.
+        expand_px       : maximum number of pixels to expand outward
+                          from the hull. Defines the search band.
+        score_threshold : per-pixel texture score required to
+                          include. Lower than the blob-level
+                          threshold because per-pixel feature
+                          vectors are noisier. Typical 0.10-0.25.
+        smooth_window   : odd box-filter size applied to each Gabor
+                          response before scoring. Brings per-pixel
+                          features closer to the blob-averaged
+                          training distribution.
+
+        Returns
+        -------
+        (H, W) uint8 mask, ≥ hull_mask in extent. The mask is the
+        connected component(s) of the texture-pass region that
+        overlap the original hull (geodesic constraint — disconnected
+        islands of rat-texture noise are not included).
+
+        Bank must be ready (is_ready True). If not, returns hull_mask
+        unchanged.
+        """
+        if not self.is_ready:
+            return hull_mask.copy()
+        if hull_mask.shape != gray.shape:
+            return hull_mask.copy()
+        if int((hull_mask > 0).sum()) == 0:
+            return hull_mask.copy()
+
+        # Build search ROI: hull dilated by expand_px
+        kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * expand_px + 1, 2 * expand_px + 1))
+        roi = cv2.dilate(hull_mask.astype(np.uint8), kern)
+
+        # Crop to bounding box for speed
+        ys, xs = np.where(roi > 0)
+        if len(ys) == 0:
+            return hull_mask.copy()
+        margin = max(self.scales) + 5  # account for largest Gabor kernel
+        H, W = gray.shape
+        y0 = max(0, int(ys.min()) - margin)
+        y1 = min(H, int(ys.max()) + margin + 1)
+        x0 = max(0, int(xs.min()) - margin)
+        x1 = min(W, int(xs.max()) + margin + 1)
+
+        crop_gray = gray[y0:y1, x0:x1].astype(np.float32)
+        crop_hull = (hull_mask[y0:y1, x0:x1] > 0)
+        crop_roi  = (roi[y0:y1, x0:x1] > 0)
+        ch, cw = crop_gray.shape
+
+        # Compute Gabor responses over the whole crop — one filter2D
+        # per kernel. Box-filter each response with smooth_window to
+        # bring per-pixel features closer to blob-averaged statistics.
+        smooth_k = int(max(1, smooth_window) | 1)   # odd
+        responses = np.empty(
+            (self.feature_dim, ch, cw), dtype=np.float32)
+        for i, kern_ in enumerate(self._kernels):
+            r = np.abs(cv2.filter2D(crop_gray, cv2.CV_32F, kern_))
+            if smooth_k > 1:
+                r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
+            responses[i] = r
+
+        # Score every pixel in the ROI band (between hull and dilated)
+        candidate_mask = crop_roi & ~crop_hull
+        if not candidate_mask.any():
+            return hull_mask.copy()
+
+        # Vectorized Mahalanobis: d² = diff @ inv_cov @ diff per pixel
+        feats = responses[:, candidate_mask].T   # (N, D)
+        diffs = feats - self.mean[None, :]       # (N, D)
+        d2 = np.einsum("ni,ij,nj->n", diffs, self._inv_cov, diffs)
+        # Clip d2 to avoid overflow in exp() — anything beyond ~30 is
+        # already effectively zero score.
+        d2 = np.clip(d2, 0, 200)
+        scores = np.exp(-d2 / (2.0 * self.feature_dim))
+        keep = scores >= score_threshold
+
+        # Build refined mask in crop space
+        refined = crop_hull.copy()
+        cy_idx, cx_idx = np.where(candidate_mask)
+        refined[cy_idx[keep], cx_idx[keep]] = True
+
+        # Geodesic constraint: keep only CCs that touch the hull.
+        # Disconnected islands of rat-texture noise far from the
+        # rat are excluded.
+        refined_u8 = refined.astype(np.uint8) * 255
+        n_cc, cc_labels = cv2.connectedComponents(refined_u8)
+        if n_cc <= 1:
+            # No components survived
+            full = np.zeros_like(hull_mask)
+            full[y0:y1, x0:x1] = refined_u8
+            return full
+        # Find labels that overlap with the original hull
+        hull_labels = set(int(l) for l in cc_labels[crop_hull].tolist()
+                            if l > 0)
+        if not hull_labels:
+            full = np.zeros_like(hull_mask)
+            full[y0:y1, x0:x1] = (crop_hull.astype(np.uint8) * 255)
+            return full
+        keep_mask = np.isin(cc_labels, list(hull_labels))
+        final_crop = (keep_mask.astype(np.uint8) * 255)
+
+        # Place back in full-image frame
+        full = np.zeros_like(hull_mask)
+        full[y0:y1, x0:x1] = final_crop
+        return full
+
     # ----------------------------------------------------------------
     #  Persistence
     # ----------------------------------------------------------------

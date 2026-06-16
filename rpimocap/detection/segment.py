@@ -1097,6 +1097,26 @@ class ForegroundDetector:
         # hull past the visible pixels — useful when bg-sub
         # systematically under-captures the rat's edges. Default 0.
         merge_blob_dilate: int = 0,
+        # Edge refinement using texture bank. When True (and a
+        # texture_bank is supplied and is_ready), each merged blob
+        # is grown outward into a per-pixel texture-score band, then
+        # restricted to the connected component(s) overlapping the
+        # original hull. Result: the blob mask snaps to actual rat
+        # texture boundaries instead of the convex hull. Requires
+        # texture_bank.is_ready (i.e. bank has been bootstrapped).
+        edge_refine_texture: bool = False,
+        # Maximum px the refinement can grow the hull outward.
+        # Defines the search band. Default 30.
+        edge_refine_expand_px: int = 30,
+        # Per-pixel texture similarity threshold for inclusion in
+        # the refined mask. Lower than blob-level texture_min_score
+        # since per-pixel features have higher variance than blob
+        # averages. Default 0.15.
+        edge_refine_score_threshold: float = 0.15,
+        # Box-filter window for smoothing per-pixel Gabor responses
+        # before scoring. Brings per-pixel features closer to the
+        # blob-averaged training distribution. Odd; default 7.
+        edge_refine_smooth_window: int = 7,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -1163,6 +1183,12 @@ class ForegroundDetector:
         # Blob merging
         self._merge_blob_distance = int(max(0, merge_blob_distance))
         self._merge_blob_dilate   = int(max(0, merge_blob_dilate))
+        # Texture-based edge refinement
+        self._edge_refine_texture = bool(edge_refine_texture)
+        self._edge_refine_expand_px = int(max(0, edge_refine_expand_px))
+        self._edge_refine_score_threshold = float(
+            edge_refine_score_threshold)
+        self._edge_refine_smooth_window = int(max(1, edge_refine_smooth_window))
         # Per-detect counters for diagnostics (reset each detect)
         self._last_texture_kept    = 0
         self._last_texture_dropped = 0
@@ -1590,6 +1616,49 @@ class ForegroundDetector:
                 binary, labels, surviving_indices, stats,
                 merge_distance_px=self._merge_blob_distance,
                 dilate_px=self._merge_blob_dilate)
+
+        # ── Texture-based edge refinement ────────────────────────────
+        # For each surviving blob, grow the mask outward as far as
+        # the texture stays rat-like. Snaps the blob boundary to
+        # actual rat texture edges rather than the convex hull.
+        # Requires a ready texture bank.
+        if (self._edge_refine_texture
+                and self._texture_bank is not None
+                and self._texture_bank.is_ready
+                and len(blobs) > 0):
+            new_binary = np.zeros_like(binary)
+            new_labels = np.zeros_like(labels, dtype=np.int32)
+            new_blobs: list = []
+            gray_u8 = gray.astype(np.uint8)
+            for idx, (stats_row, centroid) in enumerate(blobs, start=1):
+                # Get the merged blob's mask
+                blob_mask = (labels == idx).astype(np.uint8) * 255
+                if int(blob_mask.sum()) == 0:
+                    continue
+                refined = self._texture_bank.refine_blob_mask(
+                    gray_u8, blob_mask,
+                    expand_px=self._edge_refine_expand_px,
+                    score_threshold=self._edge_refine_score_threshold,
+                    smooth_window=self._edge_refine_smooth_window)
+                ref_pixels = (refined > 0)
+                if not ref_pixels.any():
+                    continue
+                new_label = len(new_blobs) + 1
+                new_labels[ref_pixels] = new_label
+                new_binary[ref_pixels] = 255
+                ys2, xs2 = np.where(ref_pixels)
+                L = int(xs2.min())
+                T = int(ys2.min())
+                W = int(xs2.max() - L + 1)
+                H = int(ys2.max() - T + 1)
+                A = int(len(ys2))
+                cx = float(xs2.mean())
+                cy = float(ys2.mean())
+                new_blobs.append((
+                    np.array([L, T, W, H, A], dtype=np.int32),
+                    np.array([cx, cy], dtype=np.float64),
+                ))
+            binary, labels, blobs = new_binary, new_labels, new_blobs
 
         return ForegroundResult(
             mask=binary,

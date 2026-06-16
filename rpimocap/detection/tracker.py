@@ -641,6 +641,10 @@ class SegmentTracker:
         texture_min_score: float = 0.3,
         merge_blob_distance: int = 0,
         merge_blob_dilate:   int = 0,
+        edge_refine_texture: bool = False,
+        edge_refine_expand_px: int = 30,
+        edge_refine_score_threshold: float = 0.15,
+        edge_refine_smooth_window: int = 7,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -762,6 +766,10 @@ class SegmentTracker:
             texture_min_score=texture_min_score,
             merge_blob_distance=merge_blob_distance,
             merge_blob_dilate=merge_blob_dilate,
+            edge_refine_texture=edge_refine_texture,
+            edge_refine_expand_px=edge_refine_expand_px,
+            edge_refine_score_threshold=edge_refine_score_threshold,
+            edge_refine_smooth_window=edge_refine_smooth_window,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 

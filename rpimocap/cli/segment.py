@@ -464,6 +464,34 @@ def main() -> None:
                          "hull. Grows the hull past the visible "
                          "pixels for robustness when bg-sub "
                          "under-captures the rat's edges. Default 0.")
+    # ── Texture-based edge refinement ─────────────────────────────
+    er = ap.add_argument_group("Edge refinement (texture-aware)")
+    er.add_argument("--edge-refine-texture", action="store_true",
+                    default=False,
+                    help="After blob merging, grow each blob's "
+                         "mask outward into a per-pixel texture-"
+                         "score band, restricted to the connected "
+                         "components overlapping the original hull. "
+                         "Snaps the blob boundary to actual rat "
+                         "texture edges rather than the convex hull. "
+                         "Requires --use-texture-bank.")
+    er.add_argument("--edge-refine-expand-px", type=int, default=30,
+                    metavar="PX",
+                    help="Maximum pixels the refinement can grow "
+                         "the hull outward. Default 30.")
+    er.add_argument("--edge-refine-score-threshold", type=float,
+                    default=0.15, metavar="S",
+                    help="Per-pixel texture similarity threshold "
+                         "for inclusion in the refined mask. Lower "
+                         "than blob-level texture_min_score since "
+                         "per-pixel features have higher variance. "
+                         "Typical 0.10-0.25. Default 0.15.")
+    er.add_argument("--edge-refine-smooth-window", type=int,
+                    default=7, metavar="K",
+                    help="Box-filter window for smoothing per-pixel "
+                         "Gabor responses before scoring. Brings "
+                         "per-pixel features closer to blob-averaged "
+                         "training distribution. Odd; default 7.")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -1070,6 +1098,10 @@ def main() -> None:
         texture_min_score=args.texture_bank_min_score,
         merge_blob_distance=args.merge_blob_distance,
         merge_blob_dilate=args.merge_blob_dilate,
+        edge_refine_texture=args.edge_refine_texture,
+        edge_refine_expand_px=args.edge_refine_expand_px,
+        edge_refine_score_threshold=args.edge_refine_score_threshold,
+        edge_refine_smooth_window=args.edge_refine_smooth_window,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,
