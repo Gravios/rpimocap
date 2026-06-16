@@ -446,6 +446,24 @@ def main() -> None:
                     help="Relative-mean-change threshold for "
                          "incrementing version_id on refit. Default "
                          "0.05 (5%% change).")
+    # ── Blob merging ───────────────────────────────────────────────
+    mb = ap.add_argument_group("Blob merging (hull-based)")
+    mb.add_argument("--merge-blob-distance", type=int, default=0,
+                    metavar="PX",
+                    help="After per-blob filters, group surviving "
+                         "blobs whose centroids are within this many "
+                         "pixels and replace each group with the "
+                         "convex hull of the union of their pixels. "
+                         "Solves the under-segmented rat problem: "
+                         "bg-sub fragments the rat into pieces; "
+                         "merging reassembles a coherent rat-shaped "
+                         "blob. Default 0 (off). Typical: 50-150.")
+    mb.add_argument("--merge-blob-dilate", type=int, default=0,
+                    metavar="PX",
+                    help="Optional dilation radius for each merged "
+                         "hull. Grows the hull past the visible "
+                         "pixels for robustness when bg-sub "
+                         "under-captures the rat's edges. Default 0.")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -1050,6 +1068,8 @@ def main() -> None:
         diff_median_k=args.diff_median_k,
         texture_bank=texture_bank,
         texture_min_score=args.texture_bank_min_score,
+        merge_blob_distance=args.merge_blob_distance,
+        merge_blob_dilate=args.merge_blob_dilate,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,

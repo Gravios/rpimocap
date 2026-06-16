@@ -774,6 +774,137 @@ def _anatomical_prior_centroid(
     return cx_r, cy_r
 
 
+def _merge_blobs_by_hull(
+        binary:            np.ndarray,
+        label_map:         np.ndarray,
+        surviving_indices: list,
+        stats:             np.ndarray,
+        merge_distance_px: int,
+        dilate_px:         int = 0
+        ) -> tuple[np.ndarray, np.ndarray, list]:
+    """Merge nearby surviving connected components into single
+    convex-hull blobs.
+
+    Used when the rat is under-segmented by bg-subtraction —
+    fragments of the rat that exist as separate CCs get reassembled
+    into one coherent hull. Single-link clustering on centroid
+    distance ≤ merge_distance_px; convex hull of the union of all
+    member CCs' pixels; optional dilation.
+
+    Parameters
+    ----------
+    binary           : (H, W) uint8 binary mask (will be regenerated)
+    label_map        : (H, W) int32 CC label map from
+                       cv2.connectedComponentsWithStats
+    surviving_indices: list of CC indices (in label_map) that passed
+                       all per-blob filters and should be considered
+                       for merging
+    stats            : the stats array from cv2.connectedComponentsWithStats
+                       (used for centroid lookup; column 0=L, 1=T, 2=W,
+                       3=H, 4=A)
+    merge_distance_px: blobs with centroids within this many pixels
+                       get unioned into the same merge group
+    dilate_px        : optional dilation of each merged hull
+
+    Returns
+    -------
+    new_binary    : (H, W) uint8 — only the merged hull regions are
+                    set; pixels outside any hull are zero
+    new_label_map : (H, W) int32 — one label per merged group
+                    (1, 2, ..., G); 0 outside
+    new_blobs     : list of (stats_row, centroid) — one entry per
+                    merged group, compatible with the format
+                    produced by connectedComponentsWithStats
+    """
+    n = len(surviving_indices)
+    if n == 0:
+        new_binary = np.zeros_like(binary)
+        new_labels = np.zeros_like(label_map)
+        return new_binary, new_labels, []
+
+    # Compute centroids of surviving CCs from the label_map
+    centroids: list[np.ndarray] = []
+    for i in surviving_indices:
+        ys, xs = np.where(label_map == i)
+        if len(ys) == 0:
+            centroids.append(np.array([0.0, 0.0], dtype=np.float64))
+        else:
+            centroids.append(np.array([xs.mean(), ys.mean()],
+                                       dtype=np.float64))
+
+    # Union-find single-link clustering on centroid distance
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for a in range(n):
+        for b in range(a + 1, n):
+            d = float(np.linalg.norm(centroids[a] - centroids[b]))
+            if d <= merge_distance_px:
+                union(a, b)
+
+    # Collect groups
+    groups: dict[int, list[int]] = {}
+    for k in range(n):
+        r = find(k)
+        groups.setdefault(r, []).append(k)
+
+    # Build new label_map + binary + blobs
+    new_labels = np.zeros_like(label_map, dtype=np.int32)
+    new_binary = np.zeros_like(binary)
+    new_blobs: list = []
+    kern: np.ndarray | None = None
+    if dilate_px > 0:
+        kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * dilate_px + 1, 2 * dilate_px + 1))
+
+    new_label_id = 0
+    for grp_members in groups.values():
+        # Member CC indices in the original label_map
+        cc_indices = [surviving_indices[k] for k in grp_members]
+        union_mask = np.isin(label_map, cc_indices).astype(np.uint8)
+        ys, xs = np.where(union_mask > 0)
+        if len(ys) < 3:
+            continue
+        pts = np.column_stack([xs, ys]).astype(np.int32)
+        hull = cv2.convexHull(pts.reshape(-1, 1, 2))
+        hull_mask = np.zeros_like(union_mask)
+        cv2.fillConvexPoly(hull_mask, hull, 1)
+        if kern is not None:
+            hull_mask = cv2.dilate(hull_mask, kern)
+
+        new_label_id += 1
+        new_labels[hull_mask > 0] = new_label_id
+        new_binary[hull_mask > 0] = 255
+
+        # Compute stats row [L, T, W, H, A]
+        hys, hxs = np.where(hull_mask > 0)
+        if len(hys) == 0:
+            continue
+        L = int(hxs.min())
+        T = int(hys.min())
+        W = int(hxs.max() - L + 1)
+        H = int(hys.max() - T + 1)
+        A = int(len(hys))
+        cx = float(hxs.mean())
+        cy = float(hys.mean())
+        new_stats_row = np.array([L, T, W, H, A], dtype=np.int32)
+        new_centroid  = np.array([cx, cy], dtype=np.float64)
+        new_blobs.append((new_stats_row, new_centroid))
+
+    return new_binary, new_labels, new_blobs
+
+
 class ForegroundDetector:
     """Subtract background and return binary foreground masks.
 
@@ -954,6 +1085,18 @@ class ForegroundDetector:
         # See rpimocap.detection.rat_texture.RatTextureBank.
         texture_bank:      "Optional['RatTextureBank']" = None,
         texture_min_score: float = 0.3,
+        # Blob merging by convex hull. When > 0, surviving blobs
+        # whose centroids are within this many pixels of each other
+        # get merged into a single hull. Solves the under-segmented
+        # rat problem: bg-sub fragments the rat into several blobs,
+        # downstream sees them as separate candidates. Merging
+        # reassembles a coherent rat-shaped blob. Disabled (0) by
+        # default; typical values 50-150 px for rat-scale targets.
+        merge_blob_distance: int = 0,
+        # Optional dilation of the merged hull (px). Grows the
+        # hull past the visible pixels — useful when bg-sub
+        # systematically under-captures the rat's edges. Default 0.
+        merge_blob_dilate: int = 0,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -1017,6 +1160,9 @@ class ForegroundDetector:
         # Optional texture bank for blob-level texture gating
         self._texture_bank = texture_bank
         self._texture_min_score = float(texture_min_score)
+        # Blob merging
+        self._merge_blob_distance = int(max(0, merge_blob_distance))
+        self._merge_blob_dilate   = int(max(0, merge_blob_dilate))
         # Per-detect counters for diagnostics (reset each detect)
         self._last_texture_kept    = 0
         self._last_texture_dropped = 0
@@ -1366,6 +1512,7 @@ class ForegroundDetector:
             binary, connectivity=8)
 
         blobs = []
+        surviving_indices = []
         for i in range(1, n):
             area = stats[i, cv2.CC_STAT_AREA]
             if area < self.min_area_px:
@@ -1419,6 +1566,30 @@ class ForegroundDetector:
                 self._last_texture_kept += 1
                 self._texture_bank.add_sample(feats)
             blobs.append((stats[i], centroids[i]))
+            surviving_indices.append(i)
+
+        # ── Blob merging by hull ────────────────────────────────────
+        # Group surviving blobs whose centroids are within
+        # merge_blob_distance px and replace each group with the
+        # convex hull of the union of their pixels. Produces a
+        # single coherent rat-shaped blob instead of fragments —
+        # downstream labeller/centroid picker sees one rat, not
+        # many. Optional dilation grows the hull slightly past the
+        # visible pixels for robustness.
+        if (self._merge_blob_distance > 0
+                and len(surviving_indices) >= 2):
+            binary, labels, blobs = _merge_blobs_by_hull(
+                binary, labels, surviving_indices, stats,
+                merge_distance_px=self._merge_blob_distance,
+                dilate_px=self._merge_blob_dilate)
+        elif (self._merge_blob_distance > 0
+              and len(surviving_indices) == 1
+              and self._merge_blob_dilate > 0):
+            # Single blob — still apply dilation if requested
+            binary, labels, blobs = _merge_blobs_by_hull(
+                binary, labels, surviving_indices, stats,
+                merge_distance_px=self._merge_blob_distance,
+                dilate_px=self._merge_blob_dilate)
 
         return ForegroundResult(
             mask=binary,

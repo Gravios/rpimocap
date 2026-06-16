@@ -639,6 +639,8 @@ class SegmentTracker:
         # ForegroundDetector; see rpimocap.detection.rat_texture.
         texture_bank:      "Optional['RatTextureBank']" = None,
         texture_min_score: float = 0.3,
+        merge_blob_distance: int = 0,
+        merge_blob_dilate:   int = 0,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -758,6 +760,8 @@ class SegmentTracker:
             diff_median_k=diff_median_k,
             texture_bank=texture_bank,
             texture_min_score=texture_min_score,
+            merge_blob_distance=merge_blob_distance,
+            merge_blob_dilate=merge_blob_dilate,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
