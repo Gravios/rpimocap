@@ -635,6 +635,10 @@ class SegmentTracker:
         luminance_correct_clip_lo: float = 0.5,
         luminance_correct_clip_hi: float = 2.0,
         diff_median_k:     int   = 0,
+        # Optional rat texture bank. Passed through to
+        # ForegroundDetector; see rpimocap.detection.rat_texture.
+        texture_bank:      "Optional['RatTextureBank']" = None,
+        texture_min_score: float = 0.3,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -752,6 +756,8 @@ class SegmentTracker:
             luminance_correct_clip_lo=luminance_correct_clip_lo,
             luminance_correct_clip_hi=luminance_correct_clip_hi,
             diff_median_k=diff_median_k,
+            texture_bank=texture_bank,
+            texture_min_score=texture_min_score,
             polarity=polarity)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 

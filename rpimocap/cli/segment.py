@@ -400,6 +400,52 @@ def main() -> None:
                          "noise, residual specular flicker) while "
                          "preserving the rat blob's edges. Must be "
                          "odd; 3 or 5 typical. Default 0 (off).")
+    # ── Rat texture bank ──────────────────────────────────────────
+    tb = ap.add_argument_group("Rat texture bank (Gabor + Gaussian)")
+    tb.add_argument("--use-texture-bank", action="store_true",
+                    default=False,
+                    help="Enable the rat texture bank. Builds a "
+                         "multi-scale Gabor-feature Gaussian model "
+                         "from random bootstrap frames, then gates "
+                         "blob acceptance by texture similarity. "
+                         "Updates online from confident detections "
+                         "during tracking; refits trigger version_id "
+                         "increments which are logged per-frame.")
+    tb.add_argument("--texture-bank-load", type=str, default=None,
+                    metavar="PATH",
+                    help="Load a pre-trained .npz texture bank "
+                         "instead of bootstrapping. Skip the random-"
+                         "frame bootstrap phase. Combine with "
+                         "--texture-bank-freeze for production runs "
+                         "after training.")
+    tb.add_argument("--texture-bank-save", type=str, default=None,
+                    metavar="PATH",
+                    help="Save the final (possibly online-refined) "
+                         "bank to this .npz at the end of the run. "
+                         "Default: {session}/tracking/texture_bank.npz")
+    tb.add_argument("--texture-bank-freeze", action="store_true",
+                    default=False,
+                    help="Disable online updates. Use bank exactly "
+                         "as loaded/bootstrapped. Recommended for "
+                         "production runs after training.")
+    tb.add_argument("--texture-bank-bootstrap-frames", type=int,
+                    default=50, metavar="N",
+                    help="Number of random frames to sample for the "
+                         "bootstrap phase. Default 50.")
+    tb.add_argument("--texture-bank-min-score", type=float, default=0.3,
+                    metavar="S",
+                    help="Texture similarity threshold for blob "
+                         "acceptance. exp(-Mahalanobis²/2D), so 1.0 "
+                         "= perfect match, 0 = far. Default 0.3.")
+    tb.add_argument("--texture-bank-update-every", type=int, default=100,
+                    metavar="N",
+                    help="Refit the bank's Gaussian every N online "
+                         "samples. Default 100.")
+    tb.add_argument("--texture-bank-drift-threshold", type=float,
+                    default=0.05, metavar="R",
+                    help="Relative-mean-change threshold for "
+                         "incrementing version_id on refit. Default "
+                         "0.05 (5%% change).")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -873,6 +919,96 @@ def main() -> None:
                     prompt_frame_idx=args.sam2_video_prompt_frame)
                 print("  SAM2 propagation complete")
 
+    # ── Texture bank (optional) ──────────────────────────────────────
+    # If --use-texture-bank is set, either load a saved bank or
+    # bootstrap a new one from random frames before constructing the
+    # tracker. The bank is passed to SegmentTracker which forwards
+    # it to ForegroundDetector.
+    texture_bank = None
+    if args.use_texture_bank:
+        from rpimocap.detection.rat_texture import RatTextureBank
+        if args.texture_bank_load:
+            print(f"\n── Loading texture bank: {args.texture_bank_load}")
+            texture_bank = RatTextureBank.load(args.texture_bank_load)
+            print(f"  Loaded bank: version_id={texture_bank.version_id}, "
+                  f"n_samples={texture_bank.n_samples}, "
+                  f"D={texture_bank.feature_dim}")
+            if args.texture_bank_freeze:
+                # Disable online updates: set buffer threshold to infinity
+                texture_bank.update_every = 10**9
+        else:
+            print("\n── Bootstrapping texture bank from random frames")
+            from rpimocap.detection.rat_texture import (
+                bootstrap_from_random_frames)
+            from rpimocap.detection.segment import ForegroundDetector
+
+            texture_bank = RatTextureBank(
+                update_every=args.texture_bank_update_every,
+                drift_threshold=args.texture_bank_drift_threshold)
+            # Sample random frame indices uniformly across the recording
+            import cv2 as _cv2
+            n_total = int(min(cap0.get(_cv2.CAP_PROP_FRAME_COUNT),
+                              cap1.get(_cv2.CAP_PROP_FRAME_COUNT)))
+            n_boot  = min(args.texture_bank_bootstrap_frames, n_total)
+            rng = np.random.RandomState(42)
+            sample_idx = sorted(rng.choice(
+                n_total, size=n_boot, replace=False))
+            # Use a temporary detector (NO texture bank) to find blobs
+            tmp_det = ForegroundDetector(
+                background=bg,
+                threshold=args.threshold,
+                min_area_px=args.min_area,
+                max_area_px=args.max_area,
+                min_solidity=args.min_solidity,
+                use_green_channel=args.green_channel,
+                bilateral=args.bilateral,
+                morph_k=args.morph_k,
+                mahalanobis_k=args.mahalanobis_k,
+                sigma_floor=args.sigma_floor,
+                luminance_correct=args.luminance_correct,
+                diff_median_k=args.diff_median_k,
+                polarity=args.polarity,
+                roi_mask=(matcher.roi_mask_cam0
+                          if hasattr(matcher, "roi_mask_cam0") else None))
+            sample_features = []
+            for idx in sample_idx:
+                cap0.set(_cv2.CAP_PROP_POS_FRAMES, idx)
+                cap1.set(_cv2.CAP_PROP_POS_FRAMES, idx)
+                ok0, f0 = cap0.read()
+                ok1, f1 = cap1.read()
+                if not (ok0 and ok1) or f0 is None or f1 is None:
+                    continue
+                for cam, frame in ((0, f0), (1, f1)):
+                    r = tmp_det.detect(frame, cam=cam)
+                    if r.label_map is None:
+                        continue
+                    for blob_idx in range(1, int(r.label_map.max()) + 1):
+                        m = (r.label_map == blob_idx).astype(np.uint8)
+                        if int(m.sum()) < args.min_area:
+                            continue
+                        feats = texture_bank.features_in_blob(
+                            r.frame_gray, m)
+                        if np.any(feats > 0):
+                            sample_features.append(feats)
+            # Rewind to frame 0 for the main tracking pass
+            cap0.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+            cap1.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+            print(f"  Collected {len(sample_features)} bootstrap "
+                  f"samples from {len(sample_idx)} random frames")
+            try:
+                bootstrap_from_random_frames(
+                    texture_bank, sample_features,
+                    min_samples=max(20, args.min_area // 1000))
+                print(f"  Bootstrap complete: version_id="
+                      f"{texture_bank.version_id}, "
+                      f"n_samples={texture_bank.n_samples}")
+            except RuntimeError as e:
+                print(f"  WARNING: bootstrap failed ({e}). "
+                      f"Disabling texture bank.")
+                texture_bank = None
+            if texture_bank is not None and args.texture_bank_freeze:
+                texture_bank.update_every = 10**9
+
     # ── Tracker ──────────────────────────────────────────────────────────────
     print("\n── Tracking ────────────────────────────────────────────────────")
     tracker = SegmentTracker(
@@ -912,6 +1048,8 @@ def main() -> None:
         luminance_correct_clip_lo=args.luminance_correct_clip_lo,
         luminance_correct_clip_hi=args.luminance_correct_clip_hi,
         diff_median_k=args.diff_median_k,
+        texture_bank=texture_bank,
+        texture_min_score=args.texture_bank_min_score,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,
@@ -1059,6 +1197,25 @@ def main() -> None:
 
     # ── Export ───────────────────────────────────────────────────────────────
     print("\n── Exporting ───────────────────────────────────────────────────")
+
+    # Save trained texture bank, if used
+    if texture_bank is not None:
+        # Flush any pending online samples to the model
+        flushed = texture_bank.flush_pending()
+        bank_save_path = (
+            args.texture_bank_save
+            if args.texture_bank_save
+            else str(track_dir / "texture_bank.npz"))
+        try:
+            texture_bank.save(bank_save_path)
+            stats_str = texture_bank.stats()
+            print(f"  texture_bank.npz  (final version={stats_str['version_id']}, "
+                  f"n_samples={stats_str['n_samples']}, "
+                  f"buffered={stats_str['buffered']}, "
+                  f"flushed_on_save={flushed})")
+            print(f"    saved → {bank_save_path}")
+        except Exception as e:
+            print(f"  WARNING: failed to save texture bank: {e}")
 
     write_stats_csv(track_dir / "detection_stats.csv", stats)
     print("  detection_stats.csv")

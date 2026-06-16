@@ -941,6 +941,19 @@ class ForegroundDetector:
         # limitation), so values are clipped to [0, 255] first.
         # Default 0 (disabled).
         diff_median_k:     int   = 0,
+        # Optional rat texture bank for texture-based blob gating.
+        # When supplied AND is_ready, each candidate connected
+        # component is scored by Gabor-feature Mahalanobis distance
+        # against the bank's Gaussian model. Blobs with score below
+        # texture_min_score are rejected before being added to the
+        # result list. Confident detections (score >= texture_min_score)
+        # have their feature vectors added to the bank's online
+        # update buffer, which triggers a refit every update_every
+        # samples — refits that drift the mean above the bank's
+        # drift_threshold increment its version_id.
+        # See rpimocap.detection.rat_texture.RatTextureBank.
+        texture_bank:      "Optional['RatTextureBank']" = None,
+        texture_min_score: float = 0.3,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -1001,6 +1014,12 @@ class ForegroundDetector:
             if dmk < 3:
                 dmk = 3
         self._diff_median_k = dmk
+        # Optional texture bank for blob-level texture gating
+        self._texture_bank = texture_bank
+        self._texture_min_score = float(texture_min_score)
+        # Per-detect counters for diagnostics (reset each detect)
+        self._last_texture_kept    = 0
+        self._last_texture_dropped = 0
         self._kernel           = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_k, morph_k))
         self._blur_k = blur_k | 1
@@ -1112,6 +1131,10 @@ class ForegroundDetector:
         -------
         ForegroundResult
         """
+        # Reset per-frame texture diagnostics
+        self._last_texture_kept    = 0
+        self._last_texture_dropped = 0
+
         # ── Channel extraction (same for frame and background) ───────────
         gray   = self._to_enhanced_gray(frame).astype(np.float32)
         bg_raw = self.bg.bg0 if cam == 0 else self.bg.bg1
@@ -1380,6 +1403,21 @@ class ForegroundDetector:
                         aspect = long / short
                         if aspect > self.max_aspect_ratio:
                             continue
+            # Texture-bank gate. Each blob is scored against the
+            # bank's Gaussian model on its Gabor features. Blobs
+            # whose texture is "unknown" (distant in Mahalanobis
+            # space) are rejected; confident blobs feed the bank's
+            # online refinement.
+            if self._texture_bank is not None and self._texture_bank.is_ready:
+                blob_mask_i = (labels == i).astype(np.uint8)
+                feats = self._texture_bank.features_in_blob(
+                    gray.astype(np.uint8), blob_mask_i)
+                score = self._texture_bank.score(feats)
+                if score < self._texture_min_score:
+                    self._last_texture_dropped += 1
+                    continue
+                self._last_texture_kept += 1
+                self._texture_bank.add_sample(feats)
             blobs.append((stats[i], centroids[i]))
 
         return ForegroundResult(
