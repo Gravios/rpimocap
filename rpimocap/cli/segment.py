@@ -570,6 +570,40 @@ def main() -> None:
                     help="Dilation of Canny edges to thicken the "
                          "barrier (single-pixel edges may have gaps). "
                          "Default 1.")
+    er.add_argument("--edge-refine-intensity", action="store_true",
+                    default=False,
+                    help="After the texture-based refinement, expand "
+                         "the mask outward using the seed's own "
+                         "intensity statistics. The texture bank "
+                         "plateaus inside the bright fur interior — "
+                         "its score becomes noisy at the rat/bedding "
+                         "boundary because boundary pixels have mixed "
+                         "texture. Intensity (rat fur ≈ 180-230 vs "
+                         "bedding ≈ 80-110) is a much cleaner "
+                         "discriminator there. This step takes the "
+                         "texture-confirmed seed and grows it out to "
+                         "the natural intensity boundary. Geodesic "
+                         "constraint keeps disconnected bright "
+                         "objects (cable specular highlights, etc) "
+                         "out of the result.")
+    er.add_argument("--edge-refine-intensity-expand-px", type=int,
+                    default=100, metavar="PX",
+                    help="Max geodesic distance the intensity "
+                         "expansion can grow the seed. Default 100.")
+    er.add_argument("--edge-refine-intensity-quantile", type=float,
+                    default=0.25, metavar="Q",
+                    help="Quantile of seed-interior intensity used "
+                         "as the bright/dim threshold for expansion. "
+                         "Lower → more permissive (grows into dimmer "
+                         "pixels); higher → strict. Default 0.25 (25th "
+                         "percentile — the dim shoulder of the fur "
+                         "intensity distribution).")
+    er.add_argument("--edge-refine-intensity-morph-close-k", type=int,
+                    default=5, metavar="K",
+                    help="Morph-close kernel applied to the candidate "
+                         "intensity-mask (consolidates speckles "
+                         "before the CC-overlap step). 0 disables. "
+                         "Default 5.")
     # ── Patch-based bootstrap ─────────────────────────────────────
     pb = ap.add_argument_group("Patch-based bootstrap")
     pb.add_argument("--patch-bootstrap", action="store_true",
@@ -1420,6 +1454,10 @@ def main() -> None:
         edge_refine_canny_low=args.edge_refine_canny_low,
         edge_refine_canny_high=args.edge_refine_canny_high,
         edge_refine_canny_dilate=args.edge_refine_canny_dilate,
+        edge_refine_intensity=args.edge_refine_intensity,
+        edge_refine_intensity_expand_px=args.edge_refine_intensity_expand_px,
+        edge_refine_intensity_quantile=args.edge_refine_intensity_quantile,
+        edge_refine_intensity_morph_close_k=args.edge_refine_intensity_morph_close_k,
         artifact_mask_cam0=artifact_mask_cam0,
         artifact_mask_cam1=artifact_mask_cam1,
         use_rat_tracker_roi=args.use_rat_tracker_roi,

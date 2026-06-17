@@ -649,6 +649,10 @@ class SegmentTracker:
         edge_refine_canny_low:     int  = 30,
         edge_refine_canny_high:    int  = 90,
         edge_refine_canny_dilate:  int  = 1,
+        edge_refine_intensity:     bool = False,
+        edge_refine_intensity_expand_px: int = 100,
+        edge_refine_intensity_quantile:  float = 0.25,
+        edge_refine_intensity_morph_close_k: int = 5,
         artifact_mask_cam0: Optional[np.ndarray] = None,
         artifact_mask_cam1: Optional[np.ndarray] = None,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
@@ -780,6 +784,10 @@ class SegmentTracker:
             edge_refine_canny_low=edge_refine_canny_low,
             edge_refine_canny_high=edge_refine_canny_high,
             edge_refine_canny_dilate=edge_refine_canny_dilate,
+            edge_refine_intensity=edge_refine_intensity,
+            edge_refine_intensity_expand_px=edge_refine_intensity_expand_px,
+            edge_refine_intensity_quantile=edge_refine_intensity_quantile,
+            edge_refine_intensity_morph_close_k=edge_refine_intensity_morph_close_k,
             artifact_mask=artifact_mask_cam0,
             polarity=polarity)
         # Set cam1 artifact mask via setter (detector accepts only

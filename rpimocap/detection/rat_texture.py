@@ -719,6 +719,99 @@ class RatTextureBank:
 # ────────────────────────────────────────────────────────────────────
 
 
+def expand_mask_by_intensity(
+        gray:               np.ndarray,
+        seed_mask:          np.ndarray,
+        max_expand_px:      int = 100,
+        intensity_quantile: float = 0.25,
+        roi_mask:           Optional[np.ndarray] = None,
+        morph_close_k:      int = 5,
+        ) -> np.ndarray:
+    """Grow a high-confidence seed mask outward using intensity
+    thresholding derived from the seed's own interior.
+
+    Used as the FINAL step in the detection pipeline after the
+    texture bank has confirmed a blob is the rat. The texture bank
+    is trained on the rat's bright fur interior — its score is
+    weak at the rat's edges where fur intensity transitions into
+    bedding, so texture-based refinement plateaus inside the body
+    and undershoots the visible boundary. This function takes that
+    texture-confirmed core and expands it to the actual rat/bedding
+    intensity interface.
+
+    Algorithm
+    ---------
+    1. Compute an intensity threshold from the seed's own pixels:
+       the Q'th quantile (default 0.25 = 25th percentile, which is
+       the dim shoulder of the fur intensity distribution).
+    2. Define the search region as the seed dilated by max_expand_px.
+    3. Candidate pixels: gray >= threshold AND inside search region
+       (and inside roi_mask if provided).
+    4. Take the connected component(s) that overlap the seed — this
+       grows the seed outward to fill the bright connected region
+       without grabbing distant unrelated bright objects.
+
+    Parameters
+    ----------
+    gray               : (H, W) uint8 grayscale frame
+    seed_mask          : (H, W) uint8 — the texture-confirmed rat seed
+    max_expand_px      : maximum geodesic distance to grow outward
+    intensity_quantile : quantile of seed-interior intensity to use as
+                        the bright/dim threshold. Lower → more
+                        permissive (grows further into dim regions);
+                        higher → strict (only grows into similarly
+                        bright pixels). Default 0.25.
+    roi_mask           : optional arena ROI to gate the expansion
+    morph_close_k      : kernel for morph-close on the candidate set
+                        (consolidates speckles). 0 disables.
+
+    Returns
+    -------
+    (H, W) uint8 — the expanded mask, always ⊇ seed_mask.
+    """
+    if int((seed_mask > 0).sum()) == 0:
+        return seed_mask.copy()
+
+    # Threshold derived from seed interior
+    seed_pixels = gray[seed_mask > 0]
+    thr = float(np.quantile(seed_pixels, intensity_quantile))
+
+    # Search region = seed dilated by max_expand_px
+    if max_expand_px > 0:
+        kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * max_expand_px + 1, 2 * max_expand_px + 1))
+        search_roi = cv2.dilate(seed_mask, kern)
+    else:
+        search_roi = seed_mask.copy()
+
+    candidates = ((gray >= thr) & (search_roi > 0)).astype(np.uint8) * 255
+    if roi_mask is not None:
+        candidates = cv2.bitwise_and(candidates, roi_mask)
+    # Always include the seed (some seed pixels may be slightly
+    # below the quantile threshold)
+    candidates = cv2.bitwise_or(candidates,
+                                  (seed_mask > 0).astype(np.uint8) * 255)
+
+    if morph_close_k > 0:
+        ck = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (morph_close_k, morph_close_k))
+        candidates = cv2.morphologyEx(candidates,
+                                        cv2.MORPH_CLOSE, ck)
+
+    # Keep only CCs that touch the seed — drops disconnected bright
+    # regions far from the rat (e.g. cable specular highlights)
+    n_cc, cc_labels = cv2.connectedComponents(candidates)
+    if n_cc < 2:
+        return seed_mask.copy()
+    seed_labels = set(int(l) for l in cc_labels[seed_mask > 0].tolist()
+                        if l > 0)
+    if not seed_labels:
+        return seed_mask.copy()
+    expanded = np.isin(cc_labels, list(seed_labels)).astype(np.uint8) * 255
+    return expanded
+
+
 def bootstrap_from_random_frames(
         bank:           RatTextureBank,
         sample_features: list[np.ndarray],
@@ -796,6 +889,8 @@ def find_rat_seed_by_intensity(
         return None
     largest = int(sizes.argmax()) + 1
     return (labels == largest).astype(np.uint8) * 255
+
+
 
 
 def build_camera_artifact_mask(

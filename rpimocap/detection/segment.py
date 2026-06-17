@@ -1134,6 +1134,17 @@ class ForegroundDetector:
         edge_refine_canny_low:     int  = 30,
         edge_refine_canny_high:    int  = 90,
         edge_refine_canny_dilate:  int  = 1,
+        # Final intensity-based expansion. After the texture bank
+        # has confirmed a blob is the rat, grow the mask outward
+        # using intensity thresholding derived from the seed's own
+        # pixels until the natural rat/bedding intensity boundary
+        # is reached. The texture bank trained on bright fur
+        # interior plateaus before the visible rat edge — this step
+        # finishes the job. See rat_texture.expand_mask_by_intensity.
+        edge_refine_intensity: bool = False,
+        edge_refine_intensity_expand_px: int = 100,
+        edge_refine_intensity_quantile:  float = 0.25,
+        edge_refine_intensity_morph_close_k: int = 5,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -1210,6 +1221,13 @@ class ForegroundDetector:
         self._edge_refine_canny_low     = int(edge_refine_canny_low)
         self._edge_refine_canny_high    = int(edge_refine_canny_high)
         self._edge_refine_canny_dilate  = int(max(0, edge_refine_canny_dilate))
+        self._edge_refine_intensity = bool(edge_refine_intensity)
+        self._edge_refine_intensity_expand_px = int(
+            max(0, edge_refine_intensity_expand_px))
+        self._edge_refine_intensity_quantile = float(
+            edge_refine_intensity_quantile)
+        self._edge_refine_intensity_morph_close_k = int(
+            max(0, edge_refine_intensity_morph_close_k))
         # Per-detect counters for diagnostics (reset each detect)
         self._last_texture_kept    = 0
         self._last_texture_dropped = 0
@@ -1683,6 +1701,23 @@ class ForegroundDetector:
                     canny_low=self._edge_refine_canny_low,
                     canny_high=self._edge_refine_canny_high,
                     canny_dilate=self._edge_refine_canny_dilate)
+                # Final intensity-based expansion. The texture bank
+                # plateaus inside the rat body (fur interior); this
+                # step grows the mask out to the actual rat/bedding
+                # intensity boundary using the seed's own intensity
+                # statistics. The geodesic constraint
+                # (CC-overlap-with-seed) keeps disconnected bright
+                # objects out of the result.
+                if (self._edge_refine_intensity
+                        and int((refined > 0).sum()) > 0):
+                    from rpimocap.detection.rat_texture import (
+                        expand_mask_by_intensity)
+                    refined = expand_mask_by_intensity(
+                        gray_u8, refined,
+                        max_expand_px=self._edge_refine_intensity_expand_px,
+                        intensity_quantile=self._edge_refine_intensity_quantile,
+                        roi_mask=self._roi_masks.get(cam),
+                        morph_close_k=self._edge_refine_intensity_morph_close_k)
                 ref_pixels = (refined > 0)
                 if not ref_pixels.any():
                     continue
