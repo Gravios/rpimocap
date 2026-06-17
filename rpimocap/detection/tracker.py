@@ -645,6 +645,12 @@ class SegmentTracker:
         edge_refine_expand_px: int = 30,
         edge_refine_score_threshold: float = 0.15,
         edge_refine_smooth_window: int = 7,
+        edge_refine_canny_barrier: bool = False,
+        edge_refine_canny_low:     int  = 30,
+        edge_refine_canny_high:    int  = 90,
+        edge_refine_canny_dilate:  int  = 1,
+        artifact_mask_cam0: Optional[np.ndarray] = None,
+        artifact_mask_cam1: Optional[np.ndarray] = None,
         # EdgeMotionRatTracker integration (ROI from KLT + Kalman hull).
         # When use_rat_tracker_roi=True, an EdgeMotionRatTracker
         # instance is maintained per session. Each frame, the tracker
@@ -770,7 +776,16 @@ class SegmentTracker:
             edge_refine_expand_px=edge_refine_expand_px,
             edge_refine_score_threshold=edge_refine_score_threshold,
             edge_refine_smooth_window=edge_refine_smooth_window,
+            edge_refine_canny_barrier=edge_refine_canny_barrier,
+            edge_refine_canny_low=edge_refine_canny_low,
+            edge_refine_canny_high=edge_refine_canny_high,
+            edge_refine_canny_dilate=edge_refine_canny_dilate,
+            artifact_mask=artifact_mask_cam0,
             polarity=polarity)
+        # Set cam1 artifact mask via setter (detector accepts only
+        # cam0's via constructor for back-compat with roi_mask)
+        if artifact_mask_cam1 is not None:
+            self._det.set_artifact_mask(1, artifact_mask_cam1)
         self._lbl  = GeometricLabeller(centroid_only=centroid_only)
 
         # Try SAM2 (used as mask refiner on top of optical flow)

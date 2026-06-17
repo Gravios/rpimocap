@@ -492,6 +492,84 @@ def main() -> None:
                          "Gabor responses before scoring. Brings "
                          "per-pixel features closer to blob-averaged "
                          "training distribution. Odd; default 7.")
+    er.add_argument("--edge-refine-canny-barrier", action="store_true",
+                    default=False,
+                    help="Use Canny intensity edges as hard barriers "
+                         "during refinement. Refined mask cannot "
+                         "include pixels at Canny-edge locations "
+                         "outside the original hull, forcing the "
+                         "boundary to snap to intensity "
+                         "discontinuities (texture edges of the rat).")
+    er.add_argument("--edge-refine-canny-low",  type=int, default=30,
+                    metavar="L",
+                    help="Canny low threshold for edge barrier. "
+                         "Default 30.")
+    er.add_argument("--edge-refine-canny-high", type=int, default=90,
+                    metavar="H",
+                    help="Canny high threshold for edge barrier. "
+                         "Default 90.")
+    er.add_argument("--edge-refine-canny-dilate", type=int, default=1,
+                    metavar="PX",
+                    help="Dilation of Canny edges to thicken the "
+                         "barrier (single-pixel edges may have gaps). "
+                         "Default 1.")
+    # ── Patch-based bootstrap ─────────────────────────────────────
+    pb = ap.add_argument_group("Patch-based bootstrap")
+    pb.add_argument("--patch-bootstrap", action="store_true",
+                    default=False,
+                    help="During bootstrap, sample many small uniform-"
+                         "texture patches inside each detected blob "
+                         "instead of computing one feature vector per "
+                         "blob. Patches with high intra-patch intensity "
+                         "std (boundary patches) are rejected, so the "
+                         "bank learns pure rat-fur statistics without "
+                         "contamination from the rat-bedding boundary.")
+    pb.add_argument("--patch-size",         type=int, default=32,
+                    metavar="PX",
+                    help="Patch size (square). Default 32.")
+    pb.add_argument("--patch-stride",       type=int, default=8,
+                    metavar="PX",
+                    help="Stride between candidate patch centers. "
+                         "Default 8.")
+    pb.add_argument("--patch-max-per-blob", type=int, default=20,
+                    metavar="N",
+                    help="Cap on patches per blob. Default 20.")
+    pb.add_argument("--patch-uniformity-max-std", type=float,
+                    default=15.0, metavar="S",
+                    help="Reject patches whose intra-patch intensity "
+                         "std exceeds this. Lower → stricter "
+                         "uniformity. Default 15.0.")
+    # ── Artifact masks ────────────────────────────────────────────
+    am = ap.add_argument_group("Per-camera artifact masks")
+    am.add_argument("--use-artifact-masks", action="store_true",
+                    default=False,
+                    help="Build per-camera artifact masks during "
+                         "bootstrap from Gabor decomposition + "
+                         "intensity histogram analysis of the sampled "
+                         "frames. Pixels that are consistently bright "
+                         "(>top-Nth percentile per frame) AND consistently "
+                         "non-rat texture get masked. Suppresses static "
+                         "bright artifacts (cable mount, plexiglass "
+                         "reflections, ambient bright spots) that bg-sub "
+                         "alone cannot reliably eliminate. Requires "
+                         "--use-texture-bank.")
+    am.add_argument("--artifact-intensity-percentile", type=float,
+                    default=95.0, metavar="P",
+                    help="Per-frame intensity percentile for the "
+                         "'bright' criterion. Default 95.0.")
+    am.add_argument("--artifact-texture-score-max", type=float,
+                    default=0.10, metavar="S",
+                    help="Per-pixel texture score ceiling for the "
+                         "'non-rat texture' criterion. Default 0.10.")
+    am.add_argument("--artifact-consistency-fraction", type=float,
+                    default=0.5, metavar="F",
+                    help="Fraction of bootstrap frames a pixel must "
+                         "meet both criteria in to be masked. "
+                         "Default 0.5.")
+    am.add_argument("--artifact-mask-dilate", type=int, default=5,
+                    metavar="PX",
+                    help="Dilation of the final artifact mask for "
+                         "robustness. Default 5.")
     # ── EdgeMotionRatTracker ROI ───────────────────────────────────
     rt = ap.add_argument_group("Rat tracker ROI (KLT + Kalman hull)")
     rt.add_argument("--use-rat-tracker-roi", action="store_true",
@@ -1017,6 +1095,9 @@ def main() -> None:
                 roi_mask=(matcher.roi_mask_cam0
                           if hasattr(matcher, "roi_mask_cam0") else None))
             sample_features = []
+            # If --use-artifact-masks, collect grays per camera for later
+            # mask construction (after bank is trained).
+            collected_gray = {0: [], 1: []}
             for idx in sample_idx:
                 cap0.set(_cv2.CAP_PROP_POS_FRAMES, idx)
                 cap1.set(_cv2.CAP_PROP_POS_FRAMES, idx)
@@ -1026,21 +1107,37 @@ def main() -> None:
                     continue
                 for cam, frame in ((0, f0), (1, f1)):
                     r = tmp_det.detect(frame, cam=cam)
+                    if args.use_artifact_masks and r.frame_gray is not None:
+                        collected_gray[cam].append(r.frame_gray.copy())
                     if r.label_map is None:
                         continue
                     for blob_idx in range(1, int(r.label_map.max()) + 1):
                         m = (r.label_map == blob_idx).astype(np.uint8)
                         if int(m.sum()) < args.min_area:
                             continue
-                        feats = texture_bank.features_in_blob(
-                            r.frame_gray, m)
-                        if np.any(feats > 0):
-                            sample_features.append(feats)
+                        if args.patch_bootstrap:
+                            # Sample uniform-texture patches inside the blob
+                            patch_feats = texture_bank.sample_uniform_patches(
+                                r.frame_gray, m,
+                                patch_size=args.patch_size,
+                                stride=args.patch_stride,
+                                max_patches=args.patch_max_per_blob,
+                                std_max=args.patch_uniformity_max_std,
+                                rng_seed=42 + idx + cam)
+                            sample_features.extend(patch_feats)
+                        else:
+                            feats = texture_bank.features_in_blob(
+                                r.frame_gray, m)
+                            if np.any(feats > 0):
+                                sample_features.append(feats)
             # Rewind to frame 0 for the main tracking pass
             cap0.set(_cv2.CAP_PROP_POS_FRAMES, 0)
             cap1.set(_cv2.CAP_PROP_POS_FRAMES, 0)
+            mode_str = ("uniform patches"
+                        if args.patch_bootstrap else "blob averages")
             print(f"  Collected {len(sample_features)} bootstrap "
-                  f"samples from {len(sample_idx)} random frames")
+                  f"samples ({mode_str}) from {len(sample_idx)} "
+                  f"random frames")
             try:
                 bootstrap_from_random_frames(
                     texture_bank, sample_features,
@@ -1054,6 +1151,51 @@ def main() -> None:
                 texture_bank = None
             if texture_bank is not None and args.texture_bank_freeze:
                 texture_bank.update_every = 10**9
+
+    # ── Artifact masks (optional, after bank is trained) ──────────
+    artifact_mask_cam0 = artifact_mask_cam1 = None
+    if (args.use_texture_bank
+            and args.use_artifact_masks
+            and texture_bank is not None
+            and texture_bank.is_ready):
+        from rpimocap.detection.rat_texture import build_camera_artifact_mask
+        print("\n── Building per-camera artifact masks "
+              "(Gabor + intensity histogram)")
+        roi0 = (matcher.roi_mask_cam0
+                if hasattr(matcher, "roi_mask_cam0") else None)
+        roi1 = (matcher.roi_mask_cam1
+                if hasattr(matcher, "roi_mask_cam1") else None)
+        for cam_idx, (grays, roi_for_cam, label) in enumerate(
+                [(collected_gray[0], roi0, "cam0"),
+                 (collected_gray[1], roi1, "cam1")]):
+            if not grays:
+                print(f"  {label}: no bootstrap grays collected; skipping")
+                continue
+            try:
+                m = build_camera_artifact_mask(
+                    bank=texture_bank,
+                    gray_frames=grays,
+                    roi_mask=roi_for_cam,
+                    intensity_percentile=args.artifact_intensity_percentile,
+                    texture_score_max=args.artifact_texture_score_max,
+                    consistency_fraction=args.artifact_consistency_fraction,
+                    dilate_px=args.artifact_mask_dilate,
+                    smooth_window=args.edge_refine_smooth_window)
+            except Exception as e:
+                print(f"  {label}: artifact mask build failed: {e}")
+                continue
+            if m is None:
+                print(f"  {label}: artifact mask is None; skipping")
+                continue
+            n_masked = int((m > 0).sum())
+            n_total  = m.size
+            print(f"  {label}: artifact mask covers "
+                  f"{n_masked} / {n_total} px "
+                  f"({100*n_masked/n_total:.2f}%)")
+            if cam_idx == 0:
+                artifact_mask_cam0 = m
+            else:
+                artifact_mask_cam1 = m
 
     # ── Tracker ──────────────────────────────────────────────────────────────
     print("\n── Tracking ────────────────────────────────────────────────────")
@@ -1102,6 +1244,12 @@ def main() -> None:
         edge_refine_expand_px=args.edge_refine_expand_px,
         edge_refine_score_threshold=args.edge_refine_score_threshold,
         edge_refine_smooth_window=args.edge_refine_smooth_window,
+        edge_refine_canny_barrier=args.edge_refine_canny_barrier,
+        edge_refine_canny_low=args.edge_refine_canny_low,
+        edge_refine_canny_high=args.edge_refine_canny_high,
+        edge_refine_canny_dilate=args.edge_refine_canny_dilate,
+        artifact_mask_cam0=artifact_mask_cam0,
+        artifact_mask_cam1=artifact_mask_cam1,
         use_rat_tracker_roi=args.use_rat_tracker_roi,
         rat_body_half_width_px=args.rat_body_half_width_px,
         rat_motion_min=args.rat_motion_min,
@@ -1268,6 +1416,21 @@ def main() -> None:
             print(f"    saved → {bank_save_path}")
         except Exception as e:
             print(f"  WARNING: failed to save texture bank: {e}")
+
+    # Save artifact masks (one PNG per camera) for visual inspection
+    for cam_idx, amask in [(0, artifact_mask_cam0),
+                            (1, artifact_mask_cam1)]:
+        if amask is None:
+            continue
+        out_path = track_dir / f"artifact_mask_cam{cam_idx}.png"
+        try:
+            import cv2 as _cv2_save
+            _cv2_save.imwrite(str(out_path), amask)
+            print(f"  artifact_mask_cam{cam_idx}.png  "
+                  f"({int((amask > 0).sum())} px masked)")
+        except Exception as e:
+            print(f"  WARNING: failed to save cam{cam_idx} "
+                  f"artifact mask: {e}")
 
     write_stats_csv(track_dir / "detection_stats.csv", stats)
     print("  detection_stats.csv")

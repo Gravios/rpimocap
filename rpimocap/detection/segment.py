@@ -983,6 +983,14 @@ class ForegroundDetector:
         bilateral_d:       int   = 9,
         bilateral_sigma:   float = 50.0,
         roi_mask:          Optional[np.ndarray] = None,
+        # Per-camera artifact mask (255 = artifact, gate OUT).
+        # Built from Gabor decomposition + intensity histogram
+        # analysis during bootstrap. Pixels flagged consistently
+        # across bootstrap frames as bright + non-rat texture get
+        # masked. Applied as a negative ROI in detect() right after
+        # the positive arena roi_mask. See
+        # rpimocap.detection.rat_texture.build_camera_artifact_mask.
+        artifact_mask:     Optional[np.ndarray] = None,
         wall_weight:       Optional[np.ndarray] = None,
         texture_suppress:  bool  = False,
         texture_lambdas:   tuple = (8, 12, 16),
@@ -1117,6 +1125,15 @@ class ForegroundDetector:
         # before scoring. Brings per-pixel features closer to the
         # blob-averaged training distribution. Odd; default 7.
         edge_refine_smooth_window: int = 7,
+        # When True, the edge refinement uses Canny intensity edges
+        # as hard barriers — refined mask cannot include pixels at
+        # Canny-edge locations outside the original hull. Forces
+        # boundaries to snap to actual intensity discontinuities,
+        # complementing the texture-score gate.
+        edge_refine_canny_barrier: bool = False,
+        edge_refine_canny_low:     int  = 30,
+        edge_refine_canny_high:    int  = 90,
+        edge_refine_canny_dilate:  int  = 1,
         polarity:          str   = "either",
     ):
         self.bg                = background
@@ -1189,6 +1206,10 @@ class ForegroundDetector:
         self._edge_refine_score_threshold = float(
             edge_refine_score_threshold)
         self._edge_refine_smooth_window = int(max(1, edge_refine_smooth_window))
+        self._edge_refine_canny_barrier = bool(edge_refine_canny_barrier)
+        self._edge_refine_canny_low     = int(edge_refine_canny_low)
+        self._edge_refine_canny_high    = int(edge_refine_canny_high)
+        self._edge_refine_canny_dilate  = int(max(0, edge_refine_canny_dilate))
         # Per-detect counters for diagnostics (reset each detect)
         self._last_texture_kept    = 0
         self._last_texture_dropped = 0
@@ -1198,6 +1219,7 @@ class ForegroundDetector:
         # Store as per-camera dict so one detector can serve both cams.
         # roi_mask (cam-0) is passed for backward compat.
         self._roi_masks:   dict = {0: roi_mask, 1: None}
+        self._artifact_masks: dict = {0: artifact_mask, 1: None}
         self._wall_weights: dict = {0: wall_weight, 1: None}
 
         # Gabor bedding-texture suppression.
@@ -1252,6 +1274,16 @@ class ForegroundDetector:
     def set_roi_mask(self, cam: int, mask: "Optional[np.ndarray]") -> None:
         """Set or replace the ROI mask for one camera (0 or 1)."""
         self._roi_masks[cam] = mask
+
+    def set_artifact_mask(self, cam: int,
+                          mask: "Optional[np.ndarray]") -> None:
+        """Set or replace the artifact mask for one camera (0 or 1).
+        Artifact pixels (where mask > 0) are gated OUT of the
+        foreground regardless of bg-sub diff. Used to suppress
+        persistent bright artifacts (cable mount, plexiglass
+        reflections, etc) identified via Gabor+histogram analysis
+        during bootstrap."""
+        self._artifact_masks[cam] = mask
 
     def set_wall_weight(self, cam: int,
                         weight: "Optional[np.ndarray]") -> None:
@@ -1522,6 +1554,13 @@ class ForegroundDetector:
         if _mask is not None:
             binary = cv2.bitwise_and(binary, _mask)
 
+        # Per-camera artifact mask: gates OUT persistent bright
+        # non-rat-texture pixels identified during bootstrap
+        # (Gabor decomposition + intensity histogram).
+        _amask = self._artifact_masks.get(cam)
+        if _amask is not None:
+            binary = cv2.bitwise_and(binary, cv2.bitwise_not(_amask))
+
         # Per-frame extra ROI mask supplied by the caller. Used by the
         # EdgeMotionRatTracker integration in SegmentTracker: the
         # tracker computes a Kalman-stabilized hull around the rat
@@ -1639,7 +1678,11 @@ class ForegroundDetector:
                     gray_u8, blob_mask,
                     expand_px=self._edge_refine_expand_px,
                     score_threshold=self._edge_refine_score_threshold,
-                    smooth_window=self._edge_refine_smooth_window)
+                    smooth_window=self._edge_refine_smooth_window,
+                    canny_barrier=self._edge_refine_canny_barrier,
+                    canny_low=self._edge_refine_canny_low,
+                    canny_high=self._edge_refine_canny_high,
+                    canny_dilate=self._edge_refine_canny_dilate)
                 ref_pixels = (refined > 0)
                 if not ref_pixels.any():
                     continue

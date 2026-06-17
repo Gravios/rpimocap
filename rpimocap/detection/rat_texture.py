@@ -234,6 +234,86 @@ class RatTextureBank:
             feats[i] = float(np.abs(resp[local_mask]).mean())
         return feats
 
+    def sample_uniform_patches(self,
+                                gray:         np.ndarray,
+                                mask:         np.ndarray,
+                                patch_size:   int = 32,
+                                stride:       int = 8,
+                                max_patches:  int = 20,
+                                std_max:      float = 15.0,
+                                rng_seed:     Optional[int] = None
+                                ) -> list[np.ndarray]:
+        """Sample small uniform-texture patches inside a blob mask.
+
+        The standard features_in_blob method averages features over
+        the whole blob, which includes boundary pixels where the
+        rat's texture transitions into the bedding. Those mixed
+        statistics contaminate the bank's model and shift the mean
+        toward a blend of rat-and-not-rat. This method instead
+        samples many small patches inside the mask and rejects
+        those whose intra-patch intensity standard deviation
+        exceeds std_max — those are boundary patches.
+
+        Returns a list of per-patch feature vectors (each D-dim).
+        Boundary patches and patches not fully inside the mask are
+        skipped.
+
+        Parameters
+        ----------
+        gray         : (H, W) grayscale frame
+        mask         : (H, W) blob mask (nonzero = inside)
+        patch_size   : size of each patch (square)
+        stride       : grid spacing between candidate patch centers
+        max_patches  : cap the number of patches per blob
+        std_max      : intensity-std threshold for rejecting boundary
+                       patches. Lower → stricter uniformity.
+        rng_seed     : seed for subsampling when there are more
+                       candidates than max_patches
+        """
+        if mask.shape != gray.shape:
+            return []
+        ys, xs = np.where(mask > 0)
+        if len(ys) == 0:
+            return []
+        half = patch_size // 2
+        y_min, y_max = int(ys.min()), int(ys.max())
+        x_min, x_max = int(xs.min()), int(xs.max())
+
+        # Enumerate candidate patches on a stride grid; keep only
+        # those fully inside the mask AND with low intra-patch std
+        candidates: list[tuple[int, int, np.ndarray]] = []
+        for cy in range(y_min + half, y_max - half + 1, stride):
+            for cx in range(x_min + half, x_max - half + 1, stride):
+                if mask[cy, cx] == 0:
+                    continue
+                y0, y1 = cy - half, cy + half
+                x0, x1 = cx - half, cx + half
+                if y0 < 0 or x0 < 0 or y1 > gray.shape[0] or x1 > gray.shape[1]:
+                    continue
+                patch_mask = mask[y0:y1, x0:x1]
+                if not patch_mask.all():
+                    continue   # patch crosses the mask boundary
+                patch = gray[y0:y1, x0:x1].astype(np.float32)
+                if float(patch.std()) > std_max:
+                    continue   # mixed texture → boundary patch
+                candidates.append((cy, cx, patch.astype(np.uint8)))
+
+        # Subsample if too many
+        if len(candidates) > max_patches:
+            rng = np.random.RandomState(rng_seed
+                                          if rng_seed is not None else 42)
+            idx = rng.choice(len(candidates), max_patches, replace=False)
+            candidates = [candidates[i] for i in sorted(idx.tolist())]
+
+        # Compute features per patch
+        feats: list[np.ndarray] = []
+        for _, _, patch in candidates:
+            patch_mask = np.ones_like(patch) * 255
+            f = self.features_in_blob(patch, patch_mask, pad=0)
+            if np.any(f > 0):
+                feats.append(f)
+        return feats
+
     # ----------------------------------------------------------------
     #  Scoring
     # ----------------------------------------------------------------
@@ -372,7 +452,11 @@ class RatTextureBank:
                           hull_mask:      np.ndarray,
                           expand_px:      int   = 30,
                           score_threshold: float = 0.15,
-                          smooth_window:  int   = 7
+                          smooth_window:  int   = 7,
+                          canny_barrier:  bool  = False,
+                          canny_low:      int   = 30,
+                          canny_high:     int   = 90,
+                          canny_dilate:   int   = 1
                           ) -> np.ndarray:
         """Grow an initial blob mask outward, including pixels
         whose local Gabor texture matches the bank, stopping where
@@ -468,6 +552,22 @@ class RatTextureBank:
         cy_idx, cx_idx = np.where(candidate_mask)
         refined[cy_idx[keep], cx_idx[keep]] = True
 
+        # Canny edge barrier: pixels on strong intensity edges are
+        # explicit boundary stops. The refined mask cannot include
+        # pixels at high-Canny-response locations OUTSIDE the
+        # original hull. The hull itself is exempt (we never reject
+        # seed pixels).
+        if canny_barrier:
+            crop_u8 = crop_gray.clip(0, 255).astype(np.uint8)
+            edges = cv2.Canny(crop_u8, canny_low, canny_high)
+            if canny_dilate > 0:
+                kern = cv2.getStructuringElement(
+                    cv2.MORPH_RECT,
+                    (2 * canny_dilate + 1, 2 * canny_dilate + 1))
+                edges = cv2.dilate(edges, kern)
+            barrier = (edges > 0) & ~crop_hull
+            refined[barrier] = False
+
         # Geodesic constraint: keep only CCs that touch the hull.
         # Disconnected islands of rat-texture noise far from the
         # rat are excluded.
@@ -556,3 +656,118 @@ def bootstrap_from_random_frames(
             f"or relaxing detection thresholds during bootstrap.")
     bank.bootstrap(sample_features)
     return bank
+
+
+def build_camera_artifact_mask(
+        bank:                 RatTextureBank,
+        gray_frames:          list[np.ndarray],
+        roi_mask:             Optional[np.ndarray] = None,
+        intensity_percentile: float = 95.0,
+        texture_score_max:    float = 0.10,
+        consistency_fraction: float = 0.5,
+        dilate_px:            int   = 5,
+        smooth_window:        int   = 7) -> Optional[np.ndarray]:
+    """Build a per-camera artifact mask from a stack of bootstrap
+    frames using Gabor decomposition + intensity histogram analysis.
+
+    A pixel is flagged as artifact in a given frame if BOTH:
+      (a) Its intensity is above that frame's intensity_percentile
+          (histogram analysis — identifies bright spots in context).
+      (b) Its local texture score against the bank is below
+          texture_score_max (Gabor decomposition — identifies pixels
+          whose texture signature doesn't match the rat).
+
+    Across the frame stack, a pixel is masked as a persistent
+    artifact if it satisfies both criteria in at least
+    consistency_fraction of frames. The rat moves, so its pixels
+    don't satisfy the criteria consistently. Cable mount hardware,
+    plexiglass reflections, ambient bright spots all stay at the
+    same pixel location frame-to-frame and DO satisfy the criteria
+    consistently.
+
+    Parameters
+    ----------
+    bank                 : a trained RatTextureBank (bank.is_ready)
+    gray_frames          : list of (H, W) uint8 grayscale frames
+                            (from the same camera)
+    roi_mask             : (H, W) uint8 — only consider pixels
+                           where this is > 0. If None, uses entire
+                           frame.
+    intensity_percentile : histogram threshold for "bright" per
+                           frame (default 95th percentile)
+    texture_score_max    : ceiling on texture score for non-rat
+                           pixels
+    consistency_fraction : pixel must satisfy both criteria in this
+                           fraction of frames to be masked
+    dilate_px            : final mask dilation for robustness
+    smooth_window        : box-filter window for per-pixel Gabor
+                           response smoothing
+
+    Returns
+    -------
+    (H, W) uint8 mask where 255 = artifact (gate OUT), 0 = OK.
+    Returns None if bank is not ready or no frames provided.
+    """
+    if not bank.is_ready or not gray_frames:
+        return None
+
+    H, W = gray_frames[0].shape
+    n_frames = len(gray_frames)
+    counter = np.zeros((H, W), dtype=np.int32)
+    smooth_k = int(max(1, smooth_window) | 1)
+
+    for frame in gray_frames:
+        if frame.shape != (H, W):
+            continue
+        # (a) Histogram-based intensity threshold for this frame
+        if roi_mask is not None:
+            sample_pixels = frame[roi_mask > 0]
+            if sample_pixels.size == 0:
+                continue
+            thr_intensity = float(np.percentile(
+                sample_pixels, intensity_percentile))
+        else:
+            thr_intensity = float(np.percentile(
+                frame, intensity_percentile))
+        bright_mask = (frame >= thr_intensity)
+        if roi_mask is not None:
+            bright_mask = bright_mask & (roi_mask > 0)
+        if not bright_mask.any():
+            continue
+
+        # (b) Compute per-pixel Gabor responses, score against bank
+        gray_f = frame.astype(np.float32)
+        responses = np.empty(
+            (bank.feature_dim, H, W), dtype=np.float32)
+        for i, kern in enumerate(bank._kernels):
+            r = np.abs(cv2.filter2D(gray_f, cv2.CV_32F, kern))
+            if smooth_k > 1:
+                r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
+            responses[i] = r
+
+        # Score only the bright pixels (the candidate artifact set)
+        cy, cx = np.where(bright_mask)
+        if len(cy) == 0:
+            continue
+        feats = responses[:, cy, cx].T   # (N, D)
+        diffs = feats - bank.mean[None, :]
+        d2 = np.einsum("ni,ij,nj->n",
+                        diffs, bank._inv_cov, diffs)
+        d2 = np.clip(d2, 0, 200)
+        scores = np.exp(-d2 / (2.0 * bank.feature_dim))
+        nonrat = scores < texture_score_max
+        # Increment counter at positions that are BOTH bright AND
+        # non-rat texture
+        flag_y = cy[nonrat]
+        flag_x = cx[nonrat]
+        counter[flag_y, flag_x] += 1
+
+    # Persistence threshold
+    consistency = counter.astype(np.float32) / n_frames
+    mask = (consistency >= consistency_fraction).astype(np.uint8) * 255
+    if dilate_px > 0:
+        kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * dilate_px + 1, 2 * dilate_px + 1))
+        mask = cv2.dilate(mask, kern)
+    return mask
