@@ -736,6 +736,68 @@ def bootstrap_from_random_frames(
     return bank
 
 
+def find_rat_seed_by_intensity(
+        gray:               np.ndarray,
+        roi_mask:           Optional[np.ndarray] = None,
+        intensity_percentile: float = 92.0,
+        min_area_px:        int   = 500,
+        morph_close_k:      int   = 5
+        ) -> Optional[np.ndarray]:
+    """Find the rat in a single frame via intensity thresholding,
+    bypassing the bg-sub model entirely.
+
+    The rat is white fur under IR illumination — it's the brightest
+    object in the arena by a wide margin. Thresholding the top
+    (100 - intensity_percentile)% of intensities within the arena
+    ROI, then taking the largest connected component, gives a much
+    more reliable rat seed during bootstrap than Mahalanobis-style
+    bg-subtraction (which depends on per-pixel std calibration and
+    can be defeated by noisy backgrounds).
+
+    Parameters
+    ----------
+    gray                 : (H, W) uint8 grayscale frame
+    roi_mask             : optional (H, W) uint8 mask of valid arena
+                           pixels (0 outside, >0 inside)
+    intensity_percentile : compute the threshold as the Nth percentile
+                           of intensities inside the ROI. Default 92
+                           means 'pixels brighter than ~92% of arena
+                           pixels'. Lower = more permissive.
+    min_area_px          : largest CC must be at least this many
+                           pixels to be accepted
+    morph_close_k        : kernel size for morphological close to
+                           consolidate the thresholded region. Set
+                           to 0 to disable.
+
+    Returns
+    -------
+    (H, W) uint8 binary mask (255 inside the rat seed, 0 elsewhere),
+    or None if no CC meets min_area_px.
+    """
+    if roi_mask is not None:
+        sample_pixels = gray[roi_mask > 0]
+        if sample_pixels.size == 0:
+            return None
+        thr = float(np.percentile(sample_pixels, intensity_percentile))
+    else:
+        thr = float(np.percentile(gray, intensity_percentile))
+    mask = (gray >= thr).astype(np.uint8) * 255
+    if roi_mask is not None:
+        mask = cv2.bitwise_and(mask, roi_mask)
+    if morph_close_k > 0:
+        kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (morph_close_k, morph_close_k))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    if n_cc < 2:
+        return None
+    sizes = stats[1:, cv2.CC_STAT_AREA]
+    if int(sizes.max()) < min_area_px:
+        return None
+    largest = int(sizes.argmax()) + 1
+    return (labels == largest).astype(np.uint8) * 255
+
+
 def build_camera_artifact_mask(
         bank:                 RatTextureBank,
         gray_frames:          list[np.ndarray],

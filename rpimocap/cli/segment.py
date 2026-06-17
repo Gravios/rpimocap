@@ -459,6 +459,50 @@ def main() -> None:
                          "which is direction-sensitive and known to "
                          "fail as the rat rotates. Only useful when "
                          "loading a legacy saved bank.")
+    # ── Bootstrap permissive thresholds ────────────────────────────
+    # The bootstrap temp-detector needs to FIND the rat in many
+    # frames so we can sample texture patches. Its goal is recall
+    # (find rat candidates somewhere) — false positives are tolerable
+    # since the largest-CC selection plus patch uniformity filter
+    # both reject non-rat blobs. So the bootstrap defaults are much
+    # more permissive than the main pass: lower threshold, lower
+    # min_area, smaller morph kernel.
+    tb.add_argument("--bootstrap-threshold", type=float, default=None,
+                    metavar="T",
+                    help="Bg-sub threshold for the bootstrap temp "
+                         "detector. Default: max(10, --threshold/3) "
+                         "— permissive so more frames yield rat "
+                         "candidates. Has no effect on the main pass.")
+    tb.add_argument("--bootstrap-min-area", type=int, default=None,
+                    metavar="PX2",
+                    help="Min blob area for bootstrap temp detector. "
+                         "Default: max(500, --min-area/5) — "
+                         "permissive. No effect on main pass.")
+    tb.add_argument("--bootstrap-mahalanobis-k", type=float,
+                    default=None, metavar="K",
+                    help="Mahalanobis k for bootstrap. Default: "
+                         "max(2.0, --mahalanobis-k/2). No effect on "
+                         "main pass.")
+    tb.add_argument("--bootstrap-morph-k", type=int, default=None,
+                    metavar="K",
+                    help="Morph kernel size for bootstrap. Default: "
+                         "max(5, --morph-k/2). No effect on main "
+                         "pass.")
+    tb.add_argument("--bootstrap-intensity-percentile", type=float,
+                    default=92.0, metavar="P",
+                    help="Per-frame intensity percentile for the "
+                         "PRIMARY bootstrap rat-finder. The rat is "
+                         "white fur under IR and is the brightest "
+                         "object in the arena; thresholding at the "
+                         "Nth percentile inside the ROI then taking "
+                         "the largest CC reliably finds it without "
+                         "depending on bg-sub calibration. The "
+                         "bg-sub path is used only as fallback. "
+                         "Default 92.")
+    tb.add_argument("--bootstrap-intensity-morph-k", type=int,
+                    default=5, metavar="K",
+                    help="Morph-close kernel for the intensity rat-"
+                         "finder (consolidates speckle). Default 5.")
     # ── Blob merging ───────────────────────────────────────────────
     mb = ap.add_argument_group("Blob merging (hull-based)")
     mb.add_argument("--merge-blob-distance", type=int, default=0,
@@ -548,10 +592,13 @@ def main() -> None:
                     metavar="N",
                     help="Cap on patches per blob. Default 20.")
     pb.add_argument("--patch-uniformity-max-std", type=float,
-                    default=15.0, metavar="S",
+                    default=30.0, metavar="S",
                     help="Reject patches whose intra-patch intensity "
                          "std exceeds this. Lower → stricter "
-                         "uniformity. Default 15.0.")
+                         "uniformity. Default 30.0 — the white-fur "
+                         "rat shows real local variation (fur grain, "
+                         "shading); strict thresholds reject "
+                         "everything.")
     # ── Artifact masks ────────────────────────────────────────────
     am = ap.add_argument_group("Per-camera artifact masks")
     am.add_argument("--use-artifact-masks", action="store_true",
@@ -1091,17 +1138,39 @@ def main() -> None:
             rng = np.random.RandomState(42)
             sample_idx = sorted(rng.choice(
                 n_total, size=n_boot, replace=False))
-            # Use a temporary detector (NO texture bank) to find blobs
+            # Use a temporary detector (NO texture bank) to find blobs.
+            # Override threshold / min_area / mahalanobis-k / morph-k
+            # with permissive bootstrap defaults — the temp detector
+            # needs RECALL (find rat candidates somewhere in most
+            # frames); the largest-CC selection plus patch uniformity
+            # filter handle the precision side.
+            boot_thr   = (float(args.bootstrap_threshold)
+                          if args.bootstrap_threshold is not None
+                          else max(10.0, args.threshold / 3.0))
+            boot_min   = (int(args.bootstrap_min_area)
+                          if args.bootstrap_min_area is not None
+                          else max(500, args.min_area // 5))
+            boot_k     = (float(args.bootstrap_mahalanobis_k)
+                          if args.bootstrap_mahalanobis_k is not None
+                          else max(2.0, args.mahalanobis_k / 2.0))
+            boot_morph = (int(args.bootstrap_morph_k)
+                          if args.bootstrap_morph_k is not None
+                          else max(5, args.morph_k // 2))
+            print(f"  Bootstrap temp-detector (permissive): "
+                  f"threshold={boot_thr:.1f} (main {args.threshold}), "
+                  f"min_area={boot_min} (main {args.min_area}), "
+                  f"mahalanobis_k={boot_k:.1f} (main {args.mahalanobis_k}), "
+                  f"morph_k={boot_morph} (main {args.morph_k})")
             tmp_det = ForegroundDetector(
                 background=bg,
-                threshold=args.threshold,
-                min_area_px=args.min_area,
+                threshold=boot_thr,
+                min_area_px=boot_min,
                 max_area_px=args.max_area,
                 min_solidity=args.min_solidity,
                 use_green_channel=args.green_channel,
                 bilateral=args.bilateral,
-                morph_k=args.morph_k,
-                mahalanobis_k=args.mahalanobis_k,
+                morph_k=boot_morph,
+                mahalanobis_k=boot_k,
                 sigma_floor=args.sigma_floor,
                 luminance_correct=args.luminance_correct,
                 diff_median_k=args.diff_median_k,
@@ -1109,9 +1178,25 @@ def main() -> None:
                 roi_mask=(matcher.roi_mask_cam0
                           if hasattr(matcher, "roi_mask_cam0") else None))
             sample_features = []
+            # Diagnostics for the bootstrap loop
+            boot_frames_with_blob = 0
+            boot_total_blobs      = 0
+            boot_largest_areas    = []
+            boot_patches_per_blob = []
+            boot_via_intensity    = 0
+            boot_via_bgsub        = 0
             # If --use-artifact-masks, collect grays per camera for later
             # mask construction (after bank is trained).
             collected_gray = {0: [], 1: []}
+            # Per-camera ROI masks for the intensity finder
+            roi_by_cam = {
+                0: (matcher.roi_mask_cam0
+                    if hasattr(matcher, "roi_mask_cam0") else None),
+                1: (matcher.roi_mask_cam1
+                    if hasattr(matcher, "roi_mask_cam1") else None),
+            }
+            from rpimocap.detection.rat_texture import (
+                find_rat_seed_by_intensity)
             for idx in sample_idx:
                 cap0.set(_cv2.CAP_PROP_POS_FRAMES, idx)
                 cap1.set(_cv2.CAP_PROP_POS_FRAMES, idx)
@@ -1120,31 +1205,54 @@ def main() -> None:
                 if not (ok0 and ok1) or f0 is None or f1 is None:
                     continue
                 for cam, frame in ((0, f0), (1, f1)):
+                    # Run the temp detector first (it does the bayer
+                    # demosaic, green-channel extraction, luminance
+                    # correction, etc) so we can reuse the same
+                    # frame_gray for both finders + artifact masks.
                     r = tmp_det.detect(frame, cam=cam)
                     if args.use_artifact_masks and r.frame_gray is not None:
                         collected_gray[cam].append(r.frame_gray.copy())
-                    if r.label_map is None:
+                    if r.frame_gray is None:
                         continue
-                    # Use ONLY the largest connected component as the
-                    # rat seed. The rat is a single large continuous
-                    # region in the bg-sub diff; cable fragments and
-                    # specular highlights produce smaller CCs that
-                    # would contaminate the bank's learned mean with
-                    # non-rat texture. Picking just the largest
-                    # ensures the texture bank trains on rat fur, not
-                    # on whatever else passed the bg-sub threshold.
-                    n_labels = int(r.label_map.max())
-                    if n_labels < 1:
-                        continue
-                    sizes = np.array(
-                        [int((r.label_map == i).sum())
-                         for i in range(1, n_labels + 1)],
-                        dtype=np.int64)
-                    largest_idx = int(np.argmax(sizes)) + 1
-                    largest_size = int(sizes[largest_idx - 1])
-                    if largest_size < args.min_area:
-                        continue
-                    m = (r.label_map == largest_idx).astype(np.uint8)
+                    gray_u8 = r.frame_gray.astype(np.uint8) \
+                        if r.frame_gray.dtype != np.uint8 \
+                        else r.frame_gray
+                    # ── PRIMARY: intensity-based rat seed ─────────
+                    # The rat is white fur under IR — the brightest
+                    # object in the arena. Top-percentile thresholding
+                    # inside the arena ROI finds it reliably without
+                    # depending on bg-sub model calibration.
+                    m = find_rat_seed_by_intensity(
+                        gray_u8,
+                        roi_mask=roi_by_cam.get(cam),
+                        intensity_percentile=args.bootstrap_intensity_percentile,
+                        min_area_px=boot_min,
+                        morph_close_k=args.bootstrap_intensity_morph_k)
+                    if m is not None:
+                        boot_via_intensity += 1
+                    else:
+                        # ── FALLBACK: bg-sub largest CC ─────────
+                        # Used only when the intensity finder fails
+                        # (e.g. very dim frame). Less reliable but
+                        # better than skipping the frame entirely.
+                        if r.label_map is None:
+                            continue
+                        n_labels = int(r.label_map.max())
+                        if n_labels < 1:
+                            continue
+                        sizes = np.array(
+                            [int((r.label_map == i).sum())
+                             for i in range(1, n_labels + 1)],
+                            dtype=np.int64)
+                        largest_idx = int(np.argmax(sizes)) + 1
+                        largest_size = int(sizes[largest_idx - 1])
+                        boot_total_blobs += n_labels
+                        if largest_size < boot_min:
+                            continue
+                        m = (r.label_map == largest_idx).astype(np.uint8)
+                        boot_via_bgsub += 1
+                    boot_frames_with_blob += 1
+                    boot_largest_areas.append(int((m > 0).sum()))
                     if args.patch_bootstrap:
                         # Sample uniform-texture patches inside the blob
                         patch_feats = texture_bank.sample_uniform_patches(
@@ -1155,23 +1263,57 @@ def main() -> None:
                             std_max=args.patch_uniformity_max_std,
                             rng_seed=42 + idx + cam)
                         sample_features.extend(patch_feats)
+                        boot_patches_per_blob.append(len(patch_feats))
                     else:
                         feats = texture_bank.features_in_blob(
                             r.frame_gray, m)
                         if np.any(feats > 0):
                             sample_features.append(feats)
+                            boot_patches_per_blob.append(1)
+                        else:
+                            boot_patches_per_blob.append(0)
             # Rewind to frame 0 for the main tracking pass
             cap0.set(_cv2.CAP_PROP_POS_FRAMES, 0)
             cap1.set(_cv2.CAP_PROP_POS_FRAMES, 0)
             mode_str = ("uniform patches"
                         if args.patch_bootstrap else "blob averages")
+            # Diagnostics on what the bootstrap loop found / rejected
+            n_passes = len(sample_idx) * 2  # cam0 + cam1
+            print(f"  Bootstrap diagnostics:")
+            print(f"    detector passes        : {n_passes}")
+            print(f"    rat seed found in pass : "
+                  f"{boot_frames_with_blob}/{n_passes} "
+                  f"({100*boot_frames_with_blob/max(1, n_passes):.1f}%) "
+                  f"[intensity={boot_via_intensity}, "
+                  f"bg-sub fallback={boot_via_bgsub}]")
+            if boot_largest_areas:
+                arr = np.array(boot_largest_areas)
+                print(f"    rat seed area px²      : "
+                      f"min={int(arr.min())}, median={int(np.median(arr))}, "
+                      f"max={int(arr.max())}, n={len(arr)}")
+            if args.patch_bootstrap and boot_patches_per_blob:
+                ppb = np.array(boot_patches_per_blob)
+                rejected = int((ppb == 0).sum())
+                print(f"    patches/blob (n={len(ppb)})    : "
+                      f"min={int(ppb.min())}, median={int(np.median(ppb))}, "
+                      f"max={int(ppb.max())}, mean={ppb.mean():.1f}")
+                if rejected > 0:
+                    print(f"    blobs yielding 0 patches: "
+                          f"{rejected}/{len(ppb)} (uniformity gate "
+                          f"likely too strict — try "
+                          f"--patch-uniformity-max-std larger, or "
+                          f"--patch-size smaller)")
             print(f"  Collected {len(sample_features)} bootstrap "
                   f"samples ({mode_str}) from {len(sample_idx)} "
                   f"random frames")
+            # Minimum samples for a stable D-dim Gaussian. With rot-inv
+            # mode (D=9 for default 3 scales) we need at least D+1=10
+            # samples; require 15 to have some margin.
+            min_required = max(15, texture_bank.feature_dim + 5)
             try:
                 bootstrap_from_random_frames(
                     texture_bank, sample_features,
-                    min_samples=max(20, args.min_area // 1000))
+                    min_samples=min_required)
                 print(f"  Bootstrap complete: version_id="
                       f"{texture_bank.version_id}, "
                       f"n_samples={texture_bank.n_samples}")
