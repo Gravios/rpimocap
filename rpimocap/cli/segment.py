@@ -1712,12 +1712,9 @@ def main() -> None:
     # marks the bottleneck (e.g., a sudden drop from "after_aspect"
     # to "after_texture_bank" means the texture-bank gate is the
     # culprit; tune --texture-bank-min-score).
-    try:
-        det = matcher._det  # type: ignore[attr-defined]
-        if hasattr(det, "format_pipeline_stats"):
-            print("\n" + det.format_pipeline_stats())
-    except Exception:
-        pass
+    det = getattr(tracker, "_det", None)
+    if det is not None and hasattr(det, "format_pipeline_stats"):
+        print("\n" + det.format_pipeline_stats())
 
     # Pipeline diagnostics — which refinement steps actually fired
     # and how often. Helps tune flag combinations: low gabor_refine
