@@ -76,9 +76,18 @@ class TestGaborKernelBank:
 class TestFeatureExtraction:
 
     def test_feature_dim_matches_config(self):
-        b = RatTextureBank(orientations=(0.0, np.pi/2),
-                            scales=(7, 11, 17))
-        assert b.feature_dim == 2 * 3
+        # Legacy mode: feature_dim = n_orient × n_scales
+        b_legacy = RatTextureBank(orientations=(0.0, np.pi/2),
+                                    scales=(7, 11, 17),
+                                    rotation_invariant=False)
+        assert b_legacy.feature_dim == 2 * 3
+        # Rotation-invariant (default): feature_dim = 3 × n_scales,
+        # since for each scale we pool orientations into (max, mean,
+        # std), which is 3 features regardless of n_orient
+        b_rotinv = RatTextureBank(orientations=(0.0, np.pi/2),
+                                    scales=(7, 11, 17),
+                                    rotation_invariant=True)
+        assert b_rotinv.feature_dim == 3 * 3
 
     def test_features_shape(self):
         b = RatTextureBank()

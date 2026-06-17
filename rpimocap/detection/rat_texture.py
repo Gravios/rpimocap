@@ -150,10 +150,23 @@ class RatTextureBank:
                  update_every:  int   = 100,
                  drift_threshold: float = 0.05,
                  reg_eps:       float = 1e-3,
-                 max_history_samples: int = 10000):
+                 max_history_samples: int = 10000,
+                 rotation_invariant: bool = True):
         self.orientations  = tuple(float(o) for o in orientations)
         self.scales        = tuple(int(s) for s in scales)
-        self.feature_dim   = len(self.orientations) * len(self.scales)
+        # Rotation-invariant features pool over orientation per pixel:
+        # for each scale we return 3 features (max, mean, std across
+        # orientations), spatially averaged. That gives 3 × n_scales
+        # features that don't depend on the rat's body angle. The
+        # legacy path keeps one feature per (orientation, scale) =
+        # n_orient × n_scales features and is locked to a specific
+        # pose. Default ON since the legacy mode is known to fail
+        # when the rat rotates.
+        self.rotation_invariant = bool(rotation_invariant)
+        if self.rotation_invariant:
+            self.feature_dim = 3 * len(self.scales)
+        else:
+            self.feature_dim = len(self.orientations) * len(self.scales)
         self._kernels      = build_gabor_kernels(
                                 self.orientations, self.scales)
 
@@ -227,11 +240,49 @@ class RatTextureBank:
         if not local_mask.any():
             return np.zeros(self.feature_dim, dtype=np.float32)
 
+        if self.rotation_invariant:
+            return self._compute_features_rotinv(crop, local_mask)
+
         feats = np.empty(self.feature_dim, dtype=np.float32)
         for i, kern in enumerate(self._kernels):
             resp = cv2.filter2D(crop, cv2.CV_32F, kern)
             # |response| inside the blob
             feats[i] = float(np.abs(resp[local_mask]).mean())
+        return feats
+
+    def _compute_features_rotinv(self,
+                                  crop:       np.ndarray,
+                                  local_mask: np.ndarray
+                                  ) -> np.ndarray:
+        """Rotation-invariant Gabor features.
+
+        For each scale, compute per-pixel |Gabor response| across all
+        orientations and pool with three statistics (max, mean, std).
+        Then spatially average over the mask. The result has 3 ×
+        n_scales components and is invariant to the texture's
+        global orientation.
+
+        Returns
+        -------
+        (3 * n_scales,) float32 feature vector
+        """
+        n_orient = len(self.orientations)
+        n_scales = len(self.scales)
+        feats = np.empty(3 * n_scales, dtype=np.float32)
+        # For each scale, stack the n_orient responses, then pool
+        for s_idx in range(n_scales):
+            responses_o = []
+            for o_idx in range(n_orient):
+                kern = self._kernels[s_idx * n_orient + o_idx]
+                r = np.abs(cv2.filter2D(crop, cv2.CV_32F, kern))
+                responses_o.append(r)
+            R = np.stack(responses_o, axis=0)        # (n_orient, H, W)
+            R_max  = R.max(axis=0)                    # (H, W)
+            R_mean = R.mean(axis=0)
+            R_std  = R.std(axis=0)
+            feats[s_idx * 3 + 0] = float(R_max[local_mask].mean())
+            feats[s_idx * 3 + 1] = float(R_mean[local_mask].mean())
+            feats[s_idx * 3 + 2] = float(R_std[local_mask].mean())
         return feats
 
     def sample_uniform_patches(self,
@@ -520,17 +571,34 @@ class RatTextureBank:
         crop_roi  = (roi[y0:y1, x0:x1] > 0)
         ch, cw = crop_gray.shape
 
-        # Compute Gabor responses over the whole crop — one filter2D
-        # per kernel. Box-filter each response with smooth_window to
-        # bring per-pixel features closer to blob-averaged statistics.
+        # Compute per-pixel feature stack — directional Gabor in
+        # legacy mode, rotation-invariant per-pixel pooling otherwise.
         smooth_k = int(max(1, smooth_window) | 1)   # odd
-        responses = np.empty(
-            (self.feature_dim, ch, cw), dtype=np.float32)
-        for i, kern_ in enumerate(self._kernels):
-            r = np.abs(cv2.filter2D(crop_gray, cv2.CV_32F, kern_))
-            if smooth_k > 1:
-                r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
-            responses[i] = r
+        n_orient = len(self.orientations)
+        n_scales = len(self.scales)
+        if self.rotation_invariant:
+            responses = np.empty(
+                (3 * n_scales, ch, cw), dtype=np.float32)
+            for s_idx in range(n_scales):
+                resp_o = np.empty((n_orient, ch, cw), dtype=np.float32)
+                for o_idx in range(n_orient):
+                    kern_ = self._kernels[s_idx * n_orient + o_idx]
+                    r = np.abs(cv2.filter2D(crop_gray, cv2.CV_32F, kern_))
+                    if smooth_k > 1:
+                        r = cv2.boxFilter(r, cv2.CV_32F,
+                                          (smooth_k, smooth_k))
+                    resp_o[o_idx] = r
+                responses[s_idx * 3 + 0] = resp_o.max(axis=0)
+                responses[s_idx * 3 + 1] = resp_o.mean(axis=0)
+                responses[s_idx * 3 + 2] = resp_o.std(axis=0)
+        else:
+            responses = np.empty(
+                (self.feature_dim, ch, cw), dtype=np.float32)
+            for i, kern_ in enumerate(self._kernels):
+                r = np.abs(cv2.filter2D(crop_gray, cv2.CV_32F, kern_))
+                if smooth_k > 1:
+                    r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
+                responses[i] = r
 
         # Score every pixel in the ROI band (between hull and dilated)
         candidate_mask = crop_roi & ~crop_hull
@@ -612,14 +680,23 @@ class RatTextureBank:
             update_every=np.array([self.update_every], dtype=np.int64),
             drift_threshold=np.array([self.drift_threshold],
                                        dtype=np.float64),
+            rotation_invariant=np.array([int(self.rotation_invariant)],
+                                          dtype=np.int64),
         )
 
     @classmethod
     def load(cls, path: str | Path) -> "RatTextureBank":
         """Load a trained bank. The Gabor kernels are rebuilt from
         stored orientations + scales — they're not stored to keep
-        the file small and to allow OpenCV-version-independence."""
+        the file small and to allow OpenCV-version-independence.
+
+        The rotation_invariant flag is restored from the file when
+        present. Older saved banks (no flag) load as legacy
+        (rotation_invariant=False) so backward-compat is preserved.
+        """
         data = np.load(str(path))
+        rot_inv = bool(int(data["rotation_invariant"][0])) \
+            if "rotation_invariant" in data.files else False
         bank = cls(
             orientations=tuple(float(o) for o in data["orientations"]),
             scales=tuple(int(s) for s in data["scales"]),
@@ -627,6 +704,7 @@ class RatTextureBank:
                 if "update_every" in data.files else 100,
             drift_threshold=float(data["drift_threshold"][0])
                 if "drift_threshold" in data.files else 0.05,
+            rotation_invariant=rot_inv,
         )
         bank.version_id = int(data["version_id"][0])
         bank.n_samples  = int(data["n_samples"][0])
@@ -737,13 +815,31 @@ def build_camera_artifact_mask(
 
         # (b) Compute per-pixel Gabor responses, score against bank
         gray_f = frame.astype(np.float32)
-        responses = np.empty(
-            (bank.feature_dim, H, W), dtype=np.float32)
-        for i, kern in enumerate(bank._kernels):
-            r = np.abs(cv2.filter2D(gray_f, cv2.CV_32F, kern))
-            if smooth_k > 1:
-                r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
-            responses[i] = r
+        n_orient = len(bank.orientations)
+        n_scales = len(bank.scales)
+        if bank.rotation_invariant:
+            responses = np.empty(
+                (3 * n_scales, H, W), dtype=np.float32)
+            for s_idx in range(n_scales):
+                resp_o = np.empty((n_orient, H, W), dtype=np.float32)
+                for o_idx in range(n_orient):
+                    kern = bank._kernels[s_idx * n_orient + o_idx]
+                    r = np.abs(cv2.filter2D(gray_f, cv2.CV_32F, kern))
+                    if smooth_k > 1:
+                        r = cv2.boxFilter(r, cv2.CV_32F,
+                                          (smooth_k, smooth_k))
+                    resp_o[o_idx] = r
+                responses[s_idx * 3 + 0] = resp_o.max(axis=0)
+                responses[s_idx * 3 + 1] = resp_o.mean(axis=0)
+                responses[s_idx * 3 + 2] = resp_o.std(axis=0)
+        else:
+            responses = np.empty(
+                (bank.feature_dim, H, W), dtype=np.float32)
+            for i, kern in enumerate(bank._kernels):
+                r = np.abs(cv2.filter2D(gray_f, cv2.CV_32F, kern))
+                if smooth_k > 1:
+                    r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
+                responses[i] = r
 
         # Score only the bright pixels (the candidate artifact set)
         cy, cx = np.where(bright_mask)

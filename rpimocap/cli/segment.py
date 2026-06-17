@@ -446,6 +446,19 @@ def main() -> None:
                     help="Relative-mean-change threshold for "
                          "incrementing version_id on refit. Default "
                          "0.05 (5%% change).")
+    tb.add_argument("--no-rotation-invariant-features",
+                    action="store_true", default=False,
+                    help="Disable rotation-invariant Gabor features. "
+                         "By default the bank uses 3 features per "
+                         "scale pooled across orientations (max, "
+                         "mean, std of |Gabor response|) so the "
+                         "learned texture model is invariant to "
+                         "which direction the rat is facing. With "
+                         "this flag the bank reverts to legacy mode "
+                         "(one feature per orientation × scale), "
+                         "which is direction-sensitive and known to "
+                         "fail as the rat rotates. Only useful when "
+                         "loading a legacy saved bank.")
     # ── Blob merging ───────────────────────────────────────────────
     mb = ap.add_argument_group("Blob merging (hull-based)")
     mb.add_argument("--merge-blob-distance", type=int, default=0,
@@ -1068,7 +1081,8 @@ def main() -> None:
 
             texture_bank = RatTextureBank(
                 update_every=args.texture_bank_update_every,
-                drift_threshold=args.texture_bank_drift_threshold)
+                drift_threshold=args.texture_bank_drift_threshold,
+                rotation_invariant=not args.no_rotation_invariant_features)
             # Sample random frame indices uniformly across the recording
             import cv2 as _cv2
             n_total = int(min(cap0.get(_cv2.CAP_PROP_FRAME_COUNT),
@@ -1111,25 +1125,41 @@ def main() -> None:
                         collected_gray[cam].append(r.frame_gray.copy())
                     if r.label_map is None:
                         continue
-                    for blob_idx in range(1, int(r.label_map.max()) + 1):
-                        m = (r.label_map == blob_idx).astype(np.uint8)
-                        if int(m.sum()) < args.min_area:
-                            continue
-                        if args.patch_bootstrap:
-                            # Sample uniform-texture patches inside the blob
-                            patch_feats = texture_bank.sample_uniform_patches(
-                                r.frame_gray, m,
-                                patch_size=args.patch_size,
-                                stride=args.patch_stride,
-                                max_patches=args.patch_max_per_blob,
-                                std_max=args.patch_uniformity_max_std,
-                                rng_seed=42 + idx + cam)
-                            sample_features.extend(patch_feats)
-                        else:
-                            feats = texture_bank.features_in_blob(
-                                r.frame_gray, m)
-                            if np.any(feats > 0):
-                                sample_features.append(feats)
+                    # Use ONLY the largest connected component as the
+                    # rat seed. The rat is a single large continuous
+                    # region in the bg-sub diff; cable fragments and
+                    # specular highlights produce smaller CCs that
+                    # would contaminate the bank's learned mean with
+                    # non-rat texture. Picking just the largest
+                    # ensures the texture bank trains on rat fur, not
+                    # on whatever else passed the bg-sub threshold.
+                    n_labels = int(r.label_map.max())
+                    if n_labels < 1:
+                        continue
+                    sizes = np.array(
+                        [int((r.label_map == i).sum())
+                         for i in range(1, n_labels + 1)],
+                        dtype=np.int64)
+                    largest_idx = int(np.argmax(sizes)) + 1
+                    largest_size = int(sizes[largest_idx - 1])
+                    if largest_size < args.min_area:
+                        continue
+                    m = (r.label_map == largest_idx).astype(np.uint8)
+                    if args.patch_bootstrap:
+                        # Sample uniform-texture patches inside the blob
+                        patch_feats = texture_bank.sample_uniform_patches(
+                            r.frame_gray, m,
+                            patch_size=args.patch_size,
+                            stride=args.patch_stride,
+                            max_patches=args.patch_max_per_blob,
+                            std_max=args.patch_uniformity_max_std,
+                            rng_seed=42 + idx + cam)
+                        sample_features.extend(patch_feats)
+                    else:
+                        feats = texture_bank.features_in_blob(
+                            r.frame_gray, m)
+                        if np.any(feats > 0):
+                            sample_features.append(feats)
             # Rewind to frame 0 for the main tracking pass
             cap0.set(_cv2.CAP_PROP_POS_FRAMES, 0)
             cap1.set(_cv2.CAP_PROP_POS_FRAMES, 0)
