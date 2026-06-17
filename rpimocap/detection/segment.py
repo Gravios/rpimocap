@@ -1144,6 +1144,7 @@ class ForegroundDetector:
         edge_refine_intensity: bool = False,
         edge_refine_intensity_expand_px: int = 100,
         edge_refine_intensity_quantile:  float = 0.25,
+        edge_refine_intensity_floor_offset: float = 0.0,
         edge_refine_intensity_morph_close_k: int = 5,
         polarity:          str   = "either",
     ):
@@ -1226,6 +1227,8 @@ class ForegroundDetector:
             max(0, edge_refine_intensity_expand_px))
         self._edge_refine_intensity_quantile = float(
             edge_refine_intensity_quantile)
+        self._edge_refine_intensity_floor_offset = float(
+            edge_refine_intensity_floor_offset)
         self._edge_refine_intensity_morph_close_k = int(
             max(0, edge_refine_intensity_morph_close_k))
         # Per-detect counters for diagnostics (reset each detect)
@@ -1716,6 +1719,7 @@ class ForegroundDetector:
                         gray_u8, refined,
                         max_expand_px=self._edge_refine_intensity_expand_px,
                         intensity_quantile=self._edge_refine_intensity_quantile,
+                        intensity_floor_offset=self._edge_refine_intensity_floor_offset,
                         roi_mask=self._roi_masks.get(cam),
                         morph_close_k=self._edge_refine_intensity_morph_close_k)
                 ref_pixels = (refined > 0)

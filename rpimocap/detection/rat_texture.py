@@ -720,12 +720,13 @@ class RatTextureBank:
 
 
 def expand_mask_by_intensity(
-        gray:               np.ndarray,
-        seed_mask:          np.ndarray,
-        max_expand_px:      int = 100,
-        intensity_quantile: float = 0.25,
-        roi_mask:           Optional[np.ndarray] = None,
-        morph_close_k:      int = 5,
+        gray:                  np.ndarray,
+        seed_mask:             np.ndarray,
+        max_expand_px:         int = 100,
+        intensity_quantile:    float = 0.25,
+        intensity_floor_offset: float = 0.0,
+        roi_mask:              Optional[np.ndarray] = None,
+        morph_close_k:         int = 5,
         ) -> np.ndarray:
     """Grow a high-confidence seed mask outward using intensity
     thresholding derived from the seed's own interior.
@@ -761,6 +762,19 @@ def expand_mask_by_intensity(
                         permissive (grows further into dim regions);
                         higher → strict (only grows into similarly
                         bright pixels). Default 0.25.
+    intensity_floor_offset
+                       : intensity units to SUBTRACT from the
+                        quantile threshold to reach below the seed
+                        distribution. When the seed is sampled from
+                        bright fur interior (intensity 200-230), the
+                        25th percentile is still very bright (~210),
+                        which excludes the dimmer mid-fur and edge-
+                        fur pixels (160-200) that we need to grow
+                        into. An offset of 30-50 lets the threshold
+                        reach the rat-edge fur intensities without
+                        going so low it accepts bedding (~80-110).
+                        Default 0 (preserves prior behavior); the
+                        CLI sets a non-zero default.
     roi_mask           : optional arena ROI to gate the expansion
     morph_close_k      : kernel for morph-close on the candidate set
                         (consolidates speckles). 0 disables.
@@ -775,6 +789,11 @@ def expand_mask_by_intensity(
     # Threshold derived from seed interior
     seed_pixels = gray[seed_mask > 0]
     thr = float(np.quantile(seed_pixels, intensity_quantile))
+    # Step the threshold below the seed's quantile by floor_offset.
+    # When the seed is bright fur, the unmodified quantile is too
+    # close to the seed's mean intensity and excludes the dimmer
+    # rat-edge pixels we want to capture.
+    thr = max(0.0, thr - float(intensity_floor_offset))
 
     # Search region = seed dilated by max_expand_px
     if max_expand_px > 0:

@@ -598,6 +598,17 @@ def main() -> None:
                          "pixels); higher → strict. Default 0.25 (25th "
                          "percentile — the dim shoulder of the fur "
                          "intensity distribution).")
+    er.add_argument("--edge-refine-intensity-floor-offset",
+                    type=float, default=30.0, metavar="DI",
+                    help="Subtract this many intensity units from "
+                         "the seed quantile to set the effective "
+                         "threshold. Without it, the seed's own "
+                         "25th percentile (~210 for bright fur) "
+                         "excludes the dimmer rat-edge fur (160-200) "
+                         "we need to grow into. With offset 30, the "
+                         "threshold reaches ~180 — captures the full "
+                         "rat without dipping into bedding (~80-110). "
+                         "Default 30.")
     er.add_argument("--edge-refine-intensity-morph-close-k", type=int,
                     default=5, metavar="K",
                     help="Morph-close kernel applied to the candidate "
@@ -1457,6 +1468,7 @@ def main() -> None:
         edge_refine_intensity=args.edge_refine_intensity,
         edge_refine_intensity_expand_px=args.edge_refine_intensity_expand_px,
         edge_refine_intensity_quantile=args.edge_refine_intensity_quantile,
+        edge_refine_intensity_floor_offset=args.edge_refine_intensity_floor_offset,
         edge_refine_intensity_morph_close_k=args.edge_refine_intensity_morph_close_k,
         artifact_mask_cam0=artifact_mask_cam0,
         artifact_mask_cam1=artifact_mask_cam1,

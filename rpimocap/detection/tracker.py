@@ -652,6 +652,7 @@ class SegmentTracker:
         edge_refine_intensity:     bool = False,
         edge_refine_intensity_expand_px: int = 100,
         edge_refine_intensity_quantile:  float = 0.25,
+        edge_refine_intensity_floor_offset: float = 0.0,
         edge_refine_intensity_morph_close_k: int = 5,
         artifact_mask_cam0: Optional[np.ndarray] = None,
         artifact_mask_cam1: Optional[np.ndarray] = None,
@@ -787,6 +788,7 @@ class SegmentTracker:
             edge_refine_intensity=edge_refine_intensity,
             edge_refine_intensity_expand_px=edge_refine_intensity_expand_px,
             edge_refine_intensity_quantile=edge_refine_intensity_quantile,
+            edge_refine_intensity_floor_offset=edge_refine_intensity_floor_offset,
             edge_refine_intensity_morph_close_k=edge_refine_intensity_morph_close_k,
             artifact_mask=artifact_mask_cam0,
             polarity=polarity)
