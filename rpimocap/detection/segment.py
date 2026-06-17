@@ -1243,6 +1243,17 @@ class ForegroundDetector:
         self._artifact_masks: dict = {0: artifact_mask, 1: None}
         self._wall_weights: dict = {0: wall_weight, 1: None}
 
+        # ── Per-stage detection counters ──────────────────────────
+        # Track how many blobs survive each stage of detect(), per
+        # camera, across all frames. When detection fails to produce
+        # output, the summary tells us which stage rejected the rat
+        # (bg-sub, area/aspect filter, texture-bank gate, merge,
+        # edge refinement). Cleared by reset_pipeline_stats().
+        self._pipeline_stats: dict = {
+            0: self._fresh_stage_counts(),
+            1: self._fresh_stage_counts(),
+        }
+
         # Gabor bedding-texture suppression.
         # The per-pixel "how much bedding texture exists here in the
         # background" map is used (a) as a suppression weight in detect()
@@ -1342,6 +1353,70 @@ class ForegroundDetector:
         return gray.astype(np.uint8)
 
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _fresh_stage_counts() -> dict:
+        """Initial counter dict for one camera, tracking how many
+        frames had ≥1 surviving blob at each pipeline stage."""
+        return {
+            "frames":              0,  # total detect() calls for cam
+            "bg_sub_has_pixels":   0,  # bg-sub diff had ANY pixels
+            "after_morph_open":    0,  # ≥1 CC after morph open
+            "after_area_solidity": 0,  # ≥1 CC after area/solidity gate
+            "after_aspect":        0,  # ≥1 CC after aspect filter
+            "after_texture_bank":  0,  # ≥1 CC after texture-bank score
+            "after_merge":         0,  # ≥1 CC after hull merge
+            "after_edge_refine":   0,  # ≥1 CC after texture refinement
+            "after_intensity_exp": 0,  # ≥1 CC after intensity expansion
+            "final":               0,  # ≥1 blob in returned result
+            # Totals: per-stage cumulative blob count
+            "bg_sub_blobs_total":     0,
+            "after_area_blobs_total": 0,
+            "after_texture_blobs_total": 0,
+            "after_merge_blobs_total":   0,
+            "final_blobs_total":         0,
+        }
+
+    def reset_pipeline_stats(self) -> None:
+        """Clear per-stage detection counters."""
+        self._pipeline_stats = {
+            0: self._fresh_stage_counts(),
+            1: self._fresh_stage_counts(),
+        }
+
+    def get_pipeline_stats(self) -> dict:
+        """Return per-camera per-stage counter dict.
+        Useful for debugging which stage drops the rat in problem
+        frames."""
+        return self._pipeline_stats
+
+    def format_pipeline_stats(self) -> str:
+        """Render a human-readable summary of per-stage drop-off.
+        Each row shows the % of frames that had ≥1 surviving blob
+        at that stage. Stages where the % falls off a cliff between
+        rows are the bottlenecks killing detection."""
+        out = []
+        out.append("Detection pipeline drop-off (per camera):")
+        for cam in (0, 1):
+            s = self._pipeline_stats[cam]
+            n = s["frames"]
+            if n == 0:
+                continue
+            out.append(f"  Cam {cam}: {n} frames")
+            for stage in ("bg_sub_has_pixels",
+                          "after_morph_open",
+                          "after_area_solidity",
+                          "after_aspect",
+                          "after_texture_bank",
+                          "after_merge",
+                          "after_edge_refine",
+                          "after_intensity_exp",
+                          "final"):
+                v = s[stage]
+                pct = 100.0 * v / n
+                out.append(f"    {stage:<22s}: {v:>6d}/{n} "
+                           f"({pct:>5.1f}%)")
+        return "\n".join(out)
 
     def detect(self, frame: np.ndarray, cam: int = 0,
                 extra_roi_mask: "np.ndarray | None" = None) -> ForegroundResult:
@@ -1594,11 +1669,26 @@ class ForegroundDetector:
         if extra_roi_mask is not None:
             binary = cv2.bitwise_and(binary, extra_roi_mask)
 
+        # ── Pipeline stats: per-frame stage tracking ──────────────
+        _ps = self._pipeline_stats[cam]
+        _ps["frames"] += 1
+        if int(binary.sum()) > 0:
+            _ps["bg_sub_has_pixels"] += 1
+
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary, connectivity=8)
+        # n includes the background label; n - 1 = number of CCs
+        n_raw_blobs = max(0, n - 1)
+        _ps["bg_sub_blobs_total"] += n_raw_blobs
+        if n_raw_blobs > 0:
+            _ps["after_morph_open"] += 1
 
         blobs = []
         surviving_indices = []
+        # Stage-level survival counters for this frame
+        _n_after_area = 0
+        _n_after_aspect = 0
+        _n_after_texture = 0
         for i in range(1, n):
             area = stats[i, cv2.CC_STAT_AREA]
             if area < self.min_area_px:
@@ -1617,6 +1707,7 @@ class ForegroundDetector:
                     solidity  = area / (hull_area + 1e-6)
                     if solidity < self.min_solidity:
                         continue
+            _n_after_area += 1
             # Aspect-ratio filter: reject highly elongated thin blobs
             # such as the tether cable. The cable typically has an
             # aspect ratio of 10-30 (length:width), while the rat body
@@ -1636,6 +1727,7 @@ class ForegroundDetector:
                         aspect = long / short
                         if aspect > self.max_aspect_ratio:
                             continue
+            _n_after_aspect += 1
             # Texture-bank gate. Each blob is scored against the
             # bank's Gaussian model on its Gabor features. Blobs
             # whose texture is "unknown" (distant in Mahalanobis
@@ -1651,8 +1743,22 @@ class ForegroundDetector:
                     continue
                 self._last_texture_kept += 1
                 self._texture_bank.add_sample(feats)
+            _n_after_texture += 1
             blobs.append((stats[i], centroids[i]))
             surviving_indices.append(i)
+
+        # Stage survival flags for the frame
+        _ps["after_area_blobs_total"] += _n_after_area
+        if _n_after_area > 0:
+            _ps["after_area_solidity"] += 1
+        if _n_after_aspect > 0:
+            _ps["after_aspect"] += 1
+        _ps["after_texture_blobs_total"] += _n_after_texture
+        if _n_after_texture > 0:
+            _ps["after_texture_bank"] += 1
+        if len(blobs) > 0:
+            _ps["after_merge_blobs_total"] += len(blobs)
+            _ps["after_merge"] += 1
 
         # ── Blob merging by hull ────────────────────────────────────
         # Group surviving blobs whose centroids are within
@@ -1741,6 +1847,17 @@ class ForegroundDetector:
                     np.array([cx, cy], dtype=np.float64),
                 ))
             binary, labels, blobs = new_binary, new_labels, new_blobs
+            if len(blobs) > 0:
+                _ps["after_edge_refine"] += 1
+                # The edge-refine path runs intensity expansion when
+                # the flag is set; count it as a separate stage to
+                # show whether expansion shrinks vs grows the mask.
+                if self._edge_refine_intensity:
+                    _ps["after_intensity_exp"] += 1
+
+        if len(blobs) > 0:
+            _ps["final"] += 1
+            _ps["final_blobs_total"] += len(blobs)
 
         return ForegroundResult(
             mask=binary,
