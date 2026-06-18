@@ -918,7 +918,7 @@ def build_camera_artifact_mask(
         roi_mask:             Optional[np.ndarray] = None,
         intensity_percentile: float = 95.0,
         texture_score_max:    float = 0.10,
-        consistency_fraction: float = 0.5,
+        consistency_fraction: float = 0.85,
         dilate_px:            int   = 5,
         smooth_window:        int   = 7) -> Optional[np.ndarray]:
     """Build a per-camera artifact mask from a stack of bootstrap

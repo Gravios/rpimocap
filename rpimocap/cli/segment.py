@@ -667,10 +667,19 @@ def main() -> None:
                     help="Per-pixel texture score ceiling for the "
                          "'non-rat texture' criterion. Default 0.10.")
     am.add_argument("--artifact-consistency-fraction", type=float,
-                    default=0.5, metavar="F",
+                    default=0.85, metavar="F",
                     help="Fraction of bootstrap frames a pixel must "
-                         "meet both criteria in to be masked. "
-                         "Default 0.5.")
+                         "meet BOTH the brightness AND the non-rat-"
+                         "texture criteria in to be masked as an "
+                         "artifact. Default 0.85 — true static "
+                         "artifacts (door reflection, frame rails) "
+                         "are present in essentially every frame, "
+                         "while pixels the rat happens to visit "
+                         "during bootstrap are bright in maybe 30-40% "
+                         "of frames. Setting this too low (e.g. 0.5) "
+                         "means rat-visited regions get masked, "
+                         "and the rat can't be detected when it "
+                         "returns there.")
     am.add_argument("--artifact-mask-dilate", type=int, default=5,
                     metavar="PX",
                     help="Dilation of the final artifact mask for "
