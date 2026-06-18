@@ -108,3 +108,39 @@ class TestPipelineStatsTracksStages:
         assert s["after_area_solidity"] == 0
         assert s["after_texture_bank"] == 0
         assert s["final"] == 0
+
+
+class TestStageMaskCapture:
+
+    def test_no_capture_by_default(self):
+        bg = BackgroundModel(
+            bg0=np.full((200, 300), 80, dtype=np.float32),
+            bg1=np.full((200, 300), 80, dtype=np.float32))
+        det = ForegroundDetector(
+            background=bg, threshold=30, min_area_px=200, morph_k=3)
+        det.detect(_frame_with_bright_blob().copy(), cam=0)
+        # Capture is off by default → last_stage_masks should be empty
+        assert det._last_stage_masks == {}
+
+    def test_capture_populates_stages(self):
+        bg = BackgroundModel(
+            bg0=np.full((200, 300), 80, dtype=np.float32),
+            bg1=np.full((200, 300), 80, dtype=np.float32))
+        det = ForegroundDetector(
+            background=bg, threshold=30, min_area_px=200, morph_k=3)
+        det._capture_stage_masks = True
+        det.detect(_frame_with_bright_blob().copy(), cam=0)
+        det._capture_stage_masks = False
+        captured = det._last_stage_masks
+        assert "cam" in captured
+        assert captured["cam"] == 0
+        stages = captured["stages"]
+        # Should have at least bg_sub, filtered, merged, final
+        # (no edge refine without texture bank)
+        assert "1_bg_sub" in stages
+        assert "2_filtered" in stages
+        assert "3_merged" in stages
+        assert "6_final" in stages
+        # Each captured mask must be (H, W) and uint8
+        for name, m in stages.items():
+            assert m is None or (m.ndim == 2 and m.dtype == np.uint8)

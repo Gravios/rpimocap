@@ -1253,6 +1253,14 @@ class ForegroundDetector:
             0: self._fresh_stage_counts(),
             1: self._fresh_stage_counts(),
         }
+        # ── Stage-mask capture (opt-in, for diagnostics) ──────────
+        # When True, detect() stores the intermediate binary at each
+        # stage on self._last_stage_masks (per camera). Off by default
+        # — capture has memory cost (~6 H×W uint8 arrays per call).
+        # Toggled on by save_diagnostics() for the diagnostic frames
+        # only, then toggled back off.
+        self._capture_stage_masks: bool = False
+        self._last_stage_masks: dict = {}
 
         # Gabor bedding-texture suppression.
         # The per-pixel "how much bedding texture exists here in the
@@ -1674,6 +1682,10 @@ class ForegroundDetector:
         _ps["frames"] += 1
         if int(binary.sum()) > 0:
             _ps["bg_sub_has_pixels"] += 1
+        # Capture bg-sub mask (post morph-open, pre CC labelling)
+        if self._capture_stage_masks:
+            self._last_stage_masks = {"cam": cam, "stages": {}}
+            self._last_stage_masks["stages"]["1_bg_sub"] = binary.copy()
 
         n, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary, connectivity=8)
@@ -1759,6 +1771,16 @@ class ForegroundDetector:
         if len(blobs) > 0:
             _ps["after_merge_blobs_total"] += len(blobs)
             _ps["after_merge"] += 1
+        # Capture per-blob filter result: reconstruct binary from
+        # only the surviving CCs (those in surviving_indices). This
+        # mask shows what made it past area/solidity/aspect/texture.
+        if self._capture_stage_masks:
+            if len(surviving_indices) > 0:
+                filtered = np.isin(labels, surviving_indices
+                                    ).astype(np.uint8) * 255
+            else:
+                filtered = np.zeros_like(binary)
+            self._last_stage_masks["stages"]["2_filtered"] = filtered
 
         # ── Blob merging by hull ────────────────────────────────────
         # Group surviving blobs whose centroids are within
@@ -1782,6 +1804,9 @@ class ForegroundDetector:
                 binary, labels, surviving_indices, stats,
                 merge_distance_px=self._merge_blob_distance,
                 dilate_px=self._merge_blob_dilate)
+        # Capture binary after merge step
+        if self._capture_stage_masks:
+            self._last_stage_masks["stages"]["3_merged"] = binary.copy()
 
         # ── Texture-based edge refinement ────────────────────────────
         # For each surviving blob, grow the mask outward as far as
@@ -1795,6 +1820,12 @@ class ForegroundDetector:
             new_binary = np.zeros_like(binary)
             new_labels = np.zeros_like(labels, dtype=np.int32)
             new_blobs: list = []
+            # Accumulator for the texture-only refined union — lets
+            # us capture the texture-refinement stage separately from
+            # the subsequent intensity expansion.
+            texture_only_union = (np.zeros_like(binary)
+                                   if self._capture_stage_masks
+                                   else None)
             gray_u8 = gray.astype(np.uint8)
             for idx, (stats_row, centroid) in enumerate(blobs, start=1):
                 # Get the merged blob's mask
@@ -1810,6 +1841,11 @@ class ForegroundDetector:
                     canny_low=self._edge_refine_canny_low,
                     canny_high=self._edge_refine_canny_high,
                     canny_dilate=self._edge_refine_canny_dilate)
+                # Stash the texture-only refined mask before the
+                # intensity expansion modifies it (so we can show
+                # the two stages separately in diagnostics).
+                if texture_only_union is not None:
+                    texture_only_union[refined > 0] = 255
                 # Final intensity-based expansion. The texture bank
                 # plateaus inside the rat body (fur interior); this
                 # step grows the mask out to the actual rat/bedding
@@ -1854,10 +1890,20 @@ class ForegroundDetector:
                 # show whether expansion shrinks vs grows the mask.
                 if self._edge_refine_intensity:
                     _ps["after_intensity_exp"] += 1
+            # Capture refinement stages
+            if self._capture_stage_masks:
+                if texture_only_union is not None:
+                    self._last_stage_masks["stages"][
+                        "4_texture_refined"] = texture_only_union
+                if self._edge_refine_intensity:
+                    self._last_stage_masks["stages"][
+                        "5_intensity_expanded"] = binary.copy()
 
         if len(blobs) > 0:
             _ps["final"] += 1
             _ps["final_blobs_total"] += len(blobs)
+        if self._capture_stage_masks:
+            self._last_stage_masks["stages"]["6_final"] = binary.copy()
 
         return ForegroundResult(
             mask=binary,
@@ -3122,7 +3168,25 @@ def save_diagnostics(
             cv2.imwrite(str(prefix) + "_diff.png", diff_colour)
 
             # 4. Binary mask
+            # Enable stage-mask capture for this detect() call so we
+            # can save each pipeline stage as a separate PNG
+            # alongside the final mask. The capture flag is reset
+            # below so the production pass (after diagnostics) runs
+            # at full speed.
+            detector._capture_stage_masks = True
             fg = detector.detect(frame, cam=cam_id)
+            detector._capture_stage_masks = False
+            # Save each captured intermediate stage. The stage names
+            # are numbered (1_bg_sub, 2_filtered, …) so they sort
+            # naturally in directory listings — the trajectory of a
+            # blob through the pipeline is then visible top-to-bottom.
+            stage_dict = detector._last_stage_masks.get("stages", {})
+            for stage_name, stage_mask in stage_dict.items():
+                if stage_mask is None:
+                    continue
+                cv2.imwrite(
+                    str(prefix) + f"_stage{stage_name}.png",
+                    cv2.cvtColor(stage_mask, cv2.COLOR_GRAY2BGR))
             mask_bgr = cv2.cvtColor(fg.mask, cv2.COLOR_GRAY2BGR)
             # Tint blobs in green, non-blobs in dark
             cv2.imwrite(str(prefix) + "_mask.png", mask_bgr)
