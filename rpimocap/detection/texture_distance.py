@@ -421,6 +421,41 @@ def build_background_texture_model(
     return model.finalize(std_floor=std_floor)
 
 
+def _detect_rat_mask_intensity(
+        gray:        np.ndarray,
+        percentile:  float = 96.0,
+        min_area_px: int = 1500,
+        dilate_px:   int = 25,
+        ) -> np.ndarray:
+    """Quick per-frame rat mask via intensity: the rat is the
+    brightest compact blob under IR. Threshold the top-percentile
+    intensities, take the largest connected component, dilate it
+    generously so the rat's soft edges and immediate cast shadow are
+    covered. Returns a (H, W) uint8 mask (255 = rat).
+
+    Used to EXCLUDE rat pixels from the persistence/MAD computation
+    so the rat's frequented spots don't get falsely marked as
+    low-persistence (transient) background. Generous dilation is
+    intentional here — over-masking the rat is safe (those frames
+    just don't contribute to that pixel's spread), under-masking
+    leaves rat residue in the persistence map."""
+    thr = float(np.percentile(gray, percentile))
+    m = (gray >= thr).astype(np.uint8) * 255
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(m)
+    if n_cc < 2:
+        return np.zeros_like(gray, dtype=np.uint8)
+    sizes = stats[1:, cv2.CC_STAT_AREA]
+    if int(sizes.max()) < min_area_px:
+        return np.zeros_like(gray, dtype=np.uint8)
+    largest = int(sizes.argmax()) + 1
+    out = (labels == largest).astype(np.uint8) * 255
+    if dilate_px > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
+        out = cv2.dilate(out, k)
+    return out
+
+
 def build_persistent_texture_model(
         bg_frames:   Sequence[np.ndarray],
         kernels:     Sequence[np.ndarray],
@@ -429,6 +464,10 @@ def build_persistent_texture_model(
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
         std_floor:   float = 1e-3,
+        mask_rat:    bool = False,
+        rat_percentile: float = 96.0,
+        rat_min_area_px: int = 1500,
+        rat_dilate_px:   int = 25,
         ) -> tuple["BackgroundTextureModel", np.ndarray]:
     """Build a background texture model robust to the moving rat,
     plus a persistence (temporal-stability) map.
@@ -452,6 +491,23 @@ def build_persistent_texture_model(
         where things move (rat paths, cable, disturbed bedding). The
         map is normalized to [0, 1] where 1 = perfectly persistent.
 
+    RAT MASKING (mask_rat=True)
+        The median is robust to the rat, but the MAD is NOT: when the
+        rat passes through a pixel, that frame's descriptor is a large
+        deviation from the median, inflating the MAD and LOWERING the
+        persistence there. The result is that the rat's frequented
+        spots get marked low-persistence (transient) even though the
+        underlying background is static — and since the distance map
+        multiplies by persistence, the rat's own favorite locations
+        get SUPPRESSED.
+
+        With mask_rat=True, the rat is detected per bg-frame (brightest
+        compact blob) and those pixels are EXCLUDED from that pixel's
+        spread computation. Since the rat moves, every pixel still has
+        plenty of background frames to estimate spread from. The
+        persistence map then reflects the STATIC SCENE only, so the
+        rat is no longer suppressed where it tends to dwell.
+
     Frames should be sampled across the WHOLE session (large stride),
     not a front window, so that lighting/bedding drift is captured in
     the median rather than read as foreground later.
@@ -460,6 +516,10 @@ def build_persistent_texture_model(
     ----------
     bg_frames : list of grayscale frames spread across the session.
                 More frames = better median; 40-80 is reasonable.
+    mask_rat  : if True, exclude per-frame rat pixels from the spread
+                / persistence computation (see above).
+    rat_percentile / rat_min_area_px / rat_dilate_px
+              : parameters for the per-frame intensity rat detector.
     (others)  : as dense_gabor_descriptor.
 
     Returns
@@ -476,16 +536,45 @@ def build_persistent_texture_model(
     # 2028×1080 frame with D=9 and T=60 this is ~1.2 GB float32, so
     # downstream callers may want to subsample spatially or cap T.
     descs = []
+    rat_masks = []
     for f in bg_frames:
         descs.append(dense_gabor_descriptor(
             f, kernels, n_orient, n_scales,
             smooth_k=smooth_k, rotation_invariant=rotation_invariant))
+        if mask_rat:
+            rat_masks.append(_detect_rat_mask_intensity(
+                f, percentile=rat_percentile,
+                min_area_px=rat_min_area_px,
+                dilate_px=rat_dilate_px) > 0)
     stack = np.stack(descs, axis=0)            # (T, D, H, W)
 
-    # Per-pixel, per-channel temporal median = persistent background
-    median = np.median(stack, axis=0).astype(np.float32)   # (D, H, W)
-    # Median absolute deviation → robust spread
-    mad = np.median(np.abs(stack - median[None]), axis=0)
+    if mask_rat:
+        # Mask the rat in BOTH the median and the spread. If the rat
+        # dwells at a pixel for ≥50% of frames, an unmasked median
+        # sits between rat and background instead of on background,
+        # which then inflates the deviation of even the background
+        # frames. Masking the median fixes this — the persistent
+        # background texture is estimated from background frames only.
+        rat_stack = np.stack(rat_masks, axis=0)            # (T, H, W)
+        rat_bcast = np.broadcast_to(
+            rat_stack[:, None, :, :], stack.shape)
+        masked_stack = np.ma.array(stack, mask=rat_bcast)
+        median_m = np.ma.median(masked_stack, axis=0)
+        # Fallback for fully-masked pixels (rat almost always there)
+        median_full = np.median(stack, axis=0)
+        median = np.where(np.ma.getmaskarray(median_m),
+                          median_full,
+                          median_m.filled(0)).astype(np.float32)
+        abs_dev = np.abs(stack - median[None])             # (T,D,H,W)
+        masked_dev = np.ma.array(abs_dev, mask=rat_bcast)
+        mad_masked = np.ma.median(masked_dev, axis=0).filled(np.nan)
+        mad_full = np.median(abs_dev, axis=0)
+        mad = np.where(np.isnan(mad_masked), mad_full, mad_masked)
+    else:
+        # Per-pixel, per-channel temporal median = persistent bg
+        median = np.median(stack, axis=0).astype(np.float32)  # (D,H,W)
+        mad = np.median(np.abs(stack - median[None]), axis=0)
+
     # Scale MAD to be std-comparable (for a normal dist, std≈1.4826*MAD)
     spread = (1.4826 * mad).astype(np.float32)
     spread = np.maximum(spread, std_floor)

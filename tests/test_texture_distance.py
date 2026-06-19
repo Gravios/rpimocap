@@ -589,3 +589,112 @@ class TestTextureBlobTracker:
                 lost_seen = True
                 break
         assert lost_seen, "track should eventually be declared lost"
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Rat-masked persistence (rat doesn't suppress its own dwell spots)
+# ────────────────────────────────────────────────────────────────────
+
+
+from rpimocap.detection.texture_distance import (
+    _detect_rat_mask_intensity)
+
+
+def _fixed_bg_with_rat(rat_xy, bg=None, shape=(160, 260)):
+    """A FIXED textured background (static bedding) with a bright rat
+    circle at rat_xy. The background is identical across frames; only
+    the rat moves — the realistic case."""
+    if bg is None:
+        rng = np.random.RandomState(42)
+        bg = cv2.GaussianBlur(
+            rng.randint(70, 110, shape).astype(np.uint8), (3, 3), 0)
+    f = bg.copy()
+    cv2.circle(f, rat_xy, 28, 210, -1)
+    return f
+
+
+class TestRatDetectorForPersistence:
+
+    def test_detects_bright_rat(self):
+        f = _fixed_bg_with_rat((150, 80))
+        m = _detect_rat_mask_intensity(
+            f, percentile=95, min_area_px=500, dilate_px=10)
+        assert m[80, 150] > 0           # rat center detected
+
+    def test_no_rat_returns_empty(self):
+        rng = np.random.RandomState(0)
+        # Uniform dim frame, no bright blob
+        f = cv2.GaussianBlur(
+            rng.randint(70, 110, (160, 260)).astype(np.uint8),
+            (3, 3), 0)
+        m = _detect_rat_mask_intensity(
+            f, percentile=99, min_area_px=5000, dilate_px=5)
+        assert int((m > 0).sum()) == 0
+
+
+class TestRatMaskedPersistence:
+
+    def _dwell_session(self):
+        """Rat dwells at one spot for half the frames, moves for the
+        rest — over a FIXED background."""
+        rng = np.random.RandomState(42)
+        bg = cv2.GaussianBlur(
+            rng.randint(70, 110, (160, 260)).astype(np.uint8),
+            (3, 3), 0)
+        dwell = (150, 80)
+        positions = ([dwell] * 10 +
+                     [(40, 60), (220, 120), (90, 130), (200, 50),
+                      (120, 100), (60, 90), (180, 140), (100, 60),
+                      (230, 100), (70, 120)])
+        return [_fixed_bg_with_rat(p, bg=bg) for p in positions], dwell
+
+    def test_masking_rescues_dwell_persistence(self):
+        """Without masking, the rat's dwell spot is marked
+        low-persistence (it would be suppressed). With masking, the
+        dwell spot is correctly recognized as static background."""
+        frames, dwell = self._dwell_session()
+        _, pers_no = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            mask_rat=False)
+        _, pers_yes = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            mask_rat=True, rat_percentile=95, rat_min_area_px=500,
+            rat_dilate_px=40)
+        x, y = dwell
+        # Masking should raise persistence at the dwell spot
+        assert float(pers_yes[y, x]) > float(pers_no[y, x])
+        # And bring it close to the static-background level
+        assert float(pers_yes[y, x]) > 0.8
+
+    def test_masking_preserves_static_corner(self):
+        """A never-visited background corner stays high-persistence
+        whether or not masking is on."""
+        frames, _ = self._dwell_session()
+        _, pers_yes = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            mask_rat=True, rat_percentile=95, rat_min_area_px=500,
+            rat_dilate_px=40)
+        assert float(pers_yes[20, 20]) > 0.8
+
+    def test_masked_median_is_background(self):
+        """With masking, the model's median descriptor at the dwell
+        spot reflects BACKGROUND, not the rat — verified by comparing
+        to a pure-background descriptor there."""
+        frames, dwell = self._dwell_session()
+        model, _ = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            mask_rat=True, rat_percentile=95, rat_min_area_px=500,
+            rat_dilate_px=40)
+        # Pure-background reference at the dwell pixel
+        rng = np.random.RandomState(42)
+        bg = cv2.GaussianBlur(
+            rng.randint(70, 110, (160, 260)).astype(np.uint8),
+            (3, 3), 0)
+        bg_desc = dense_gabor_descriptor(
+            bg, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        x, y = dwell
+        rel = (np.linalg.norm(model.mean[:, y, x] - bg_desc[:, y, x])
+               / (np.linalg.norm(bg_desc[:, y, x]) + 1e-6))
+        assert rel < 0.5, (
+            f"masked median should match background at dwell; "
+            f"rel diff {rel:.2f}")

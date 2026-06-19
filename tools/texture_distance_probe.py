@@ -88,6 +88,29 @@ def main(argv=None):
                     help="Exponent on the persistence damping. >1 "
                          "suppresses persistent-background pixels "
                          "more aggressively. Default 1.0.")
+    ap.add_argument("--mask-rat-persistence", action="store_true",
+                    default=False,
+                    help="When building the persistence map, detect "
+                         "and EXCLUDE the rat in each bg frame so the "
+                         "rat's frequented/dwell spots aren't marked "
+                         "low-persistence (which would SUPPRESS the "
+                         "rat there in the distance map). Strongly "
+                         "recommended — without it, the rat fights "
+                         "its own persistence shadow.")
+    ap.add_argument("--persistence-rat-percentile", type=float,
+                    default=96.0,
+                    help="Intensity percentile for the per-bg-frame "
+                         "rat detector used by --mask-rat-persistence.")
+    ap.add_argument("--persistence-rat-min-area", type=int,
+                    default=1500,
+                    help="Min area (px) for the per-bg-frame rat "
+                         "detector.")
+    ap.add_argument("--persistence-rat-dilate", type=int, default=35,
+                    help="Dilation (px) of the per-bg-frame rat mask. "
+                         "Should exceed the Gabor kernel footprint "
+                         "(~largest scale + smooth-k) so the rat's "
+                         "descriptor halo is also excluded. Default "
+                         "35.")
     ap.add_argument("--max-aspect-ratio", type=float, default=6.0,
                     help="Reject thresholded components more "
                          "elongated than this (the cable is a thin "
@@ -231,7 +254,11 @@ def main(argv=None):
 
         model, persistence_map = build_persistent_texture_model(
             bg_grays, kernels, n_orient, n_scales,
-            smooth_k=args.smooth_k, rotation_invariant=True)
+            smooth_k=args.smooth_k, rotation_invariant=True,
+            mask_rat=args.mask_rat_persistence,
+            rat_percentile=args.persistence_rat_percentile,
+            rat_min_area_px=args.persistence_rat_min_area,
+            rat_dilate_px=args.persistence_rat_dilate)
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
