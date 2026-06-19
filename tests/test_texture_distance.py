@@ -698,3 +698,86 @@ class TestRatMaskedPersistence:
         assert rel < 0.5, (
             f"masked median should match background at dwell; "
             f"rel diff {rel:.2f}")
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Arena ROI gating (only compute inside the arena)
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestArenaROIGating:
+
+    def _frame_with_outside_distractor(self):
+        """Rat inside a central arena ROI, plus a BIGGER bright
+        distractor (hand/reflection) outside it."""
+        rng = np.random.RandomState(0)
+        f = rng.randint(70, 110, (200, 300)).astype(np.uint8)
+        cv2.circle(f, (150, 100), 30, 180, -1)      # rat in arena
+        f[5:70, 5:90] = 240                         # big hand outside
+        roi = np.zeros((200, 300), np.uint8)
+        cv2.rectangle(roi, (70, 40), (240, 170), 255, -1)
+        return f, roi
+
+    def test_roi_switches_detection_to_rat(self):
+        """Without ROI the detector grabs the bigger outside-arena
+        distractor; with ROI it grabs the rat inside."""
+        f, roi = self._frame_with_outside_distractor()
+        m_no = _detect_rat_mask_intensity(
+            f, percentile=85, min_area_px=500, dilate_px=5)
+        m_roi = _detect_rat_mask_intensity(
+            f, percentile=85, min_area_px=500, dilate_px=5,
+            roi_mask=roi)
+        # Without ROI: detection is on the hand, not the rat
+        assert m_no[35, 45] > 0 and m_no[100, 150] == 0
+        # With ROI: detection is on the rat, not the hand
+        assert m_roi[100, 150] > 0 and m_roi[35, 45] == 0
+
+    def test_roi_mask_stays_inside(self):
+        """The returned mask never extends outside the ROI even after
+        dilation."""
+        f, roi = self._frame_with_outside_distractor()
+        m = _detect_rat_mask_intensity(
+            f, percentile=85, min_area_px=500, dilate_px=40,
+            roi_mask=roi)
+        # No mask pixels outside the ROI
+        assert int(m[(roi == 0)].sum()) == 0
+
+    def test_persistence_zeroed_outside_roi(self):
+        """build_persistent_texture_model zeroes persistence outside
+        the arena."""
+        rng = np.random.RandomState(1)
+        bg = cv2.GaussianBlur(
+            rng.randint(70, 110, (160, 260)).astype(np.uint8),
+            (3, 3), 0)
+        frames = []
+        for cx in (60, 120, 180, 90, 150, 200, 70, 130):
+            f = bg.copy()
+            cv2.circle(f, (cx, 80), 25, 205, -1)
+            frames.append(f)
+        roi = np.zeros((160, 260), np.uint8)
+        cv2.rectangle(roi, (40, 30), (220, 130), 255, -1)
+        _, pers = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            roi_mask=roi)
+        # Persistence is exactly 0 outside the ROI
+        assert float(pers[(roi == 0)].max()) == 0.0
+        # And non-zero somewhere inside
+        assert float(pers[(roi > 0)].max()) > 0.0
+
+    def test_distance_map_zeroed_outside_roi(self):
+        """texture_distance_map zeroes distance outside the ROI."""
+        rng = np.random.RandomState(2)
+        bg = cv2.GaussianBlur(
+            rng.randint(70, 110, (160, 260)).astype(np.uint8),
+            (3, 3), 0)
+        frames = [bg.copy() for _ in range(6)]
+        model = build_background_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        roi = np.zeros((160, 260), np.uint8)
+        cv2.rectangle(roi, (40, 30), (220, 130), 255, -1)
+        test = bg.copy()
+        cv2.circle(test, (130, 80), 25, 205, -1)
+        dist = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            roi_mask=roi, post_smooth_k=0)
+        assert float(dist[(roi == 0)].max()) == 0.0

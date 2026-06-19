@@ -426,6 +426,7 @@ def _detect_rat_mask_intensity(
         percentile:  float = 96.0,
         min_area_px: int = 1500,
         dilate_px:   int = 25,
+        roi_mask:    Optional[np.ndarray] = None,
         ) -> np.ndarray:
     """Quick per-frame rat mask via intensity: the rat is the
     brightest compact blob under IR. Threshold the top-percentile
@@ -438,9 +439,22 @@ def _detect_rat_mask_intensity(
     low-persistence (transient) background. Generous dilation is
     intentional here — over-masking the rat is safe (those frames
     just don't contribute to that pixel's spread), under-masking
-    leaves rat residue in the persistence map."""
-    thr = float(np.percentile(gray, percentile))
-    m = (gray >= thr).astype(np.uint8) * 255
+    leaves rat residue in the persistence map.
+
+    roi_mask : optional (H, W) arena mask. When provided, the
+               percentile threshold AND the blob search are restricted
+               to inside the arena, so bright things OUTSIDE the arena
+               (experimenter's hands, room behind the acrylic, door
+               reflections) can't be mistaken for the rat."""
+    if roi_mask is not None:
+        inside = gray[roi_mask > 0]
+        if inside.size == 0:
+            return np.zeros_like(gray, dtype=np.uint8)
+        thr = float(np.percentile(inside, percentile))
+        m = ((gray >= thr) & (roi_mask > 0)).astype(np.uint8) * 255
+    else:
+        thr = float(np.percentile(gray, percentile))
+        m = (gray >= thr).astype(np.uint8) * 255
     n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(m)
     if n_cc < 2:
         return np.zeros_like(gray, dtype=np.uint8)
@@ -453,6 +467,9 @@ def _detect_rat_mask_intensity(
         k = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
         out = cv2.dilate(out, k)
+    if roi_mask is not None:
+        # Keep the dilated mask inside the arena
+        out = cv2.bitwise_and(out, (roi_mask > 0).astype(np.uint8) * 255)
     return out
 
 
@@ -468,6 +485,7 @@ def build_persistent_texture_model(
         rat_percentile: float = 96.0,
         rat_min_area_px: int = 1500,
         rat_dilate_px:   int = 25,
+        roi_mask:    Optional[np.ndarray] = None,
         ) -> tuple["BackgroundTextureModel", np.ndarray]:
     """Build a background texture model robust to the moving rat,
     plus a persistence (temporal-stability) map.
@@ -545,7 +563,8 @@ def build_persistent_texture_model(
             rat_masks.append(_detect_rat_mask_intensity(
                 f, percentile=rat_percentile,
                 min_area_px=rat_min_area_px,
-                dilate_px=rat_dilate_px) > 0)
+                dilate_px=rat_dilate_px,
+                roi_mask=roi_mask) > 0)
     stack = np.stack(descs, axis=0)            # (T, D, H, W)
 
     if mask_rat:
@@ -585,11 +604,24 @@ def build_persistent_texture_model(
     # Persistence map: low channel-summed spread → high persistence.
     # Use the mean spread across channels as the instability measure.
     instability = spread.mean(axis=0)          # (H, W)
-    # Normalize: map [p5, p95] of instability to [1, 0]
-    lo = float(np.percentile(instability, 5))
-    hi = float(np.percentile(instability, 95))
+    # Normalize against the in-ROI instability distribution so that
+    # outside-arena pixels (hands, room, reflections) don't skew the
+    # p5/p95 scaling of the arena interior.
+    if roi_mask is not None:
+        inside_vals = instability[roi_mask > 0]
+        if inside_vals.size == 0:
+            inside_vals = instability.ravel()
+    else:
+        inside_vals = instability.ravel()
+    lo = float(np.percentile(inside_vals, 5))
+    hi = float(np.percentile(inside_vals, 95))
     norm = np.clip((instability - lo) / (hi - lo + 1e-6), 0, 1)
     persistence_map = (1.0 - norm).astype(np.float32)
+    # Zero persistence outside the arena — nothing out there should
+    # ever contribute to (or be measured by) the distance map.
+    if roi_mask is not None:
+        persistence_map = persistence_map * (roi_mask > 0).astype(
+            np.float32)
     return model, persistence_map
 
 

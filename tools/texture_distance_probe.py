@@ -60,6 +60,21 @@ def main(argv=None):
     ap.add_argument("--cam0", required=True)
     ap.add_argument("--cam1", required=True)
     ap.add_argument("--bayer-pattern", default="RGGB")
+    ap.add_argument("--calib", default=None,
+                    help="Calibration .npz with dlt_P0/dlt_P1 (or "
+                         "P0/P1). When provided, an arena ROI is "
+                         "projected per camera and ALL texture-"
+                         "distance computation is restricted to "
+                         "inside the arena — bright things outside "
+                         "(experimenter's hands, room behind the "
+                         "acrylic, door reflections) are excluded "
+                         "from the rat detector, the illumination "
+                         "field, the persistence map, and the "
+                         "distance map.")
+    ap.add_argument("--roi-pad-px", type=int, default=20,
+                    help="Expand the projected arena hull outward by "
+                         "this many px (avoids clipping the rat when "
+                         "it presses against a wall). Default 20.")
     ap.add_argument("--bg-frames", type=int, default=60,
                     help="Number of frames to build the background "
                          "texture model from.")
@@ -184,6 +199,7 @@ def main(argv=None):
     # Lazy imports from the package
     from rpimocap.io.export import TiffCapture
     from rpimocap.detection.rat_texture import build_gabor_kernels
+    from rpimocap.detection.segment import arena_roi_mask
     from rpimocap.detection.texture_distance import (
         dense_gabor_descriptor, BackgroundTextureModel,
         build_persistent_texture_model,
@@ -191,6 +207,25 @@ def main(argv=None):
         DynamicShadowModel, TextureBlobTracker,
         texture_distance_map, threshold_distance_map,
         colorize_distance_map)
+
+    # Arena corners in mm (matches cli/segment.py _ARENA_CORNERS)
+    _ARENA_CORNERS = np.array([
+        [-140, -215,   0], [ 140, -215,   0],
+        [ 140,  215,   0], [-140,  215,   0],
+        [-140, -215, 388], [ 140, -215, 388],
+        [ 140,  215, 388], [-140,  215, 388],
+    ], dtype=np.float64)
+    # Load DLT projection matrices if a calibration was given
+    dlt_P = {0: None, 1: None}
+    if args.calib:
+        cal = np.load(args.calib)
+        dlt_P[0] = cal.get("dlt_P0", cal.get("P0", None))
+        dlt_P[1] = cal.get("dlt_P1", cal.get("P1", None))
+        if dlt_P[0] is None or dlt_P[1] is None:
+            print("  WARNING: calib has no dlt_P0/dlt_P1 — no ROI")
+        else:
+            print(f"  Loaded DLT matrices from {args.calib} "
+                  f"→ arena ROI enabled")
 
     # Build kernels matching RatTextureBank defaults
     orientations = [i * np.pi / args.n_orientations
@@ -225,6 +260,22 @@ def main(argv=None):
             cap.release()
             continue
 
+        # ── Arena ROI ─────────────────────────────────────────────
+        # Restrict ALL texture-distance computation to inside the
+        # arena. Without this, bright things outside the acrylic
+        # (experimenter's hands, the room, door reflections) get
+        # treated as candidate rat / foreground.
+        roi = None
+        if dlt_P[cam_id] is not None:
+            roi = arena_roi_mask(
+                dlt_P[cam_id], _ARENA_CORNERS,
+                bg_grays[0].shape, pad_px=args.roi_pad_px)
+            cov = 100.0 * float((roi > 0).sum()) / roi.size
+            print(f"  Arena ROI: {cov:.1f}% of frame inside")
+            cv2.imwrite(
+                os.path.join(args.out, f"arena_roi_cam{cam_id}.png"),
+                roi)
+
         # ── Static shadow / illumination field ────────────────────
         # The per-pixel temporal median of intensity is the static
         # scene illumination (the rat, a moving minority, is rejected).
@@ -234,7 +285,8 @@ def main(argv=None):
         illum_field = None
         if args.illumination_correct:
             illum_field = build_illumination_field(
-                bg_grays, blur_sigma=args.illumination_blur_sigma)
+                bg_grays, blur_sigma=args.illumination_blur_sigma,
+                roi_mask=roi)
             tgt = float(illum_field.mean())
             print(f"  Illumination field: mean={tgt:.1f} "
                   f"min={float(illum_field.min()):.1f} "
@@ -258,7 +310,8 @@ def main(argv=None):
             mask_rat=args.mask_rat_persistence,
             rat_percentile=args.persistence_rat_percentile,
             rat_min_area_px=args.persistence_rat_min_area,
-            rat_dilate_px=args.persistence_rat_dilate)
+            rat_dilate_px=args.persistence_rat_dilate,
+            roi_mask=roi)
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
@@ -297,6 +350,7 @@ def main(argv=None):
                 smooth_k=args.smooth_k, rotation_invariant=True,
                 persistence_map=persistence_map,
                 persistence_power=args.persistence_power,
+                roi_mask=roi,
                 post_smooth_k=args.post_smooth_k)
             mask, thr = threshold_distance_map(
                 dist, method=args.threshold_method,
@@ -376,6 +430,7 @@ def main(argv=None):
                     smooth_k=args.smooth_k, rotation_invariant=True,
                     persistence_map=persistence_map,
                     persistence_power=args.persistence_power,
+                    roi_mask=roi,
                     post_smooth_k=args.post_smooth_k)
                 mask, thr = threshold_distance_map(
                     dist, method=args.threshold_method,
