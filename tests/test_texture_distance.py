@@ -452,3 +452,140 @@ class TestIlluminationCorrection:
             _gradient_frame(1), field)
         assert corr.dtype == np.uint8
         assert corr.min() >= 0 and corr.max() <= 255
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Dynamic shadow model
+# ────────────────────────────────────────────────────────────────────
+
+
+from rpimocap.detection.texture_distance import (
+    DynamicShadowModel, TextureBlobTracker)
+
+
+class TestDynamicShadowModel:
+
+    def test_tracks_brightness_drift(self):
+        """The field should follow a slow brightness drift."""
+        H, W = 100, 160
+        dsm = DynamicShadowModel(
+            np.full((H, W), 100, np.float32), alpha=0.2, blur_sigma=0)
+        for t in range(30):
+            frame = np.full((H, W), 100 + t * 1.0, np.float32)
+            dsm.update(frame)
+        field = dsm.get_field()
+        # Drift reached ~129; field should have climbed well above 100
+        assert float(np.median(field)) > 115
+
+    def test_masked_rat_excluded(self):
+        """Pixels under the update_mask (rat) must NOT pull the field
+        toward the rat's brightness."""
+        H, W = 100, 160
+        dsm = DynamicShadowModel(
+            np.full((H, W), 100, np.float32), alpha=0.3, blur_sigma=0)
+        for t in range(20):
+            frame = np.full((H, W), 100, np.float32)
+            # A bright rat that does NOT move (worst case for poisoning)
+            cv2.circle(frame, (80, 50), 15, 250, -1)
+            m = np.zeros((H, W), np.uint8)
+            cv2.circle(m, (80, 50), 18, 255, -1)
+            dsm.update(frame, update_mask=m)
+        field = dsm.get_field()
+        # Despite a static bright rat for 20 frames, the field at the
+        # rat location stays at background (mask excluded it)
+        assert float(field[50, 80]) < 150, (
+            f"masked rat should not poison field; "
+            f"got {float(field[50, 80]):.1f}")
+
+    def test_correct_uses_current_field(self):
+        H, W = 80, 120
+        dsm = DynamicShadowModel(
+            np.full((H, W), 100, np.float32), alpha=0.1, blur_sigma=0)
+        corrected = dsm.correct(np.full((H, W), 100, np.uint8))
+        assert corrected.shape == (H, W)
+        assert corrected.dtype == np.uint8
+
+    def test_field_stays_positive(self):
+        H, W = 80, 120
+        dsm = DynamicShadowModel(
+            np.full((H, W), 100, np.float32), alpha=0.5, floor=1.0)
+        # Feed near-zero frames; field must not drop below floor
+        for _ in range(10):
+            dsm.update(np.zeros((H, W), np.float32))
+        assert float(dsm.get_field().min()) >= 1.0
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Texture blob tracker (Kalman)
+# ────────────────────────────────────────────────────────────────────
+
+
+def _circle_mask(blobs, shape=(200, 400)):
+    m = np.zeros(shape, np.uint8)
+    for (cx, cy, r) in blobs:
+        cv2.circle(m, (cx, cy), r, 255, -1)
+    return m
+
+
+class TestTextureBlobTracker:
+
+    def test_initializes_from_first_detection(self):
+        trk = TextureBlobTracker()
+        r = trk.update(_circle_mask([(100, 100, 30)]))
+        assert r["measured"] is True
+        assert r["state"] is not None
+        cx, cy, _ = r["state"]
+        assert abs(cx - 100) < 5 and abs(cy - 100) < 5
+
+    def test_no_detection_no_init(self):
+        trk = TextureBlobTracker()
+        r = trk.update(np.zeros((200, 400), np.uint8))
+        assert r["lost"] is True
+        assert r["state"] is None
+
+    def test_tracks_moving_blob(self):
+        trk = TextureBlobTracker(gate_px=80)
+        last = None
+        for t in range(8):
+            r = trk.update(_circle_mask([(40 + t * 25, 100, 30)]))
+            assert r["measured"] is True
+            last = r["state"]
+        # Final position should be near the last blob center
+        assert abs(last[0] - (40 + 7 * 25)) < 20
+
+    def test_gates_out_distractor(self):
+        """A blob far from the prediction is rejected; the tracker
+        coasts instead of jumping to it."""
+        trk = TextureBlobTracker(gate_px=80, max_coast=5)
+        for t in range(5):
+            trk.update(_circle_mask([(40 + t * 25, 100, 30)]))
+        # Now: only a distractor far away
+        r = trk.update(_circle_mask([(370, 30, 18)]))
+        assert r["coasting"] is True, "distractor should be gated out"
+        assert trk.n_gated_out >= 1
+
+    def test_picks_rat_over_distractor(self):
+        """With both rat and distractor present, the in-gate rat is
+        chosen over the out-of-gate distractor."""
+        trk = TextureBlobTracker(gate_px=80, select="area")
+        for t in range(5):
+            trk.update(_circle_mask([(40 + t * 25, 100, 30)]))
+        r = trk.update(_circle_mask(
+            [(40 + 5 * 25, 100, 30), (370, 30, 18)]))
+        assert r["measured"] is True
+        # Tracked position should be near the rat, not the distractor
+        assert abs(r["state"][0] - (40 + 5 * 25)) < 30
+
+    def test_coast_then_lost(self):
+        """After max_coast missed frames, the track is declared
+        lost."""
+        trk = TextureBlobTracker(gate_px=50, max_coast=3)
+        trk.update(_circle_mask([(100, 100, 30)]))
+        # Feed only far distractors → coast until lost
+        lost_seen = False
+        for _ in range(6):
+            r = trk.update(_circle_mask([(380, 20, 15)]))
+            if r["lost"]:
+                lost_seen = True
+                break
+        assert lost_seen, "track should eventually be declared lost"

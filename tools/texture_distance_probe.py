@@ -69,8 +69,9 @@ def main(argv=None):
                     help="Sample every Nth frame for the bg model "
                          "(spreads samples across the session).")
     ap.add_argument("--probe-frames", type=int, nargs="+",
-                    required=True,
-                    help="Frame indices to dump distance maps for.")
+                    default=[],
+                    help="Frame indices to dump distance maps for. "
+                         "Optional when --track is used.")
     ap.add_argument("--green-channel", action="store_true",
                     default=False)
     ap.add_argument("--scales", type=int, nargs="+",
@@ -118,6 +119,31 @@ def main(argv=None):
                     choices=["otsu", "absolute", "percentile"])
     ap.add_argument("--abs-thresh", type=float, default=3.0)
     ap.add_argument("--threshold-percentile", type=float, default=95.0)
+    # ── Tracking mode (contiguous range + Kalman + dynamic shadow) ──
+    ap.add_argument("--track", action="store_true", default=False,
+                    help="Run a CONTIGUOUS frame range through the "
+                         "TextureBlobTracker (Kalman) and dynamic "
+                         "shadow model, writing a trajectory-overlay "
+                         "montage. Uses --track-start / --track-end / "
+                         "--track-step instead of --probe-frames.")
+    ap.add_argument("--track-start", type=int, default=0)
+    ap.add_argument("--track-end", type=int, default=500)
+    ap.add_argument("--track-step", type=int, default=1)
+    ap.add_argument("--track-gate-px", type=float, default=120.0,
+                    help="Kalman gate radius (px). Candidates farther "
+                         "than this from the prediction are rejected.")
+    ap.add_argument("--track-max-coast", type=int, default=10,
+                    help="Frames the track survives on prediction "
+                         "alone during a dropout.")
+    ap.add_argument("--dynamic-shadow", action="store_true",
+                    default=False,
+                    help="Adapt the illumination field over the "
+                         "tracked range with a slow EMA, masking out "
+                         "the tracked rat so it can't poison the "
+                         "field. Tracks slow IR drift + cast shadow.")
+    ap.add_argument("--dynamic-shadow-alpha", type=float, default=0.02,
+                    help="EMA rate for the dynamic shadow field. "
+                         "Larger adapts faster. Default 0.02.")
     ap.add_argument("--min-area", type=int, default=1000)
     ap.add_argument("--out", required=True,
                     help="Output directory for diagnostic PNGs.")
@@ -132,6 +158,7 @@ def main(argv=None):
         dense_gabor_descriptor, BackgroundTextureModel,
         build_persistent_texture_model,
         build_illumination_field, apply_illumination_correction,
+        DynamicShadowModel, TextureBlobTracker,
         texture_distance_map, threshold_distance_map,
         colorize_distance_map)
 
@@ -274,6 +301,120 @@ def main(argv=None):
             cv2.imwrite(out_path, panel)
             print(f"  probe f{pf}: thr={thr:.2f} fg={n_fg}px "
                   f"cc={len(cnts)} → {out_path}")
+
+        # ── Track mode: contiguous range + Kalman + dynamic shadow ─
+        if args.track:
+            print(f"  Tracking frames {args.track_start}–"
+                  f"{args.track_end} step {args.track_step}")
+            tracker = TextureBlobTracker(
+                gate_px=args.track_gate_px,
+                max_coast=args.track_max_coast,
+                select="area")
+            dsm = None
+            if args.dynamic_shadow and illum_field is not None:
+                dsm = DynamicShadowModel(
+                    illum_field.copy(),
+                    alpha=args.dynamic_shadow_alpha,
+                    blur_sigma=args.illumination_blur_sigma)
+            traj = []          # (frame_idx, cx, cy, r, measured, coasting)
+            montage_frames = []
+            n_meas = n_coast = n_lost = 0
+            for fi in range(args.track_start, args.track_end,
+                            args.track_step):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                gray = _to_gray(frame, args.green_channel)
+                # Illumination correction — dynamic field if enabled,
+                # else the static field
+                if dsm is not None:
+                    gray_c = dsm.correct(
+                        gray, target_level=float(illum_field.mean()))
+                elif illum_field is not None:
+                    gray_c = apply_illumination_correction(
+                        gray, illum_field,
+                        target_level=float(illum_field.mean()))
+                else:
+                    gray_c = gray
+                dist = texture_distance_map(
+                    gray_c, model, kernels, n_orient, n_scales,
+                    smooth_k=args.smooth_k, rotation_invariant=True,
+                    persistence_map=persistence_map,
+                    persistence_power=args.persistence_power,
+                    post_smooth_k=args.post_smooth_k)
+                mask, thr = threshold_distance_map(
+                    dist, method=args.threshold_method,
+                    abs_thresh=args.abs_thresh,
+                    percentile=args.threshold_percentile,
+                    min_area_px=args.min_area,
+                    max_aspect_ratio=args.max_aspect_ratio,
+                    min_fill_ratio=args.min_fill_ratio)
+                res = tracker.update(mask)
+                # Update the dynamic shadow, masking the tracked rat
+                if dsm is not None:
+                    rat_mask = None
+                    if res["state"] is not None:
+                        cx, cy, r = res["state"]
+                        rat_mask = np.zeros(gray.shape, np.uint8)
+                        cv2.circle(rat_mask, (int(cx), int(cy)),
+                                   int(max(r * 1.5, 20)), 255, -1)
+                    dsm.update(gray, update_mask=rat_mask)
+                # Tally
+                if res["lost"]:
+                    n_lost += 1
+                elif res["coasting"]:
+                    n_coast += 1
+                elif res["measured"]:
+                    n_meas += 1
+                if res["state"] is not None:
+                    cx, cy, r = res["state"]
+                    traj.append((fi, cx, cy, r,
+                                 res["measured"], res["coasting"]))
+                # Sample a few montage frames across the range
+                want_montage = ((fi - args.track_start)
+                                % max(1, (args.track_end
+                                          - args.track_start) // 12) == 0)
+                if want_montage and res["state"] is not None:
+                    g = gray_c.astype(np.float32)
+                    lo, hi = np.percentile(g, [1, 99])
+                    vis = np.clip((g - lo) / (hi - lo + 1e-6) * 255,
+                                  0, 255).astype(np.uint8)
+                    vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+                    cx, cy, r = res["state"]
+                    col = ((0, 255, 0) if res["measured"]
+                           else (0, 165, 255))   # green meas, orange coast
+                    cv2.circle(vis, (int(cx), int(cy)), int(r),
+                               col, 2)
+                    cv2.putText(vis, f"f{fi}", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+                    montage_frames.append(vis)
+            # Write trajectory CSV
+            traj_csv = os.path.join(
+                args.out, f"track_cam{cam_id}.csv")
+            with open(traj_csv, "w") as fh:
+                fh.write("frame,cx,cy,r,measured,coasting\n")
+                for row in traj:
+                    fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
+                             f"{row[3]:.2f},{int(row[4])},"
+                             f"{int(row[5])}\n")
+            # Write montage
+            if montage_frames:
+                cols = 4
+                rows_n = (len(montage_frames) + cols - 1) // cols
+                h, w = montage_frames[0].shape[:2]
+                grid = np.zeros((rows_n * h, cols * w, 3), np.uint8)
+                for k, vis in enumerate(montage_frames):
+                    rr, cc = divmod(k, cols)
+                    grid[rr*h:(rr+1)*h, cc*w:(cc+1)*w] = vis
+                mpath = os.path.join(
+                    args.out, f"track_montage_cam{cam_id}.png")
+                cv2.imwrite(mpath, grid)
+            n_total = n_meas + n_coast + n_lost
+            print(f"    tracked {len(traj)}/{n_total} frames: "
+                  f"measured={n_meas} coast={n_coast} lost={n_lost}, "
+                  f"gated_out={tracker.n_gated_out}")
+            print(f"    trajectory → {traj_csv}")
 
         cap.release()
 

@@ -227,6 +227,99 @@ def apply_illumination_correction(
 
 
 # ────────────────────────────────────────────────────────────────────
+#  Dynamic shadow model (slow EMA, rat-masked)
+# ────────────────────────────────────────────────────────────────────
+
+
+class DynamicShadowModel:
+    """Per-pixel illumination field that adapts over time.
+
+    The static illumination field (build_illumination_field) is a
+    single median over the whole session — it can't track two things
+    that change during a long recording:
+      1. SLOW DRIFT: IR emitter output and ambient level wander over
+         tens of minutes.
+      2. The rat's CAST SHADOW: a moving dim region next to the rat
+         that a static field treats as background, so it shows up as
+         a faint texture-change halo.
+
+    This model holds a running illumination estimate and nudges it
+    each frame with a slow exponential moving average (EMA):
+
+        field ← (1 - α) · field  +  α · frame      (per pixel)
+
+    Crucially the update is MASKED: pixels currently believed to be
+    rat (passed in via update_mask) are NOT folded into the field, so
+    the bright rat never poisons the illumination estimate. Pixels
+    around the rat (its cast shadow) ARE allowed to update, so the
+    field tracks the moving shadow and stops flagging it.
+
+    α is small (e.g. 0.02) so the field follows slow drift but
+    ignores the fast-moving rat. This is the texture-domain analogue
+    of the bg-sub --bg-adapt-alpha.
+    """
+
+    def __init__(self,
+                 initial_field: np.ndarray,
+                 alpha:         float = 0.02,
+                 blur_sigma:    float = 51.0,
+                 floor:         float = 1.0):
+        """
+        Parameters
+        ----------
+        initial_field : (H, W) seed illumination, typically the static
+                        median field from build_illumination_field.
+        alpha         : EMA rate. Larger = adapts faster (tracks drift
+                        but risks absorbing a slow/still rat). 0.01-
+                        0.05 is a reasonable range for slow IR drift.
+        blur_sigma    : if > 0, the per-frame update is low-pass
+                        filtered before blending, so only the smooth
+                        illumination component adapts (sharp structure
+                        isn't pulled into the field). Matches the
+                        static field's blur convention.
+        floor         : minimum field value (keeps the divide safe).
+        """
+        self.field = np.maximum(
+            initial_field.astype(np.float32), floor)
+        self.alpha = float(alpha)
+        self.blur_sigma = float(blur_sigma)
+        self.floor = float(floor)
+        self.n_updates = 0
+
+    def update(self,
+               gray:        np.ndarray,
+               update_mask: Optional[np.ndarray] = None) -> None:
+        """Fold one frame into the running illumination field.
+
+        update_mask : optional (H, W); pixels where it is TRUE (>0)
+                      are EXCLUDED from the update (they're the rat).
+                      Everything else — including the rat's cast
+                      shadow — updates normally.
+        """
+        g = gray.astype(np.float32)
+        if self.blur_sigma and self.blur_sigma > 0:
+            k = int(2 * round(3 * self.blur_sigma) + 1)
+            g = cv2.GaussianBlur(g, (k, k), self.blur_sigma)
+        # Per-pixel blended update
+        blended = (1.0 - self.alpha) * self.field + self.alpha * g
+        if update_mask is not None:
+            keep = (update_mask > 0)        # rat pixels: keep old field
+            blended = np.where(keep, self.field, blended)
+        self.field = np.maximum(blended, self.floor)
+        self.n_updates += 1
+
+    def correct(self,
+                gray:         np.ndarray,
+                target_level: Optional[float] = None) -> np.ndarray:
+        """Flat-field correct a frame by the CURRENT dynamic field."""
+        return apply_illumination_correction(
+            gray, self.field, target_level=target_level)
+
+    def get_field(self) -> np.ndarray:
+        return self.field.copy()
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Per-pixel background texture model (mean + std of descriptor)
 # ────────────────────────────────────────────────────────────────────
 
@@ -595,3 +688,196 @@ def colorize_distance_map(dist: np.ndarray,
         vmax = float(np.percentile(nz, 99)) if nz.size else 1.0
     scaled = np.clip(dist / (vmax + 1e-6) * 255.0, 0, 255).astype(np.uint8)
     return cv2.applyColorMap(scaled, cv2.COLORMAP_JET)
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Kalman tracker for texture-distance blobs
+# ────────────────────────────────────────────────────────────────────
+
+
+class TextureBlobTracker:
+    """Kalman filter over the texture-distance rat blob, giving
+    temporal coherence to the per-frame segmentation.
+
+    Each frame the texture-distance threshold produces zero or more
+    candidate blobs. Segmenting independently means a frame where the
+    rat fragments, or where a stray reflection briefly wins, produces
+    a bad detection with no memory. This tracker fixes that:
+
+      * PREDICT the rat's next position/size from its motion.
+      * GATE incoming candidates — reject any whose centroid is more
+        than `gate_px` from the prediction (a reflection flashing in
+        the corner is ignored because it's far from where the rat is).
+      * Among in-gate candidates, pick the best (largest area, or
+        closest to prediction) and CORRECT the filter with it.
+      * COAST through dropouts — if no candidate passes the gate,
+        output the prediction and increment a miss counter, up to
+        `max_coast` frames before declaring the track lost.
+
+    State vector  x = [cx, cy, r, vx, vy]   (matches the project's
+    EdgeMotionRatTracker convention) where r is an effective radius
+    = sqrt(area / pi). Constant-velocity for position, random-walk
+    for radius.
+    """
+
+    def __init__(self,
+                 dt:            float = 1.0,
+                 process_noise: float = 8.0,
+                 meas_noise:    float = 6.0,
+                 gate_px:       float = 120.0,
+                 max_coast:     int   = 10,
+                 select:        str   = "area"):
+        """
+        Parameters
+        ----------
+        dt            : frame timestep (1.0 = per-frame units).
+        process_noise : Kalman process σ (larger = trusts new
+                        detections more, less smoothing).
+        meas_noise    : Kalman measurement σ.
+        gate_px       : max centroid distance from prediction for a
+                        candidate to be accepted. The single most
+                        important parameter — too tight loses the rat
+                        on fast moves, too loose admits reflections.
+        max_coast     : consecutive missed frames the track survives
+                        on prediction alone before being marked lost.
+        select        : 'area' picks the largest in-gate blob;
+                        'nearest' picks the one closest to prediction.
+        """
+        self.dt            = float(dt)
+        self.process_noise = float(process_noise)
+        self.meas_noise    = float(meas_noise)
+        self.gate_px       = float(gate_px)
+        self.max_coast     = int(max_coast)
+        self.select        = select
+        self._kf           = None      # built lazily on first detection
+        self._initialized  = False
+        self.coast_count   = 0
+        self.lost          = True
+        self.n_updates     = 0
+        self.n_coasts      = 0
+        self.n_gated_out   = 0
+
+    # ── internal ───────────────────────────────────────────────────
+
+    def _build_kf(self, cx, cy, r):
+        kf = cv2.KalmanFilter(5, 3, 0, cv2.CV_32F)
+        dt = self.dt
+        kf.transitionMatrix = np.array([
+            [1, 0, 0, dt, 0],
+            [0, 1, 0, 0, dt],
+            [0, 0, 1, 0,  0],
+            [0, 0, 0, 1,  0],
+            [0, 0, 0, 0,  1],
+        ], dtype=np.float32)
+        kf.measurementMatrix = np.array([
+            [1, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0],
+            [0, 0, 1, 0, 0],
+        ], dtype=np.float32)
+        kf.processNoiseCov = (np.eye(5, dtype=np.float32)
+                              * (self.process_noise ** 2))
+        kf.measurementNoiseCov = (np.eye(3, dtype=np.float32)
+                                  * (self.meas_noise ** 2))
+        kf.errorCovPost = np.eye(5, dtype=np.float32) * 1000.0
+        kf.statePost = np.array(
+            [[cx], [cy], [r], [0], [0]], dtype=np.float32)
+        self._kf = kf
+        self._initialized = True
+        self.lost = False
+        self.coast_count = 0
+
+    @staticmethod
+    def _blob_measurement(stats_row):
+        """(cx, cy, r) from a connectedComponentsWithStats row."""
+        x = stats_row[cv2.CC_STAT_LEFT]
+        y = stats_row[cv2.CC_STAT_TOP]
+        w = stats_row[cv2.CC_STAT_WIDTH]
+        h = stats_row[cv2.CC_STAT_HEIGHT]
+        a = stats_row[cv2.CC_STAT_AREA]
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        r  = float(np.sqrt(a / np.pi))
+        return cx, cy, r
+
+    def predict(self):
+        """Advance the filter one step; return (cx, cy, r) prediction
+        or None if uninitialized."""
+        if not self._initialized:
+            return None
+        p = self._kf.predict()
+        return float(p[0, 0]), float(p[1, 0]), float(p[2, 0])
+
+    # ── public step ────────────────────────────────────────────────
+
+    def update(self, mask: np.ndarray):
+        """Process one frame's foreground mask.
+
+        Returns a dict:
+          {state: (cx,cy,r) or None,
+           measured: bool,        # True if a real detection was used
+           coasting: bool,        # True if output is prediction-only
+           lost: bool,
+           n_candidates: int}
+        """
+        n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (mask > 0).astype(np.uint8))
+        cands = [stats[i] for i in range(1, n_cc)]
+        n_cand = len(cands)
+
+        pred = self.predict()
+
+        # No track yet — initialize from the largest candidate
+        if not self._initialized:
+            if n_cand == 0:
+                return dict(state=None, measured=False,
+                            coasting=False, lost=True,
+                            n_candidates=0)
+            largest = max(cands, key=lambda s: s[cv2.CC_STAT_AREA])
+            cx, cy, r = self._blob_measurement(largest)
+            self._build_kf(cx, cy, r)
+            self.n_updates += 1
+            return dict(state=(cx, cy, r), measured=True,
+                        coasting=False, lost=False,
+                        n_candidates=n_cand)
+
+        # Gate candidates against the prediction
+        px, py, _ = pred
+        in_gate = []
+        for s in cands:
+            cx, cy, r = self._blob_measurement(s)
+            d = np.hypot(cx - px, cy - py)
+            if d <= self.gate_px:
+                in_gate.append((s, cx, cy, r, d))
+            else:
+                self.n_gated_out += 1
+
+        if not in_gate:
+            # Coast on prediction
+            self.coast_count += 1
+            self.n_coasts += 1
+            if self.coast_count > self.max_coast:
+                self.lost = True
+                self._initialized = False
+                return dict(state=None, measured=False,
+                            coasting=False, lost=True,
+                            n_candidates=n_cand)
+            return dict(state=pred, measured=False,
+                        coasting=True, lost=False,
+                        n_candidates=n_cand)
+
+        # Select the best in-gate candidate
+        if self.select == "nearest":
+            best = min(in_gate, key=lambda t: t[4])
+        else:  # area
+            best = max(in_gate, key=lambda t: t[0][cv2.CC_STAT_AREA])
+        _, cx, cy, r, _ = best
+        meas = np.array([[cx], [cy], [r]], dtype=np.float32)
+        self._kf.correct(meas)
+        self.coast_count = 0
+        self.lost = False
+        self.n_updates += 1
+        st = self._kf.statePost
+        return dict(state=(float(st[0, 0]), float(st[1, 0]),
+                           float(st[2, 0])),
+                    measured=True, coasting=False, lost=False,
+                    n_candidates=n_cand)
