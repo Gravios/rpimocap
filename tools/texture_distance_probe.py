@@ -144,6 +144,13 @@ def main(argv=None):
     ap.add_argument("--dynamic-shadow-alpha", type=float, default=0.02,
                     help="EMA rate for the dynamic shadow field. "
                          "Larger adapts faster. Default 0.02.")
+    ap.add_argument("--track-dump-heatmaps", type=int, default=0,
+                    metavar="EVERY_N",
+                    help="In track mode, also write a standalone "
+                         "3-panel PNG [raw+circle | heatmap | mask] "
+                         "every N tracked frames (0 = only the "
+                         "montage). Lets you scrub individual frames "
+                         "rather than just the 12-cell summary.")
     ap.add_argument("--min-area", type=int, default=1000)
     ap.add_argument("--out", required=True,
                     help="Output directory for diagnostic PNGs.")
@@ -375,7 +382,12 @@ def main(argv=None):
                 want_montage = ((fi - args.track_start)
                                 % max(1, (args.track_end
                                           - args.track_start) // 12) == 0)
-                if want_montage and res["state"] is not None:
+                want_dump = (args.track_dump_heatmaps > 0
+                             and (fi - args.track_start)
+                             % args.track_dump_heatmaps == 0)
+                if (want_montage or want_dump) and res["state"] is not None:
+                    # Panel 1: illumination-corrected raw + tracked
+                    # circle (green=measured, orange=coasting)
                     g = gray_c.astype(np.float32)
                     lo, hi = np.percentile(g, [1, 99])
                     vis = np.clip((g - lo) / (hi - lo + 1e-6) * 255,
@@ -388,7 +400,33 @@ def main(argv=None):
                                col, 2)
                     cv2.putText(vis, f"f{fi}", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
-                    montage_frames.append(vis)
+                    tag = "MEAS" if res["measured"] else "COAST"
+                    cv2.putText(vis, tag, (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
+                    # Panel 2: texture-distance heatmap (what the
+                    # tracker is actually seeing this frame)
+                    heat = colorize_distance_map(dist)
+                    cv2.circle(heat, (int(cx), int(cy)), int(r),
+                               (255, 255, 255), 2)
+                    # Panel 3: thresholded mask overlay on the raw
+                    mask_ov = vis.copy()
+                    cnts_m, _ = cv2.findContours(
+                        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    cv2.drawContours(mask_ov, cnts_m, -1,
+                                     (0, 255, 255), 2)
+                    cv2.putText(mask_ov,
+                                f"fg={int((mask>0).sum())}px "
+                                f"cc={len(cnts_m)}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, (0, 255, 255), 2)
+                    cell = np.hstack([vis, heat, mask_ov])
+                    if want_montage:
+                        montage_frames.append(cell)
+                    if want_dump:
+                        dpath = os.path.join(
+                            args.out,
+                            f"track_cam{cam_id}_f{fi:06d}.png")
+                        cv2.imwrite(dpath, cell)
             # Write trajectory CSV
             traj_csv = os.path.join(
                 args.out, f"track_cam{cam_id}.csv")
@@ -398,9 +436,11 @@ def main(argv=None):
                     fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
                              f"{row[3]:.2f},{int(row[4])},"
                              f"{int(row[5])}\n")
-            # Write montage
+            # Write montage. Each cell is now a 3-panel strip
+            # [raw+circle | heatmap | mask], so use 2 columns to keep
+            # the grid readable.
             if montage_frames:
-                cols = 4
+                cols = 2
                 rows_n = (len(montage_frames) + cols - 1) // cols
                 h, w = montage_frames[0].shape[:2]
                 grid = np.zeros((rows_n * h, cols * w, 3), np.uint8)
