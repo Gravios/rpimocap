@@ -97,6 +97,23 @@ def main(argv=None):
                          "below this (lines fill ~0.1-0.2, blobs "
                          "~0.5+). Complements aspect for diagonal "
                          "cables. Default 0 (disabled).")
+    ap.add_argument("--illumination-correct", action="store_true",
+                    default=False,
+                    help="Build a static shadow/illumination field "
+                         "(per-pixel temporal median intensity) and "
+                         "flat-field correct every frame by it before "
+                         "computing textures. Removes the fixed IR "
+                         "falloff so the same texture reads the same "
+                         "everywhere in the arena.")
+    ap.add_argument("--illumination-blur-sigma", type=float,
+                    default=51.0,
+                    help="Gaussian sigma to isolate the LOW-FREQUENCY "
+                         "illumination falloff from the median field. "
+                         "Large (e.g. 51) keeps only the smooth shadow "
+                         "gradient, leaving sharp static structures "
+                         "(rails) out of the field so they aren't "
+                         "divided away. Set 0 for full flat-field "
+                         "(removes structure too). Default 51.")
     ap.add_argument("--threshold-method", default="otsu",
                     choices=["otsu", "absolute", "percentile"])
     ap.add_argument("--abs-thresh", type=float, default=3.0)
@@ -114,6 +131,7 @@ def main(argv=None):
     from rpimocap.detection.texture_distance import (
         dense_gabor_descriptor, BackgroundTextureModel,
         build_persistent_texture_model,
+        build_illumination_field, apply_illumination_correction,
         texture_distance_map, threshold_distance_map,
         colorize_distance_map)
 
@@ -149,6 +167,34 @@ def main(argv=None):
             print(f"  ERROR: only {len(bg_grays)} bg frames collected")
             cap.release()
             continue
+
+        # ── Static shadow / illumination field ────────────────────
+        # The per-pixel temporal median of intensity is the static
+        # scene illumination (the rat, a moving minority, is rejected).
+        # Flat-field correcting each frame by this field makes the
+        # texture descriptor illumination-invariant, so the same
+        # bedding reads the same whether well-lit or in shadow.
+        illum_field = None
+        if args.illumination_correct:
+            illum_field = build_illumination_field(
+                bg_grays, blur_sigma=args.illumination_blur_sigma)
+            tgt = float(illum_field.mean())
+            print(f"  Illumination field: mean={tgt:.1f} "
+                  f"min={float(illum_field.min()):.1f} "
+                  f"max={float(illum_field.max()):.1f} "
+                  f"(blur_sigma={args.illumination_blur_sigma})")
+            # Save the field as a heatmap for inspection
+            fld_vis = np.clip(illum_field / (illum_field.max() + 1e-6)
+                              * 255, 0, 255).astype(np.uint8)
+            cv2.imwrite(
+                os.path.join(args.out, f"illumination_cam{cam_id}.png"),
+                cv2.applyColorMap(fld_vis, cv2.COLORMAP_INFERNO))
+            # Correct the bg frames so the texture model is built on
+            # illumination-normalized frames
+            bg_grays = [apply_illumination_correction(g, illum_field,
+                                                       target_level=tgt)
+                        for g in bg_grays]
+
         model, persistence_map = build_persistent_texture_model(
             bg_grays, kernels, n_orient, n_scales,
             smooth_k=args.smooth_k, rotation_invariant=True)
@@ -179,6 +225,12 @@ def main(argv=None):
                 print(f"  probe frame {pf}: could not read")
                 continue
             gray = _to_gray(frame, args.green_channel)
+            # Apply the same illumination correction the model was
+            # built with, so the descriptor space matches.
+            if illum_field is not None:
+                gray = apply_illumination_correction(
+                    gray, illum_field,
+                    target_level=float(illum_field.mean()))
             dist = texture_distance_map(
                 gray, model, kernels, n_orient, n_scales,
                 smooth_k=args.smooth_k, rotation_invariant=True,

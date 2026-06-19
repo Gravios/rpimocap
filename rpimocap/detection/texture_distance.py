@@ -131,6 +131,102 @@ def dense_gabor_descriptor(
 
 
 # ────────────────────────────────────────────────────────────────────
+#  Static shadow / illumination model (flat-field normalization)
+# ────────────────────────────────────────────────────────────────────
+
+
+def build_illumination_field(
+        frames:      Sequence[np.ndarray],
+        blur_sigma:  float = 0.0,
+        roi_mask:    Optional[np.ndarray] = None,
+        ) -> np.ndarray:
+    """Estimate the static per-pixel illumination ('shadow') field
+    from a stack of frames.
+
+    The arena has a fixed IR illumination falloff — brighter under
+    the emitter, dimmer at the edges. The same surface texture
+    therefore produces a stronger Gabor response where it's well-lit
+    and a weaker one in shadow, so the illumination gradient is baked
+    into the texture descriptor and gives the distance map uneven
+    spatial sensitivity.
+
+    With the rat present in every frame but only ever in one place,
+    the per-pixel temporal MEDIAN of intensity is the static scene —
+    the rat is rejected as a minority outlier (same logic as the
+    persistent texture model). That median IS the illumination field
+    (plus static structure).
+
+    Parameters
+    ----------
+    frames     : grayscale frames spread across the session.
+    blur_sigma : if > 0, Gaussian-blur the median field to isolate
+                 only the LOW-FREQUENCY illumination falloff (the
+                 'shadow model' proper), leaving sharp static
+                 structures (rails, reflections) out of the field so
+                 they aren't divided away. If 0, return the raw
+                 median field (full flat-field — removes illumination
+                 AND static structure).
+    roi_mask   : optional; outside-ROI pixels are filled with the
+                 in-ROI mean so the divide is well-defined there.
+
+    Returns
+    -------
+    (H, W) float32 illumination field, strictly positive (floored).
+    """
+    if len(frames) < 3:
+        raise RuntimeError(
+            "need at least 3 frames for an illumination field")
+    stack = np.stack([f.astype(np.float32) for f in frames], axis=0)
+    field = np.median(stack, axis=0).astype(np.float32)
+    if blur_sigma and blur_sigma > 0:
+        # Kernel size ~6 sigma, odd
+        k = int(2 * round(3 * blur_sigma) + 1)
+        field = cv2.GaussianBlur(field, (k, k), blur_sigma)
+    if roi_mask is not None:
+        m = roi_mask > 0
+        if m.any():
+            field[~m] = float(field[m].mean())
+    # Floor to keep the divide well-defined
+    field = np.maximum(field, 1.0)
+    return field
+
+
+def apply_illumination_correction(
+        gray:            np.ndarray,
+        illumination:    np.ndarray,
+        target_level:    Optional[float] = None,
+        ) -> np.ndarray:
+    """Flat-field correct a frame by the illumination field.
+
+        corrected = gray / illumination * target_level
+
+    This flattens the static shadow gradient so the same texture
+    yields the same descriptor everywhere in the arena. The rat —
+    which is NOT part of the static illumination field — keeps its
+    contrast against the now-uniform background.
+
+    Parameters
+    ----------
+    gray         : (H, W) frame to correct (uint8 or float)
+    illumination : (H, W) field from build_illumination_field
+    target_level : the post-correction reference brightness. Defaults
+                   to the mean of the illumination field (so overall
+                   brightness is preserved). Pixels where the frame
+                   matches the field map to ~target_level.
+
+    Returns
+    -------
+    (H, W) uint8 illumination-corrected frame, clipped to [0, 255].
+    """
+    g = gray.astype(np.float32)
+    field = np.maximum(illumination.astype(np.float32), 1.0)
+    if target_level is None:
+        target_level = float(field.mean())
+    corrected = g / field * target_level
+    return np.clip(corrected, 0, 255).astype(np.uint8)
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Per-pixel background texture model (mean + std of descriptor)
 # ────────────────────────────────────────────────────────────────────
 

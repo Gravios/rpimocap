@@ -340,3 +340,115 @@ class TestShapeFilters:
         assert m[100, 80] > 0
         # Diagonal line (sparse bbox) rejected
         assert m[110, 230] == 0
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Static shadow / illumination model
+# ────────────────────────────────────────────────────────────────────
+
+
+from rpimocap.detection.texture_distance import (
+    build_illumination_field, apply_illumination_correction)
+
+
+def _gradient_frame(seed, rat_xy=None, shape=(160, 300)):
+    """Uniform texture under a left-bright / right-dark illumination
+    gradient (mimics IR falloff). Optional moving rat."""
+    H, W = shape
+    rng = np.random.RandomState(seed)
+    tex = rng.randint(70, 110, shape).astype(np.float32)
+    tex = cv2.GaussianBlur(tex, (3, 3), 0)
+    grad = np.linspace(1.8, 0.5, W)[None, :].repeat(H, axis=0)
+    f = np.clip(tex * grad, 0, 255).astype(np.uint8)
+    if rat_xy is not None:
+        cv2.circle(f, rat_xy, 25, 200, -1)
+    return f
+
+
+class TestIlluminationField:
+
+    def test_field_builds_and_positive(self):
+        frames = [_gradient_frame(s, rat_xy=(30 + s * 20, 80))
+                  for s in range(12)]
+        field = build_illumination_field(frames, blur_sigma=0)
+        assert field.shape == frames[0].shape
+        assert float(field.min()) >= 1.0     # floored positive
+
+    def test_field_captures_gradient(self):
+        """The illumination field should be brighter on the lit (left)
+        side than the shadowed (right) side."""
+        frames = [_gradient_frame(s, rat_xy=(30 + s * 20, 80))
+                  for s in range(12)]
+        field = build_illumination_field(frames, blur_sigma=21)
+        left = float(field[:, :50].mean())
+        right = float(field[:, -50:].mean())
+        assert left > right, (
+            f"field should be brighter on lit side; "
+            f"left={left:.1f} right={right:.1f}")
+
+    def test_median_rejects_moving_rat(self):
+        """The bright rat circle moves each frame, so the median
+        field should NOT show a persistent bright rat blob — the
+        field at any pixel reflects background illumination."""
+        frames = [_gradient_frame(s, rat_xy=(30 + s * 20, 80))
+                  for s in range(12)]
+        field = build_illumination_field(frames, blur_sigma=0)
+        # The rat (intensity 200) passes through many positions along
+        # y=80. The median there should be well below 200 (background
+        # illumination level), since the rat is a minority at each x.
+        assert float(field[80, 150]) < 180
+
+    def test_requires_min_frames(self):
+        try:
+            build_illumination_field([_gradient_frame(0)], blur_sigma=0)
+            assert False, "should raise on too few frames"
+        except RuntimeError:
+            pass
+
+
+class TestIlluminationCorrection:
+
+    def test_correction_equalizes_descriptor(self):
+        """The same texture under different illumination produces
+        different descriptors before correction, matching descriptors
+        after."""
+        # Build field from background-only gradient frames
+        frames = [_gradient_frame(s, rat_xy=(30 + s * 20, 80))
+                  for s in range(12)]
+        field = build_illumination_field(frames, blur_sigma=0)
+        test = _gradient_frame(999)        # no rat, pure gradient
+        # Before
+        desc_pre = dense_gabor_descriptor(
+            test, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        left_pre = desc_pre[:, 70:90, 30:70].mean()
+        right_pre = desc_pre[:, 70:90, 230:270].mean()
+        ratio_pre = abs(left_pre / (right_pre + 1e-6) - 1.0)
+        # After
+        corr = apply_illumination_correction(test, field)
+        desc_post = dense_gabor_descriptor(
+            corr, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        left_post = desc_post[:, 70:90, 30:70].mean()
+        right_post = desc_post[:, 70:90, 230:270].mean()
+        ratio_post = abs(left_post / (right_post + 1e-6) - 1.0)
+        # Correction should bring the lit/shadow descriptor ratio
+        # closer to 1.0
+        assert ratio_post < ratio_pre, (
+            f"correction should equalize descriptors; "
+            f"pre-imbalance={ratio_pre:.2f} post={ratio_post:.2f}")
+
+    def test_correction_preserves_brightness(self):
+        """Correcting a frame that equals the field yields ~the field
+        mean everywhere (no gross brightness change)."""
+        frames = [_gradient_frame(s) for s in range(8)]
+        field = build_illumination_field(frames, blur_sigma=0)
+        corr = apply_illumination_correction(field, field)
+        # Where frame == field, corrected ≈ target_level (field mean)
+        assert abs(float(corr.mean()) - float(field.mean())) < 10
+
+    def test_correction_output_uint8(self):
+        frames = [_gradient_frame(s) for s in range(6)]
+        field = build_illumination_field(frames, blur_sigma=11)
+        corr = apply_illumination_correction(
+            _gradient_frame(1), field)
+        assert corr.dtype == np.uint8
+        assert corr.min() >= 0 and corr.max() <= 255
