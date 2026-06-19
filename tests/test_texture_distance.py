@@ -214,3 +214,129 @@ class TestColorize:
         heat = colorize_distance_map(dist)
         assert heat.shape == (80, 100, 3)
         assert heat.dtype == np.uint8
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Persistent (median) model + persistence gating + shape filters
+# ────────────────────────────────────────────────────────────────────
+
+
+from rpimocap.detection.texture_distance import (
+    build_persistent_texture_model)
+
+
+def _frame_moving_rat(seed, rat_xy, shape=(160, 220)):
+    """Textured bg + static rail + a filled-ellipse rat at rat_xy."""
+    rng = np.random.RandomState(seed)
+    f = rng.randint(70, 110, shape).astype(np.uint8)
+    f = cv2.GaussianBlur(f, (3, 3), 0)
+    f[8:24, 100:120] = 235                       # static rail
+    cv2.ellipse(f, rat_xy, (40, 28), 10, 0, 360, 205, -1)
+    return f
+
+
+class TestPersistentModel:
+
+    def test_median_model_builds(self):
+        positions = [(50, 80), (100, 60), (160, 110), (190, 70),
+                     (120, 90), (70, 120), (170, 50), (140, 100)]
+        frames = [_frame_moving_rat(s, positions[s % len(positions)])
+                  for s in range(16)]
+        model, pers = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        assert model.mean.shape == (3 * N_SCALES,) + frames[0].shape
+        assert pers.shape == frames[0].shape
+        # persistence in [0, 1]
+        assert float(pers.min()) >= 0.0
+        assert float(pers.max()) <= 1.0
+
+    def test_median_rejects_moving_rat(self):
+        """Because the rat is in a different place each frame, the
+        per-pixel median should reflect BACKGROUND, not fur. A pixel
+        the rat only occasionally covers should have a background-like
+        median descriptor."""
+        positions = [(50, 80), (100, 60), (160, 110), (190, 70),
+                     (120, 90), (70, 120), (170, 50), (140, 100)]
+        frames = [_frame_moving_rat(s, positions[s % len(positions)])
+                  for s in range(16)]
+        model, pers = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        # Build a pure-background reference (no rat) and compare the
+        # median model to it at a pixel the rat sometimes covers
+        bg_only = _frame_moving_rat(999, (-100, -100))   # rat offscreen
+        from rpimocap.detection.texture_distance import (
+            dense_gabor_descriptor)
+        bg_desc = dense_gabor_descriptor(
+            bg_only, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        # At a sometimes-covered pixel, the median model should be
+        # closer to background than to fur. Compare descriptor norms.
+        y, x = 90, 120
+        median_vec = model.mean[:, y, x]
+        bg_vec = bg_desc[:, y, x]
+        # Median should be reasonably close to the background vector
+        rel = (np.linalg.norm(median_vec - bg_vec)
+               / (np.linalg.norm(bg_vec) + 1e-6))
+        assert rel < 1.0, (
+            f"median model should resemble background at "
+            f"sometimes-covered pixel; rel diff {rel:.2f}")
+
+
+class TestPersistenceGating:
+
+    def test_gating_suppresses_static_structure(self):
+        """A static rail that the median imperfectly models should
+        have LOWER distance with persistence gating than without."""
+        positions = [(50, 80), (100, 60), (160, 110), (190, 70),
+                     (120, 90), (70, 120), (170, 50), (140, 100)]
+        frames = [_frame_moving_rat(s, positions[s % len(positions)])
+                  for s in range(16)]
+        model, pers = build_persistent_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        test = _frame_moving_rat(999, (110, 80))
+        dist_no = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES,
+            smooth_k=7, post_smooth_k=9)
+        dist_gate = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES,
+            smooth_k=7, persistence_map=pers, persistence_power=2.0,
+            post_smooth_k=9)
+        rail_no = float(dist_no[8:24, 100:120].mean())
+        rail_gate = float(dist_gate[8:24, 100:120].mean())
+        assert rail_gate <= rail_no, (
+            f"gating should not increase rail distance; "
+            f"no={rail_no:.2f} gate={rail_gate:.2f}")
+
+
+class TestShapeFilters:
+
+    def test_aspect_filter_rejects_isolated_line(self):
+        """An isolated thin line (cable) is rejected by the aspect
+        filter while a compact blob (rat) survives."""
+        d = np.zeros((200, 300), np.float32)
+        cv2.ellipse(d, (80, 100), (45, 35), 0, 0, 360, 10.0, -1)
+        cv2.line(d, (180, 40), (280, 180), 10.0, 5)
+        m_no, _ = threshold_distance_map(
+            d, method="absolute", abs_thresh=3.0, min_area_px=200,
+            max_aspect_ratio=0, morph_close_k=3)
+        m_yes, _ = threshold_distance_map(
+            d, method="absolute", abs_thresh=3.0, min_area_px=200,
+            max_aspect_ratio=6.0, morph_close_k=3)
+        # Blob survives both
+        assert m_yes[100, 80] > 0
+        # Cable present without filter, gone with it
+        assert m_no[110, 230] > 0
+        assert m_yes[110, 230] == 0
+
+    def test_fill_ratio_filter(self):
+        """min_fill_ratio rejects a sparse diagonal line whose bbox
+        is mostly empty."""
+        d = np.zeros((200, 300), np.float32)
+        cv2.ellipse(d, (80, 100), (45, 35), 0, 0, 360, 10.0, -1)
+        cv2.line(d, (180, 40), (280, 180), 10.0, 4)
+        m, _ = threshold_distance_map(
+            d, method="absolute", abs_thresh=3.0, min_area_px=200,
+            min_fill_ratio=0.35, morph_close_k=1)
+        # Blob (fills its bbox well) survives
+        assert m[100, 80] > 0
+        # Diagonal line (sparse bbox) rejected
+        assert m[110, 230] == 0

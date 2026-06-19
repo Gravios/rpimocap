@@ -214,7 +214,14 @@ def build_background_texture_model(
         std_floor:   float = 1e-3,
         ) -> BackgroundTextureModel:
     """Convenience builder: accumulate a texture model over a list of
-    background frames."""
+    background frames using Welford running mean/std.
+
+    NOTE: the running mean is contaminated by the rat — wherever the
+    rat sits during the sampled frames, that pixel's mean is pulled
+    toward fur texture. For a session where the rat is present in
+    every frame, prefer build_persistent_texture_model() which uses
+    a per-pixel temporal MEDIAN (robust to the moving rat, since any
+    given pixel shows background in the majority of frames)."""
     model = BackgroundTextureModel()
     for f in bg_frames:
         desc = dense_gabor_descriptor(
@@ -223,6 +230,89 @@ def build_background_texture_model(
             rotation_invariant=rotation_invariant)
         model.accumulate(desc)
     return model.finalize(std_floor=std_floor)
+
+
+def build_persistent_texture_model(
+        bg_frames:   Sequence[np.ndarray],
+        kernels:     Sequence[np.ndarray],
+        n_orient:    int,
+        n_scales:    int,
+        smooth_k:    int = 7,
+        rotation_invariant: bool = True,
+        std_floor:   float = 1e-3,
+        ) -> tuple["BackgroundTextureModel", np.ndarray]:
+    """Build a background texture model robust to the moving rat,
+    plus a persistence (temporal-stability) map.
+
+    The key insight for a session where the rat is in every frame:
+    any single pixel is BACKGROUND in the majority of frames (the rat
+    is only ever in one place at a time). So the per-pixel temporal
+    MEDIAN of the descriptor is the persistent background texture —
+    the rat, being a transient minority at any given pixel, is
+    rejected as an outlier. This is far better than a running mean,
+    which the rat contaminates.
+
+    The per-pixel temporal MAD (median absolute deviation) gives a
+    robust spread estimate, used both as the distance-normalizer
+    (like std) and to build the persistence map.
+
+    Persistence map:
+        Pixels whose descriptor is STABLE over the session (low
+        temporal MAD) are persistent structure — bedding, frame
+        rails, static reflections. Pixels with HIGH temporal MAD are
+        where things move (rat paths, cable, disturbed bedding). The
+        map is normalized to [0, 1] where 1 = perfectly persistent.
+
+    Frames should be sampled across the WHOLE session (large stride),
+    not a front window, so that lighting/bedding drift is captured in
+    the median rather than read as foreground later.
+
+    Parameters
+    ----------
+    bg_frames : list of grayscale frames spread across the session.
+                More frames = better median; 40-80 is reasonable.
+    (others)  : as dense_gabor_descriptor.
+
+    Returns
+    -------
+    (model, persistence_map)
+      model           : BackgroundTextureModel with mean=median,
+                        std=MAD-derived spread
+      persistence_map : (H, W) float32 in [0, 1]; 1 = most persistent
+    """
+    if len(bg_frames) < 3:
+        raise RuntimeError(
+            "need at least 3 frames for a median texture model")
+    # Stack all descriptors: (T, D, H, W). Memory note — for a
+    # 2028×1080 frame with D=9 and T=60 this is ~1.2 GB float32, so
+    # downstream callers may want to subsample spatially or cap T.
+    descs = []
+    for f in bg_frames:
+        descs.append(dense_gabor_descriptor(
+            f, kernels, n_orient, n_scales,
+            smooth_k=smooth_k, rotation_invariant=rotation_invariant))
+    stack = np.stack(descs, axis=0)            # (T, D, H, W)
+
+    # Per-pixel, per-channel temporal median = persistent background
+    median = np.median(stack, axis=0).astype(np.float32)   # (D, H, W)
+    # Median absolute deviation → robust spread
+    mad = np.median(np.abs(stack - median[None]), axis=0)
+    # Scale MAD to be std-comparable (for a normal dist, std≈1.4826*MAD)
+    spread = (1.4826 * mad).astype(np.float32)
+    spread = np.maximum(spread, std_floor)
+
+    model = BackgroundTextureModel(
+        mean=median, std=spread, n=len(bg_frames))
+
+    # Persistence map: low channel-summed spread → high persistence.
+    # Use the mean spread across channels as the instability measure.
+    instability = spread.mean(axis=0)          # (H, W)
+    # Normalize: map [p5, p95] of instability to [1, 0]
+    lo = float(np.percentile(instability, 5))
+    hi = float(np.percentile(instability, 95))
+    norm = np.clip((instability - lo) / (hi - lo + 1e-6), 0, 1)
+    persistence_map = (1.0 - norm).astype(np.float32)
+    return model, persistence_map
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -239,6 +329,8 @@ def texture_distance_map(
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
         roi_mask:    Optional[np.ndarray] = None,
+        persistence_map: Optional[np.ndarray] = None,
+        persistence_power: float = 1.0,
         post_smooth_k: int = 15,
         ) -> np.ndarray:
     """Compute a per-pixel texture-distance map between a current
@@ -262,6 +354,15 @@ def texture_distance_map(
     kernels/n_orient/n_scales/smooth_k/rotation_invariant
                  : must match what built the model
     roi_mask     : optional (H, W); pixels outside are set to 0
+    persistence_map : optional (H, W) in [0,1] from
+                   build_persistent_texture_model. Pixels with high
+                   persistence (stable background) are damped by
+                   (1 - persistence)^persistence_power, suppressing
+                   static structure that the median model captures
+                   imperfectly. This is what prevents the global
+                   wash-out seen when bedding/lighting drift.
+    persistence_power : exponent on the damping factor. >1 makes the
+                   suppression of persistent pixels more aggressive.
     post_smooth_k: box-filter window applied to the final distance
                    map (px). This is the crude stand-in for the
                    smoothness term of a full MRF — it consolidates
@@ -283,6 +384,18 @@ def texture_distance_map(
     # Per-channel z-score, then RMS across channels
     z = (desc - model.mean) / model.std
     dist = np.sqrt(np.mean(z * z, axis=0)).astype(np.float32)
+    # Persistence gating. Multiply the distance by (1 - persistence)^p
+    # so that pixels which are PERSISTENT background (high
+    # persistence) are suppressed even if their instantaneous z-score
+    # is high. This kills the global wash-out: a frame rail or
+    # reflection that the median model captures imperfectly still has
+    # high persistence, so its residual distance is damped. Transient
+    # pixels (the rat) have low persistence → full distance kept.
+    if persistence_map is not None:
+        damp = np.clip(1.0 - persistence_map, 0.0, 1.0)
+        if persistence_power != 1.0:
+            damp = damp ** float(persistence_power)
+        dist = dist * damp.astype(np.float32)
     if roi_mask is not None:
         dist = dist * (roi_mask > 0).astype(np.float32)
     if post_smooth_k and post_smooth_k > 1:
@@ -298,6 +411,8 @@ def threshold_distance_map(
         percentile:  float = 95.0,
         min_area_px: int = 1000,
         morph_close_k: int = 7,
+        max_aspect_ratio: float = 0.0,
+        min_fill_ratio:   float = 0.0,
         ) -> tuple[np.ndarray, float]:
     """Threshold a texture-distance map into a binary foreground
     mask, keep connected components above min_area_px.
@@ -306,6 +421,20 @@ def threshold_distance_map(
       "otsu"       — Otsu's threshold on the distance histogram
       "absolute"   — fixed abs_thresh (z-score units)
       "percentile" — the given percentile of in-ROI distances
+
+    Shape filters (reject the cable, keep the rat):
+      max_aspect_ratio : if > 0, reject CCs whose minAreaRect
+                        long/short ratio exceeds this. The cable is a
+                        thin line (aspect 10-30); the rat body is
+                        compact (aspect 1.5-3). The texture heatmap
+                        shows the cable as a high-distance STREAK and
+                        the rat as a high-distance BLOB, so this
+                        separates them cleanly.
+      min_fill_ratio   : if > 0, reject CCs whose area / bbox-area is
+                        below this. A line barely fills its bounding
+                        box (~0.1-0.2); a blob fills much more (~0.5+).
+                        Complements the aspect filter for diagonal
+                        cables whose minAreaRect is misleading.
 
     Returns (mask_uint8, threshold_used). This crude threshold +
     CC-filter is the cheap stand-in for the graph-cut; if the
@@ -334,12 +463,30 @@ def threshold_distance_map(
         kern = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_close_k, morph_close_k))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
-    # Keep CCs above min_area
+    # Keep CCs above min_area, optionally applying shape filters
     n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
     out = np.zeros_like(mask)
     for i in range(1, n_cc):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area_px:
-            out[labels == i] = 255
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_area_px:
+            continue
+        # Shape filters to reject the cable
+        if max_aspect_ratio > 0 or min_fill_ratio > 0:
+            ys, xs = np.where(labels == i)
+            if len(xs) >= 5:
+                pts = np.column_stack([xs, ys]).astype(np.float32)
+                (_, _), (w, h), _ = cv2.minAreaRect(pts)
+                short = min(w, h)
+                long_ = max(w, h)
+                if max_aspect_ratio > 0 and short > 0:
+                    if (long_ / short) > max_aspect_ratio:
+                        continue
+                if min_fill_ratio > 0:
+                    bbox_area = (stats[i, cv2.CC_STAT_WIDTH]
+                                 * stats[i, cv2.CC_STAT_HEIGHT])
+                    if bbox_area > 0 and (area / bbox_area) < min_fill_ratio:
+                        continue
+        out[labels == i] = 255
     return out, thr
 
 

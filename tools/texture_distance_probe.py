@@ -83,6 +83,20 @@ def main(argv=None):
     ap.add_argument("--post-smooth-k", type=int, default=15,
                     help="Box filter on the final distance map "
                          "(crude smoothness-term stand-in).")
+    ap.add_argument("--persistence-power", type=float, default=1.0,
+                    help="Exponent on the persistence damping. >1 "
+                         "suppresses persistent-background pixels "
+                         "more aggressively. Default 1.0.")
+    ap.add_argument("--max-aspect-ratio", type=float, default=6.0,
+                    help="Reject thresholded components more "
+                         "elongated than this (the cable is a thin "
+                         "streak, aspect 10-30; the rat is compact, "
+                         "1.5-3). Default 6.0. Set 0 to disable.")
+    ap.add_argument("--min-fill-ratio", type=float, default=0.0,
+                    help="Reject components whose area/bbox-area is "
+                         "below this (lines fill ~0.1-0.2, blobs "
+                         "~0.5+). Complements aspect for diagonal "
+                         "cables. Default 0 (disabled).")
     ap.add_argument("--threshold-method", default="otsu",
                     choices=["otsu", "absolute", "percentile"])
     ap.add_argument("--abs-thresh", type=float, default=3.0)
@@ -99,6 +113,7 @@ def main(argv=None):
     from rpimocap.detection.rat_texture import build_gabor_kernels
     from rpimocap.detection.texture_distance import (
         dense_gabor_descriptor, BackgroundTextureModel,
+        build_persistent_texture_model,
         texture_distance_map, threshold_distance_map,
         colorize_distance_map)
 
@@ -118,32 +133,43 @@ def main(argv=None):
         # ── Build background texture model ────────────────────────
         print(f"  Building bg texture model: {args.bg_frames} frames "
               f"from idx {args.bg_start} stride {args.bg_stride}")
-        model = BackgroundTextureModel()
-        collected = 0
+        # Collect frames spread across the session for a robust median
+        # background texture model. With the rat in every frame, the
+        # per-pixel temporal median rejects the rat as an outlier.
+        bg_grays = []
         idx = args.bg_start
-        while collected < args.bg_frames:
+        while len(bg_grays) < args.bg_frames:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            gray = _to_gray(frame, args.green_channel)
-            desc = dense_gabor_descriptor(
-                gray, kernels, n_orient, n_scales,
-                smooth_k=args.smooth_k, rotation_invariant=True)
-            model.accumulate(desc)
-            collected += 1
+            bg_grays.append(_to_gray(frame, args.green_channel))
             idx += args.bg_stride
-        model.finalize()
-        print(f"  Model built from {model.n} frames, "
-              f"mean shape {model.mean.shape}")
+        if len(bg_grays) < 3:
+            print(f"  ERROR: only {len(bg_grays)} bg frames collected")
+            cap.release()
+            continue
+        model, persistence_map = build_persistent_texture_model(
+            bg_grays, kernels, n_orient, n_scales,
+            smooth_k=args.smooth_k, rotation_invariant=True)
+        print(f"  Persistent model built from {model.n} frames "
+              f"(median + MAD), mean shape {model.mean.shape}")
 
-        # Report std magnitude — high-std channels are where the bg
-        # texture is unstable (specular wobble); the distance map
-        # auto-discounts them.
+        # Report spread magnitude — high values are where the bg
+        # texture is unstable (specular wobble, rat paths).
         std_med = float(np.median(model.std))
         std_p99 = float(np.percentile(model.std, 99))
-        print(f"  bg descriptor std: median={std_med:.4f} "
+        pers_med = float(np.median(persistence_map))
+        print(f"  bg descriptor spread: median={std_med:.4f} "
               f"p99={std_p99:.4f}")
+        print(f"  persistence map: median={pers_med:.3f} "
+              f"(1=stable bg, 0=transient)")
+        # Save the persistence map as a heatmap for inspection
+        pers_vis = (persistence_map * 255).astype(np.uint8)
+        pers_heat = cv2.applyColorMap(pers_vis, cv2.COLORMAP_VIRIDIS)
+        cv2.imwrite(
+            os.path.join(args.out, f"persistence_cam{cam_id}.png"),
+            pers_heat)
 
         # ── Probe frames ──────────────────────────────────────────
         for pf in args.probe_frames:
@@ -156,12 +182,16 @@ def main(argv=None):
             dist = texture_distance_map(
                 gray, model, kernels, n_orient, n_scales,
                 smooth_k=args.smooth_k, rotation_invariant=True,
+                persistence_map=persistence_map,
+                persistence_power=args.persistence_power,
                 post_smooth_k=args.post_smooth_k)
             mask, thr = threshold_distance_map(
                 dist, method=args.threshold_method,
                 abs_thresh=args.abs_thresh,
                 percentile=args.threshold_percentile,
-                min_area_px=args.min_area)
+                min_area_px=args.min_area,
+                max_aspect_ratio=args.max_aspect_ratio,
+                min_fill_ratio=args.min_fill_ratio)
 
             # Compose a 1×3 panel: raw | heatmap | mask-overlay
             raw_bgr = (frame if frame.ndim == 3
