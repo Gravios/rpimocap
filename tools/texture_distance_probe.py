@@ -136,6 +136,17 @@ def main(argv=None):
                          "below this (lines fill ~0.1-0.2, blobs "
                          "~0.5+). Complements aspect for diagonal "
                          "cables. Default 0 (disabled).")
+    ap.add_argument("--suppress-thin-width", type=int, default=0,
+                    help="Remove structures narrower than this many "
+                         "px (the tether cable) via morphological "
+                         "opening, BEFORE component analysis. Unlike "
+                         "the aspect/fill filters, this severs the "
+                         "cable from the rat WITHIN a merged "
+                         "component — needed because the cable "
+                         "physically attaches to the headstage. Set "
+                         "to ~3x the cable width, well under the "
+                         "rat-body width (25-40 typical). Default 0 "
+                         "(disabled).")
     ap.add_argument("--illumination-correct", action="store_true",
                     default=False,
                     help="Build a static shadow/illumination field "
@@ -358,7 +369,8 @@ def main(argv=None):
                 percentile=args.threshold_percentile,
                 min_area_px=args.min_area,
                 max_aspect_ratio=args.max_aspect_ratio,
-                min_fill_ratio=args.min_fill_ratio)
+                min_fill_ratio=args.min_fill_ratio,
+                suppress_thin_width=args.suppress_thin_width)
 
             # Compose a 1×3 panel: raw | heatmap | mask-overlay
             raw_bgr = (frame if frame.ndim == 3
@@ -438,7 +450,8 @@ def main(argv=None):
                     percentile=args.threshold_percentile,
                     min_area_px=args.min_area,
                     max_aspect_ratio=args.max_aspect_ratio,
-                    min_fill_ratio=args.min_fill_ratio)
+                    min_fill_ratio=args.min_fill_ratio,
+                    suppress_thin_width=args.suppress_thin_width)
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:

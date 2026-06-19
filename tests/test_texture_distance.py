@@ -781,3 +781,69 @@ class TestArenaROIGating:
             test, model, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
             roi_mask=roi, post_smooth_k=0)
         assert float(dist[(roi == 0)].max()) == 0.0
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Cable suppression (thin-structure removal within a component)
+# ────────────────────────────────────────────────────────────────────
+
+
+from rpimocap.detection.texture_distance import suppress_thin_structures
+
+
+class TestSuppressThinStructures:
+
+    def _rat_with_attached_cable(self):
+        """A compact rat body with a thin cable attached — ONE
+        connected component (the failure case for aspect filters)."""
+        d = np.zeros((300, 400), np.float32)
+        cv2.ellipse(d, (150, 150), (60, 45), 0, 0, 360, 10.0, -1)
+        cv2.line(d, (205, 140), (360, 90), 10.0, 6)   # attached cable
+        return (d > 3).astype(np.uint8) * 255
+
+    def test_removes_attached_cable_keeps_rat(self):
+        mask = self._rat_with_attached_cable()
+        out = suppress_thin_structures(mask, min_width_px=30)
+        # Rat body center kept
+        assert out[150, 150] > 0
+        # Cable far end removed
+        assert out[90, 355] == 0
+
+    def test_aspect_filter_alone_fails_on_fused(self):
+        """Demonstrates WHY width suppression is needed: the aspect
+        filter passes the fused rat+cable component (cable survives),
+        while suppression removes it."""
+        d = np.zeros((300, 400), np.float32)
+        cv2.ellipse(d, (150, 150), (60, 45), 0, 0, 360, 10.0, -1)
+        cv2.line(d, (205, 140), (360, 90), 10.0, 6)
+        out_aspect, _ = threshold_distance_map(
+            d, method="absolute", abs_thresh=3.0, min_area_px=500,
+            max_aspect_ratio=6.0, morph_close_k=1)
+        out_supp, _ = threshold_distance_map(
+            d, method="absolute", abs_thresh=3.0, min_area_px=500,
+            suppress_thin_width=30, morph_close_k=1)
+        # Aspect filter leaves the cable; suppression removes it
+        assert out_aspect[90, 355] > 0       # cable survives aspect
+        assert out_supp[90, 355] == 0        # cable removed by width
+        assert out_supp[150, 150] > 0        # rat kept
+
+    def test_empty_mask_returns_empty(self):
+        out = suppress_thin_structures(
+            np.zeros((100, 100), np.uint8), min_width_px=20)
+        assert int((out > 0).sum()) == 0
+
+    def test_all_thin_returns_empty(self):
+        """A mask that is ONLY a thin line (no thick body) erodes to
+        nothing → empty result, not the line."""
+        m = np.zeros((200, 300), np.uint8)
+        cv2.line(m, (20, 100), (280, 100), 255, 5)
+        out = suppress_thin_structures(m, min_width_px=30)
+        assert int((out > 0).sum()) == 0
+
+    def test_thick_blob_survives(self):
+        """A purely thick blob (no thin parts) is preserved."""
+        m = np.zeros((200, 200), np.uint8)
+        cv2.circle(m, (100, 100), 50, 255, -1)
+        out = suppress_thin_structures(m, min_width_px=30)
+        # Most of the blob survives
+        assert int((out > 0).sum()) > 0.7 * int((m > 0).sum())

@@ -714,6 +714,73 @@ def texture_distance_map(
     return dist
 
 
+def suppress_thin_structures(
+        mask:          np.ndarray,
+        min_width_px:  int = 25,
+        restore_radius_px: Optional[int] = None,
+        ) -> np.ndarray:
+    """Remove thin structures (the tether cable) from a binary mask
+    while preserving the compact rat body.
+
+    The aspect-ratio / fill-ratio filters in threshold_distance_map
+    operate on WHOLE connected components, so they fail when the
+    cable physically connects to the rat (it attaches to the
+    headstage): rat+cable is one component with a moderate aspect
+    ratio that passes the filter. This function instead works WITHIN
+    a component by width.
+
+    Mechanism — morphological opening with a disk:
+      1. ERODE by r = min_width_px // 2. Anything thinner than
+         2r (the cable, a few px wide) is completely eaten away;
+         the thick rat body shrinks but survives as a 'core'.
+      2. DILATE the surviving core back by restore_radius_px (default
+         a bit more than r) to recover the rat body's original
+         extent.
+      3. AND the restored core with the original mask, so the result
+         is the rat-shaped subset of the input — the cable, having no
+         surviving core, is gone.
+
+    Because the rat body is much wider than the cable, the opening
+    severs the cable at the headstage and discards it while keeping
+    the rat intact.
+
+    Parameters
+    ----------
+    mask              : (H, W) binary uint8 mask.
+    min_width_px      : structures narrower than this are removed.
+                        Set to roughly the cable width × 3, well below
+                        the rat body width. For a ~6-10px cable and a
+                        ~280px rat, 25-40 is a good range.
+    restore_radius_px : dilation radius to regrow the eroded core.
+                        Defaults to min_width_px//2 + 2. Larger
+                        recovers more of the rat edge but risks
+                        re-attaching a stub of cable.
+
+    Returns
+    -------
+    (H, W) uint8 mask with thin structures removed.
+    """
+    r = max(1, int(min_width_px) // 2)
+    if restore_radius_px is None:
+        restore_radius_px = r + 2
+    m = (mask > 0).astype(np.uint8)
+    if int(m.sum()) == 0:
+        return mask.copy()
+    erode_k = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    core = cv2.erode(m, erode_k)
+    if int(core.sum()) == 0:
+        # Nothing survived erosion (e.g. the whole mask was thin) —
+        # return empty rather than the cable.
+        return np.zeros_like(mask)
+    rr = int(restore_radius_px)
+    dil_k = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * rr + 1, 2 * rr + 1))
+    restored = cv2.dilate(core, dil_k)
+    out = cv2.bitwise_and(m, restored) * 255
+    return out.astype(np.uint8)
+
+
 def threshold_distance_map(
         dist:        np.ndarray,
         method:      str = "otsu",
@@ -723,6 +790,7 @@ def threshold_distance_map(
         morph_close_k: int = 7,
         max_aspect_ratio: float = 0.0,
         min_fill_ratio:   float = 0.0,
+        suppress_thin_width: int = 0,
         ) -> tuple[np.ndarray, float]:
     """Threshold a texture-distance map into a binary foreground
     mask, keep connected components above min_area_px.
@@ -732,24 +800,25 @@ def threshold_distance_map(
       "absolute"   — fixed abs_thresh (z-score units)
       "percentile" — the given percentile of in-ROI distances
 
-    Shape filters (reject the cable, keep the rat):
+    Cable suppression (runs BEFORE component filtering):
+      suppress_thin_width : if > 0, remove structures narrower than
+                        this many px via morphological opening
+                        (suppress_thin_structures). This severs the
+                        cable from the rat WITHIN a merged component,
+                        which the whole-component aspect/fill filters
+                        below cannot do. Set to ~3x the cable width,
+                        well under the rat-body width (25-40 typical).
+
+    Shape filters (reject isolated cable fragments):
       max_aspect_ratio : if > 0, reject CCs whose minAreaRect
                         long/short ratio exceeds this. The cable is a
                         thin line (aspect 10-30); the rat body is
-                        compact (aspect 1.5-3). The texture heatmap
-                        shows the cable as a high-distance STREAK and
-                        the rat as a high-distance BLOB, so this
-                        separates them cleanly.
+                        compact (aspect 1.5-3).
       min_fill_ratio   : if > 0, reject CCs whose area / bbox-area is
                         below this. A line barely fills its bounding
                         box (~0.1-0.2); a blob fills much more (~0.5+).
-                        Complements the aspect filter for diagonal
-                        cables whose minAreaRect is misleading.
 
-    Returns (mask_uint8, threshold_used). This crude threshold +
-    CC-filter is the cheap stand-in for the graph-cut; if the
-    resulting mask cleanly isolates the rat we know the full MRF is
-    worth building.
+    Returns (mask_uint8, threshold_used).
     """
     nz = dist[dist > 0]
     if nz.size == 0:
@@ -773,6 +842,11 @@ def threshold_distance_map(
         kern = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (morph_close_k, morph_close_k))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
+    # Cable suppression BEFORE component analysis, so the cable is
+    # severed from the rat before CCs are counted/filtered.
+    if suppress_thin_width and suppress_thin_width > 0:
+        mask = suppress_thin_structures(
+            mask, min_width_px=suppress_thin_width)
     # Keep CCs above min_area, optionally applying shape filters
     n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
     out = np.zeros_like(mask)
@@ -780,7 +854,7 @@ def threshold_distance_map(
         area = stats[i, cv2.CC_STAT_AREA]
         if area < min_area_px:
             continue
-        # Shape filters to reject the cable
+        # Shape filters to reject isolated cable fragments
         if max_aspect_ratio > 0 or min_fill_ratio > 0:
             ys, xs = np.where(labels == i)
             if len(xs) >= 5:
