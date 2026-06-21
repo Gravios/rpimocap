@@ -99,6 +99,14 @@ def main(argv=None):
     ap.add_argument("--post-smooth-k", type=int, default=15,
                     help="Box filter on the final distance map "
                          "(crude smoothness-term stand-in).")
+    ap.add_argument("--device", default="cpu",
+                    choices=["cpu", "gpu", "auto"],
+                    help="Compute the Gabor descriptor + texture "
+                         "distance on 'cpu' (OpenCV, default), 'gpu' "
+                         "(CuPy — the data-parallel bottleneck port), or "
+                         "'auto'. The bg model is uploaded once and kept "
+                         "resident. GPU results match the CPU path "
+                         "within FP tolerance.")
     ap.add_argument("--persistence-power", type=float, default=1.0,
                     help="Exponent on the persistence damping. >1 "
                          "suppresses persistent-background pixels "
@@ -430,6 +438,39 @@ def main(argv=None):
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
+        # ── Device dispatch for the descriptor + distance ──────────
+        # On 'cpu' use the canonical OpenCV path; on 'gpu'/'auto' use the
+        # CuPy port, uploading the bg model once (resident). The two
+        # match within FP tolerance.
+        _dev_model = None
+        if args.device != "cpu":
+            from rpimocap.detection.gpu_texture import (
+                upload_model, texture_distance_device, array_module)
+            _xp, _ndi, _on_gpu = array_module(args.device)
+            _dev_model = upload_model(model.mean, model.std,
+                                      device=args.device)
+            print(f"  device: {args.device} "
+                  f"(GPU active: {_on_gpu}); bg model resident")
+
+        def _distance(gray_in):
+            if args.device == "cpu":
+                return texture_distance_map(
+                    gray_in, model, kernels, n_orient, n_scales,
+                    smooth_k=args.smooth_k, rotation_invariant=True,
+                    persistence_map=persistence_map,
+                    persistence_power=args.persistence_power,
+                    anisotropy_weight=aniso_w, roi_mask=roi,
+                    post_smooth_k=args.post_smooth_k)
+            return texture_distance_device(
+                gray_in, _dev_model[0], _dev_model[1], kernels,
+                n_orient, n_scales, smooth_k=args.smooth_k,
+                rotation_invariant=True,
+                persistence_map=persistence_map,
+                persistence_power=args.persistence_power,
+                anisotropy_weight=aniso_w, roi_mask=roi,
+                post_smooth_k=args.post_smooth_k,
+                device=args.device, xp=_xp, ndi=_ndi)
+
         # Report spread magnitude — high values are where the bg
         # texture is unstable (specular wobble, rat paths).
         std_med = float(np.median(model.std))
@@ -460,14 +501,7 @@ def main(argv=None):
                 gray = apply_illumination_correction(
                     gray, illum_field,
                     target_level=float(illum_field.mean()))
-            dist = texture_distance_map(
-                gray, model, kernels, n_orient, n_scales,
-                smooth_k=args.smooth_k, rotation_invariant=True,
-                persistence_map=persistence_map,
-                persistence_power=args.persistence_power,
-                anisotropy_weight=aniso_w,
-                roi_mask=roi,
-                post_smooth_k=args.post_smooth_k)
+            dist = _distance(gray)
             mask, thr = _segment(dist, gray, roi)
 
             # Compose a 1×3 panel: raw | heatmap | mask-overlay
@@ -535,14 +569,7 @@ def main(argv=None):
                         target_level=float(illum_field.mean()))
                 else:
                     gray_c = gray
-                dist = texture_distance_map(
-                    gray_c, model, kernels, n_orient, n_scales,
-                    smooth_k=args.smooth_k, rotation_invariant=True,
-                    persistence_map=persistence_map,
-                    persistence_power=args.persistence_power,
-                    anisotropy_weight=aniso_w,
-                    roi_mask=roi,
-                    post_smooth_k=args.post_smooth_k)
+                dist = _distance(gray_c)
                 # Predicted-ROI crop (graphcut only): peek the tracker's
                 # prediction (non-mutating) to restrict the max-flow to a
                 # band around where the rat is expected, before update().
