@@ -71,9 +71,15 @@ graphcut  = ["PyMaxflow>=1.3"]
 
 # CuPy — GPU port of the Gabor descriptor + texture distance
 # (detection.gpu_texture, --device gpu). Optional; the CPU path (OpenCV)
-# is the default and needs nothing extra. Pick the wheel matching the
-# installed CUDA, e.g. cupy-cuda12x.
-gpu       = ["cupy-cuda12x>=13.0"]
+# is the default and needs nothing extra.
+#
+# NOTE: install the CuPy wheel matching your CUDA toolkit MAJOR version
+# MANUALLY — pip cannot detect it, so it is intentionally NOT pinned here:
+#     CUDA 12.x →  pip install cupy-cuda12x
+#     CUDA 13.x →  pip install cupy-cuda13x
+# The 'gpu' extra below pulls the source package as a fallback only; for
+# normal use install the matching wheel above instead.
+gpu       = ["cupy>=13.0"]
 
 # Development and testing
 dev       = ["pytest>=7.4", "pytest-cov", "ruff", "mypy"]
