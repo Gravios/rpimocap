@@ -147,6 +147,32 @@ def main(argv=None):
                          "to ~3x the cable width, well under the "
                          "rat-body width (25-40 typical). Default 0 "
                          "(disabled).")
+    # ── Segmentation backend ───────────────────────────────────────
+    ap.add_argument("--segment-method", default="threshold",
+                    choices=["threshold", "graphcut"],
+                    help="How to turn the texture-distance map into a "
+                         "mask. 'threshold' = abs/otsu threshold + "
+                         "morphology + CC filter (fast, heuristic). "
+                         "'graphcut' = minimize a binary MRF energy "
+                         "(texture-distance data term + contrast-"
+                         "sensitive smoothness) via max-flow — a "
+                         "globally-optimal coherent silhouette, the "
+                         "first principled step toward the variational "
+                         "formulation. Requires PyMaxflow.")
+    ap.add_argument("--gc-smooth-weight", type=float, default=2.0,
+                    help="graphcut: weight on the smoothness term. "
+                         "Larger = smoother/rounder silhouette, "
+                         "rejects more noise, fills more holes. Main "
+                         "regularization knob. Default 2.0.")
+    ap.add_argument("--gc-edge-sigma", type=float, default=10.0,
+                    help="graphcut: intensity scale (gray levels) for "
+                         "the contrast-sensitive smoothness. Edges "
+                         "with |dI| >> this are cheap boundaries. "
+                         "Default 10.0.")
+    ap.add_argument("--gc-data-scale", type=float, default=1.0,
+                    help="graphcut: logistic steepness of the data "
+                         "term. Larger = more threshold-like. Default "
+                         "1.0.")
     ap.add_argument("--illumination-correct", action="store_true",
                     default=False,
                     help="Build a static shadow/illumination field "
@@ -217,7 +243,31 @@ def main(argv=None):
         build_illumination_field, apply_illumination_correction,
         DynamicShadowModel, TextureBlobTracker,
         texture_distance_map, threshold_distance_map,
+        graphcut_segment_distance,
         colorize_distance_map)
+
+    def _segment(dist, gray_c, roi):
+        """Dispatch to the chosen segmentation backend, returning
+        (mask, threshold_or_flow)."""
+        if args.segment_method == "graphcut":
+            mask, info = graphcut_segment_distance(
+                dist, gray=gray_c, roi_mask=roi,
+                fg_thresh=args.abs_thresh,
+                data_scale=args.gc_data_scale,
+                smooth_weight=args.gc_smooth_weight,
+                edge_sigma=args.gc_edge_sigma,
+                min_area_px=args.min_area,
+                suppress_thin_width=args.suppress_thin_width)
+            return mask, info["flow"]
+        mask, thr = threshold_distance_map(
+            dist, method=args.threshold_method,
+            abs_thresh=args.abs_thresh,
+            percentile=args.threshold_percentile,
+            min_area_px=args.min_area,
+            max_aspect_ratio=args.max_aspect_ratio,
+            min_fill_ratio=args.min_fill_ratio,
+            suppress_thin_width=args.suppress_thin_width)
+        return mask, thr
 
     # Arena corners in mm (matches cli/segment.py _ARENA_CORNERS)
     _ARENA_CORNERS = np.array([
@@ -363,14 +413,7 @@ def main(argv=None):
                 persistence_power=args.persistence_power,
                 roi_mask=roi,
                 post_smooth_k=args.post_smooth_k)
-            mask, thr = threshold_distance_map(
-                dist, method=args.threshold_method,
-                abs_thresh=args.abs_thresh,
-                percentile=args.threshold_percentile,
-                min_area_px=args.min_area,
-                max_aspect_ratio=args.max_aspect_ratio,
-                min_fill_ratio=args.min_fill_ratio,
-                suppress_thin_width=args.suppress_thin_width)
+            mask, thr = _segment(dist, gray, roi)
 
             # Compose a 1×3 panel: raw | heatmap | mask-overlay
             raw_bgr = (frame if frame.ndim == 3
@@ -444,14 +487,7 @@ def main(argv=None):
                     persistence_power=args.persistence_power,
                     roi_mask=roi,
                     post_smooth_k=args.post_smooth_k)
-                mask, thr = threshold_distance_map(
-                    dist, method=args.threshold_method,
-                    abs_thresh=args.abs_thresh,
-                    percentile=args.threshold_percentile,
-                    min_area_px=args.min_area,
-                    max_aspect_ratio=args.max_aspect_ratio,
-                    min_fill_ratio=args.min_fill_ratio,
-                    suppress_thin_width=args.suppress_thin_width)
+                mask, thr = _segment(dist, gray_c, roi)
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:

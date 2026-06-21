@@ -874,6 +874,187 @@ def threshold_distance_map(
     return out, thr
 
 
+# ────────────────────────────────────────────────────────────────────
+#  Graph-cut (MRF) segmentation of the texture-distance map
+# ────────────────────────────────────────────────────────────────────
+
+
+def graphcut_segment_distance(
+        dist:           np.ndarray,
+        gray:           Optional[np.ndarray] = None,
+        roi_mask:       Optional[np.ndarray] = None,
+        fg_thresh:      float = 4.0,
+        data_scale:     float = 1.0,
+        smooth_weight:  float = 2.0,
+        edge_sigma:     float = 10.0,
+        min_area_px:    int = 1000,
+        suppress_thin_width: int = 0,
+        ) -> tuple[np.ndarray, dict]:
+    """Segment the texture-distance map into a foreground mask by
+    minimizing a binary MRF energy with a graph cut (Boykov-Kolmogorov
+    max-flow), instead of the threshold + morphology + CC heuristic.
+
+    This is the first principled step toward the variational
+    formulation (Cremers et al.): the energy has a DATA term (how
+    well each pixel matches foreground vs background, from the texture
+    distance) plus a contrast-sensitive SMOOTHNESS term (a penalty for
+    neighboring pixels taking different labels, *reduced* where the
+    image has a strong edge). The min-cut is the globally-optimal
+    binary labeling of that energy — so the silhouette is coherent by
+    construction rather than via post-hoc morphology.
+
+    Energy minimized (binary labels l_p ∈ {bg=0, fg=1}):
+
+        E(l) = Σ_p D_p(l_p)  +  Σ_{p~q} V_pq · [l_p ≠ l_q]
+
+    Data term D_p — derived from the texture distance d_p. We map the
+    distance through a logistic centered at fg_thresh to a foreground
+    probability, then use negative log-likelihoods as the unary costs:
+
+        P_fg(p) = sigmoid(data_scale · (d_p − fg_thresh))
+        D_p(fg) = −log P_fg(p)      (cheap to call fg when d_p large)
+        D_p(bg) = −log(1 − P_fg(p)) (cheap to call bg when d_p small)
+
+    So fg_thresh plays the role of the old absolute threshold (the
+    distance at which fg/bg are equally likely), but the cut can
+    override it locally to keep the region coherent.
+
+    Smoothness term V_pq — contrast-sensitive Potts (Boykov-Jolly):
+
+        V_pq = smooth_weight · exp(−(I_p − I_q)² / (2·edge_sigma²))
+
+    High where neighbors have similar intensity (penalize splitting a
+    smooth region), low across a real intensity edge (cheap to place
+    the boundary there). If `gray` is None, V_pq = smooth_weight
+    everywhere (plain Potts; boundary driven only by the data term).
+
+    Parameters
+    ----------
+    dist          : (H, W) texture-distance map.
+    gray          : (H, W) intensity image for the contrast-sensitive
+                    smoothness term. Use the illumination-corrected
+                    frame for consistency with the distance map.
+    roi_mask      : (H, W) arena mask. Pixels outside are forced to
+                    background (their fg data cost is set to +inf) so
+                    nothing outside the arena can be labeled rat.
+    fg_thresh     : distance at which fg/bg are equally likely. Same
+                    role as the old --abs-thresh.
+    data_scale    : logistic steepness. Larger = the data term behaves
+                    more like a hard threshold; smaller = softer, lets
+                    the smoothness term do more work.
+    smooth_weight : global weight on the smoothness term. Larger =
+                    smoother/rounder silhouette, fewer islands. This is
+                    the main regularization knob.
+    edge_sigma    : intensity scale (in gray levels) for the
+                    contrast-sensitive term. Edges with |I_p−I_q| >>
+                    edge_sigma are treated as cheap boundaries.
+    min_area_px   : drop final components below this area.
+    suppress_thin_width : if > 0, apply suppress_thin_structures to the
+                    cut result (cable removal still helps even with the
+                    smoothness term).
+
+    Returns
+    -------
+    (mask_uint8, info) where info has the energy and pixel counts.
+    """
+    try:
+        import maxflow
+    except ImportError as e:           # pragma: no cover
+        raise ImportError(
+            "graphcut_segment_distance requires PyMaxflow "
+            "(`pip install PyMaxflow`).") from e
+
+    H, W = dist.shape
+    d = dist.astype(np.float32)
+
+    # ── Data term ──────────────────────────────────────────────────
+    # Foreground probability via logistic centered at fg_thresh.
+    z = data_scale * (d - fg_thresh)
+    z = np.clip(z, -50.0, 50.0)        # avoid overflow in exp
+    p_fg = 1.0 / (1.0 + np.exp(-z))
+    eps = 1e-6
+    p_fg = np.clip(p_fg, eps, 1.0 - eps)
+    # Unary costs (negative log-likelihood)
+    cost_fg = -np.log(p_fg)            # cost of labeling pixel FG
+    cost_bg = -np.log(1.0 - p_fg)      # cost of labeling pixel BG
+
+    # Force outside-ROI pixels to background: make FG infinitely
+    # expensive there.
+    if roi_mask is not None:
+        outside = (roi_mask == 0)
+        cost_fg = cost_fg.copy()
+        cost_fg[outside] = 1e9
+
+    # ── Build the graph ────────────────────────────────────────────
+    g = maxflow.Graph[float]()
+    nodeids = g.add_grid_nodes((H, W))
+
+    # Smoothness term — contrast-sensitive 4-connected Potts.
+    if gray is not None:
+        gi = gray.astype(np.float32)
+        # Horizontal edges (p=(y,x), q=(y,x+1))
+        dh = gi[:, 1:] - gi[:, :-1]
+        wh = smooth_weight * np.exp(-(dh * dh)
+                                    / (2.0 * edge_sigma * edge_sigma))
+        # Vertical edges (p=(y,x), q=(y+1,x))
+        dv = gi[1:, :] - gi[:-1, :]
+        wv = smooth_weight * np.exp(-(dv * dv)
+                                    / (2.0 * edge_sigma * edge_sigma))
+    else:
+        wh = np.full((H, W - 1), smooth_weight, np.float32)
+        wv = np.full((H - 1, W), smooth_weight, np.float32)
+
+    # Add pairwise edges. maxflow's add_grid_edges with a structure
+    # would apply a uniform weight; we need per-edge weights, so add
+    # them explicitly but vectorized per direction.
+    # Horizontal
+    src = nodeids[:, :-1].ravel()
+    dst = nodeids[:, 1:].ravel()
+    g.add_edges(src, dst, wh.ravel(), wh.ravel())
+    # Vertical
+    src = nodeids[:-1, :].ravel()
+    dst = nodeids[1:, :].ravel()
+    g.add_edges(src, dst, wv.ravel(), wv.ravel())
+
+    # Terminal (data) edges: add_grid_tedges(nodeids, E_source, E_sink)
+    # In maxflow's convention, the SOURCE side is label 1 (fg) after
+    # get_grid_segments returns True for sink-connected = bg. We set:
+    #   capacity to SOURCE = cost of assigning to SINK label, etc.
+    # Use the standard mapping: tedge(node, cap_source=cost_bg,
+    # cap_sink=cost_fg) so that cutting the cheaper terminal keeps the
+    # cheaper label. get_grid_segments returns True where the node is
+    # on the SINK side. We define fg = NOT sink.
+    g.add_grid_tedges(nodeids, cost_bg, cost_fg)
+
+    flow = g.maxflow()
+    sgm = g.get_grid_segments(nodeids)     # True = sink side
+    # By our tedge convention, sink side = background.
+    mask = (~sgm).astype(np.uint8) * 255
+
+    # ── Post: ROI clamp, cable suppression, area filter ────────────
+    if roi_mask is not None:
+        mask = cv2.bitwise_and(mask, (roi_mask > 0).astype(np.uint8) * 255)
+    if suppress_thin_width and suppress_thin_width > 0:
+        mask = suppress_thin_structures(
+            mask, min_width_px=suppress_thin_width)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    out = np.zeros_like(mask)
+    kept = 0
+    for i in range(1, n_cc):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area_px:
+            out[labels == i] = 255
+            kept += 1
+
+    info = {
+        "flow": float(flow),
+        "fg_px": int((out > 0).sum()),
+        "n_components": int(kept),
+        "fg_thresh": float(fg_thresh),
+        "smooth_weight": float(smooth_weight),
+    }
+    return out, info
+
+
 def colorize_distance_map(dist: np.ndarray,
                             vmax: Optional[float] = None) -> np.ndarray:
     """Render a distance map as a BGR heatmap for diagnostics

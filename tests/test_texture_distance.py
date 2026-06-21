@@ -847,3 +847,120 @@ class TestSuppressThinStructures:
         out = suppress_thin_structures(m, min_width_px=30)
         # Most of the blob survives
         assert int((out > 0).sum()) > 0.7 * int((m > 0).sum())
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Graph-cut (MRF) segmentation
+# ────────────────────────────────────────────────────────────────────
+
+import pytest
+
+try:
+    import maxflow as _maxflow
+    _HAVE_MAXFLOW = True
+except ImportError:
+    _HAVE_MAXFLOW = False
+
+from rpimocap.detection.texture_distance import graphcut_segment_distance
+
+
+@pytest.mark.skipif(not _HAVE_MAXFLOW, reason="PyMaxflow not installed")
+class TestGraphCutSegment:
+
+    def _fragmented_blob(self):
+        """A rat blob with internal holes + scattered noise specks +
+        a faint cable — the realistic messy distance map."""
+        rng = np.random.RandomState(0)
+        H, W = 300, 400
+        dist = np.zeros((H, W), np.float32)
+        cv2.ellipse(dist, (180, 150), (55, 40), 0, 0, 360, 6.0, -1)
+        for _ in range(15):                       # holes
+            cx, cy = rng.randint(130, 230), rng.randint(115, 185)
+            cv2.circle(dist, (cx, cy), rng.randint(4, 9), 1.5, -1)
+        for _ in range(40):                       # noise specks
+            cx, cy = rng.randint(0, W), rng.randint(0, H)
+            cv2.circle(dist, (cx, cy), rng.randint(2, 5),
+                       rng.uniform(4.5, 7), -1)
+        gray = np.full((H, W), 90, np.uint8)
+        cv2.ellipse(gray, (180, 150), (55, 40), 0, 0, 360, 180, -1)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        return dist, gray
+
+    def test_runs_and_returns_mask(self):
+        dist, gray = self._fragmented_blob()
+        mask, info = graphcut_segment_distance(
+            dist, gray=gray, fg_thresh=4.0, smooth_weight=3.0,
+            min_area_px=800)
+        assert mask.shape == dist.shape
+        assert mask.dtype == np.uint8
+        assert info["fg_px"] > 0
+        assert "flow" in info
+
+    def test_smoothness_rejects_noise_without_area_filter(self):
+        """Higher smoothness weight rejects isolated noise specks even
+        with NO minimum-area filter — the energy does it, not a size
+        hack."""
+        dist, gray = self._fragmented_blob()
+
+        def noise_specks(m):
+            n, _, s, _ = cv2.connectedComponentsWithStats(
+                (m > 0).astype(np.uint8))
+            cnt = 0
+            for i in range(1, n):
+                cx = s[i, cv2.CC_STAT_LEFT] + s[i, cv2.CC_STAT_WIDTH] // 2
+                cy = s[i, cv2.CC_STAT_TOP] + s[i, cv2.CC_STAT_HEIGHT] // 2
+                if not (130 < cx < 230 and 115 < cy < 185):
+                    cnt += 1
+            return cnt
+
+        m_lo, _ = graphcut_segment_distance(
+            dist, gray=gray, fg_thresh=4.0, smooth_weight=1.0,
+            min_area_px=1)
+        m_hi, _ = graphcut_segment_distance(
+            dist, gray=gray, fg_thresh=4.0, smooth_weight=6.0,
+            min_area_px=1)
+        # More smoothing → fewer stray specks
+        assert noise_specks(m_hi) < noise_specks(m_lo)
+        assert noise_specks(m_hi) <= 2
+
+    def test_smoothness_fills_holes(self):
+        """Higher smoothness fills internal holes in the rat blob."""
+        dist, gray = self._fragmented_blob()
+
+        def rat_fill(m):
+            region = m[115:185, 130:230]
+            return float((region > 0).sum()) / region.size
+
+        m_lo, _ = graphcut_segment_distance(
+            dist, gray=gray, fg_thresh=4.0, smooth_weight=1.0,
+            min_area_px=1)
+        m_hi, _ = graphcut_segment_distance(
+            dist, gray=gray, fg_thresh=4.0, smooth_weight=12.0,
+            min_area_px=1)
+        assert rat_fill(m_hi) > rat_fill(m_lo)
+        assert rat_fill(m_hi) > 0.85
+
+    def test_roi_clamp_forces_background(self):
+        """A high-distance blob outside the ROI is never labeled fg;
+        the rat inside is."""
+        H, W = 200, 300
+        dist = np.zeros((H, W), np.float32)
+        cv2.circle(dist, (150, 100), 50, 6.0, -1)
+        cv2.circle(dist, (20, 20), 12, 7.0, -1)        # outside-ROI blob
+        gray = np.full((H, W), 90, np.uint8)
+        cv2.circle(gray, (150, 100), 45, 180, -1)
+        roi = np.zeros((H, W), np.uint8)
+        cv2.rectangle(roi, (60, 40), (240, 160), 255, -1)
+        mask, _ = graphcut_segment_distance(
+            dist, gray=gray, roi_mask=roi, fg_thresh=3.0,
+            smooth_weight=4.0, min_area_px=50)
+        assert mask[20, 20] == 0          # outside ROI forced bg
+        assert mask[100, 150] > 0         # rat inside kept
+
+    def test_plain_potts_without_gray(self):
+        """Runs without a gray image (plain Potts smoothness)."""
+        dist, _ = self._fragmented_blob()
+        mask, info = graphcut_segment_distance(
+            dist, gray=None, fg_thresh=4.0, smooth_weight=3.0,
+            min_area_px=800)
+        assert info["fg_px"] > 0
