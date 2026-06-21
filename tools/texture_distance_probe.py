@@ -103,6 +103,18 @@ def main(argv=None):
                     help="Exponent on the persistence damping. >1 "
                          "suppresses persistent-background pixels "
                          "more aggressively. Default 1.0.")
+    ap.add_argument("--foreshorten-correct", action="store_true",
+                    default=False,
+                    help="Down-weight the texture distance where the "
+                         "arena floor is steeply foreshortened (the "
+                         "pixel footprint is elongated, so the same fur "
+                         "reads differently). Requires --calib. Targets "
+                         "frame-edge / flank weakness, esp. cam1.")
+    ap.add_argument("--foreshorten-max-aniso", type=float, default=3.0,
+                    help="Foreshortening (1/cos theta) at which the "
+                         "confidence weight reaches 0. Larger = gentler "
+                         "(only the most grazing regions suppressed). "
+                         "Default 3.0.")
     ap.add_argument("--mask-rat-persistence", action="store_true",
                     default=False,
                     help="When building the persistence map, detect "
@@ -337,6 +349,35 @@ def main(argv=None):
                 os.path.join(args.out, f"arena_roi_cam{cam_id}.png"),
                 roi)
 
+        # ── Foreshortening confidence map (static, per-camera) ─────
+        # The arena floor (z=0 plane) is seen at different angles across
+        # the frame. Where it is grazing, the pixel footprint elongates
+        # and the same fur reads differently — a bias separate from
+        # radial lens distortion. Build a [0,1] confidence (1 face-on,
+        # 0 grazing) to down-weight the texture distance there.
+        aniso_w = None
+        if args.foreshorten_correct and dlt_P[cam_id] is not None:
+            from rpimocap.detection.foreshortening import (
+                footprint_anisotropy_plane, anisotropy_weight)
+            H, W = bg_grays[0].shape[:2]
+            aniso = footprint_anisotropy_plane(
+                dlt_P[cam_id],
+                plane_point=np.array([0.0, 0.0, 0.0]),
+                plane_normal=np.array([0.0, 0.0, 1.0]),
+                image_size=(W, H), stride=8)
+            aniso_w = anisotropy_weight(
+                aniso, max_aniso=args.foreshorten_max_aniso)
+            covlo = 100.0 * float((aniso_w < 0.5).sum()) / aniso_w.size
+            print(f"  Foreshorten map: {covlo:.1f}% of frame "
+                  f"down-weighted <0.5 (grazing)")
+            cv2.imwrite(
+                os.path.join(args.out,
+                             f"foreshorten_w_cam{cam_id}.png"),
+                (aniso_w * 255).astype(np.uint8))
+        elif args.foreshorten_correct:
+            print("  WARNING: --foreshorten-correct needs --calib; "
+                  "skipping foreshortening.")
+
         # ── Static shadow / illumination field ────────────────────
         # The per-pixel temporal median of intensity is the static
         # scene illumination (the rat, a moving minority, is rejected).
@@ -411,6 +452,7 @@ def main(argv=None):
                 smooth_k=args.smooth_k, rotation_invariant=True,
                 persistence_map=persistence_map,
                 persistence_power=args.persistence_power,
+                anisotropy_weight=aniso_w,
                 roi_mask=roi,
                 post_smooth_k=args.post_smooth_k)
             mask, thr = _segment(dist, gray, roi)
@@ -485,6 +527,7 @@ def main(argv=None):
                     smooth_k=args.smooth_k, rotation_invariant=True,
                     persistence_map=persistence_map,
                     persistence_power=args.persistence_power,
+                    anisotropy_weight=aniso_w,
                     roi_mask=roi,
                     post_smooth_k=args.post_smooth_k)
                 mask, thr = _segment(dist, gray_c, roi)

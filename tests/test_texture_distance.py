@@ -307,6 +307,58 @@ class TestPersistenceGating:
             f"no={rail_no:.2f} gate={rail_gate:.2f}")
 
 
+class TestAnisotropyGating:
+
+    def test_uniform_weight_scales_distance(self):
+        """A uniform anisotropy weight of w multiplies the distance by
+        w everywhere."""
+        frames = [_textured_bg(rng_seed=s) for s in range(6)]
+        model = build_background_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        test = _smooth_bright_patch(
+            _textured_bg(rng_seed=33), box=(40, 90, 50, 110))
+        base = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES,
+            smooth_k=7, post_smooth_k=0)
+        half = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            anisotropy_weight=np.full(test.shape, 0.5, np.float32),
+            post_smooth_k=0)
+        m = base > 1e-6
+        ratio = float(np.mean(half[m] / base[m]))
+        assert abs(ratio - 0.5) < 1e-4
+
+    def test_weight_one_is_noop(self):
+        frames = [_textured_bg(rng_seed=s) for s in range(6)]
+        model = build_background_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        test = _textured_bg(rng_seed=44)
+        base = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES,
+            smooth_k=7, post_smooth_k=0)
+        gated = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            anisotropy_weight=np.ones(test.shape, np.float32),
+            post_smooth_k=0)
+        assert np.allclose(base, gated, atol=1e-5)
+
+    def test_gradient_weight_suppresses_grazing_side(self):
+        """A weight that decreases toward one edge suppresses the
+        distance there more — the grazing/foreshortened region."""
+        frames = [_textured_bg(rng_seed=s) for s in range(6)]
+        model = build_background_texture_model(
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        test = _smooth_bright_patch(
+            _textured_bg(rng_seed=55), box=(20, 100, 10, 140))
+        H, W = test.shape
+        # weight 0 at left edge → 1 at right edge
+        w = np.linspace(0, 1, W, dtype=np.float32)[None, :].repeat(H, 0)
+        gated = texture_distance_map(
+            test, model, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            anisotropy_weight=w, post_smooth_k=0)
+        assert gated[:, :10].mean() < gated[:, -10:].mean()
+
+
 class TestShapeFilters:
 
     def test_aspect_filter_rejects_isolated_line(self):

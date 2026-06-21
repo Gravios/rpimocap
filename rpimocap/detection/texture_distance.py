@@ -641,6 +641,7 @@ def texture_distance_map(
         roi_mask:    Optional[np.ndarray] = None,
         persistence_map: Optional[np.ndarray] = None,
         persistence_power: float = 1.0,
+        anisotropy_weight: Optional[np.ndarray] = None,
         post_smooth_k: int = 15,
         ) -> np.ndarray:
     """Compute a per-pixel texture-distance map between a current
@@ -673,6 +674,16 @@ def texture_distance_map(
                    wash-out seen when bedding/lighting drift.
     persistence_power : exponent on the damping factor. >1 makes the
                    suppression of persistent pixels more aggressive.
+    anisotropy_weight : optional (H, W) in [0,1] from
+                   foreshortening.anisotropy_weight (1 = surface seen
+                   face-on, 0 = steeply foreshortened / grazing). The
+                   distance is multiplied by this, so texture in
+                   steeply-foreshortened regions — where the same fur
+                   reads differently because the pixel footprint is
+                   elongated (perspective foreshortening, NOT radial
+                   lens distortion) — is trusted less. This directly
+                   targets the frame-edge / flank weakness where the
+                   descriptor is least reliable. None disables.
     post_smooth_k: box-filter window applied to the final distance
                    map (px). This is the crude stand-in for the
                    smoothness term of a full MRF — it consolidates
@@ -706,6 +717,15 @@ def texture_distance_map(
         if persistence_power != 1.0:
             damp = damp ** float(persistence_power)
         dist = dist * damp.astype(np.float32)
+    # Foreshortening gating. Multiply by a [0,1] confidence that is 1
+    # where the surface is seen face-on and decays toward 0 where it is
+    # steeply foreshortened (grazing), so the descriptor is trusted less
+    # exactly where the elongated pixel footprint makes the same physical
+    # texture read differently. Parallel to persistence: a multiplicative
+    # per-pixel confidence on the distance.
+    if anisotropy_weight is not None:
+        w = np.clip(anisotropy_weight, 0.0, 1.0).astype(np.float32)
+        dist = dist * w
     if roi_mask is not None:
         dist = dist * (roi_mask > 0).astype(np.float32)
     if post_smooth_k and post_smooth_k > 1:
