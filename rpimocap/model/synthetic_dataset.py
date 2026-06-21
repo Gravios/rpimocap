@@ -453,6 +453,61 @@ def visual_hull(body: "RatBodyModel", kpts3d: np.ndarray,
     return occ.reshape((nx, ny, nz))
 
 
+def keypoint_self_occlusion(
+        body: "RatBodyModel", kpts3d: np.ndarray, cameras: dict,
+        voxel_size: float = 5.0, tol_mm: float = 26.0,
+        ) -> dict:
+    """Per-camera, per-keypoint self-occlusion (the rat's own body
+    blocking the line of sight to a keypoint).
+
+    Method (a depth z-test): build the body occupancy, then for each
+    keypoint march the camera→keypoint ray through the volume and find
+    the depth of the FIRST occupied voxel (the near surface facing the
+    camera). The keypoint is occluded iff it lies clearly BEHIND that
+    surface — keypoint_depth > near_surface_depth + tol_mm. tol_mm
+    covers the keypoint's own body thickness so a surface keypoint
+    (snout, paw) facing the camera is not flagged by its own tissue,
+    while a keypoint behind a different body part is.
+
+    Returns {cam_id: (K,) bool occluded}.
+    """
+    grid = body.occupancy(kpts3d, voxel_size=voxel_size, pad_mm=20.0)
+    occ = grid.occupancy
+    org = grid.origin
+    vs = grid.voxel_size
+    nx, ny, nz = grid.shape
+    K = kpts3d.shape[0]
+    step = 0.5 * vs
+    out = {}
+    for cam_id, P in cameras.items():
+        C = _camera_center(np.asarray(P))
+        occluded = np.zeros(K, dtype=bool)
+        for k in range(K):
+            X = kpts3d[k]
+            ray = X - C
+            L = float(np.linalg.norm(ray))
+            if not np.isfinite(L) or L < 1e-6:
+                continue
+            d = ray / L
+            ts = np.arange(0.0, L, step)
+            pts = C[None, :] + ts[:, None] * d[None, :]
+            idx = np.floor((pts - org) / vs).astype(int)
+            inb = ((idx[:, 0] >= 0) & (idx[:, 0] < nx)
+                   & (idx[:, 1] >= 0) & (idx[:, 1] < ny)
+                   & (idx[:, 2] >= 0) & (idx[:, 2] < nz))
+            hit_t = None
+            occ_along = np.zeros(ts.shape[0], dtype=bool)
+            ii = idx[inb]
+            occ_along[inb] = occ[ii[:, 0], ii[:, 1], ii[:, 2]]
+            where = np.nonzero(occ_along)[0]
+            if where.size:
+                hit_t = ts[where[0]]
+            if hit_t is not None and hit_t < L - tol_mm:
+                occluded[k] = True
+        out[cam_id] = occluded
+    return out
+
+
 # ────────────────────────────────────────────────────────────────────
 #  Data model
 # ────────────────────────────────────────────────────────────────────
@@ -492,8 +547,15 @@ def make_sample(i: int, cameras: dict, image_size: tuple[int, int],
                 seed: int, pose_fraction: float, scale_range: tuple,
                 arena_bounds: tuple, require_in_arena: bool,
                 body_version: str,
+                compute_occlusion: bool = False,
+                body: Optional["RatBodyModel"] = None,
                 max_tries: int = 50) -> SyntheticPoseSample:
-    """Generate one labeled sample (pure function of i + params)."""
+    """Generate one labeled sample (pure function of i + params).
+
+    compute_occlusion : if True, visibility = in-frame AND not
+        self-occluded (the rat's own body blocking the keypoint). Costs
+        a per-pose occupancy build; `body` must be supplied.
+    """
     rng = _pose_rng(seed, i)
     scale = float(rng.uniform(*scale_range))
     pose = None
@@ -510,11 +572,18 @@ def make_sample(i: int, cameras: dict, image_size: tuple[int, int],
     kp = rs.forward_kinematics(pose)
     valid = rs.is_valid(pose, arena_bounds=arena_bounds,
                         require_arena=require_in_arena)
+    occluded = None
+    if compute_occlusion:
+        b = body or RatBodyModel.default()
+        occluded = keypoint_self_occlusion(b, kp, cameras)
     kpts2d, vis = {}, {}
     for cam_id, P in cameras.items():
         px = rs.project_pose(kp, P)
         kpts2d[cam_id] = px
-        vis[cam_id] = _in_frame(px, image_size)
+        v = _in_frame(px, image_size)
+        if occluded is not None:
+            v = v & ~occluded[cam_id]
+        vis[cam_id] = v
     return SyntheticPoseSample(
         pose=pose, keypoints3d=kp, keypoints2d=kpts2d,
         visibility=vis, valid=valid, body_version=body_version)
@@ -695,6 +764,64 @@ class SyntheticPoseDataset:
         with open(os.path.join(dataset_dir, "meta.json"), "w") as fh:
             json.dump(self.meta, fh, indent=2)
 
+    # ── Phase C: silhouette cache + shape-prior matrix ──────────────
+
+    def cache_silhouettes(self, dataset_dir: str, downsample: int = 1,
+                          valid_only: bool = False) -> int:
+        """Materialize per-camera silhouette PNGs under
+        dataset_dir/silhouettes/cam{c}/{i:06d}.png. The shape prior reads
+        these instead of regenerating every epoch. `downsample` shrinks
+        each mask by an integer factor (shape priors usually run at
+        reduced resolution). Returns the number of PNGs written."""
+        cam_ids = [int(c) for c in self.meta["cameras"].keys()]
+        W, H = self.meta["image_size"]
+        written = 0
+        for cid in cam_ids:
+            d = os.path.join(dataset_dir, "silhouettes", f"cam{cid}")
+            os.makedirs(d, exist_ok=True)
+        for i, s in enumerate(self.samples):
+            if valid_only and not s.valid:
+                continue
+            for cid in cam_ids:
+                sil = self.silhouette(i, cid)
+                if downsample > 1:
+                    sil = cv2.resize(
+                        sil, (W // downsample, H // downsample),
+                        interpolation=cv2.INTER_NEAREST)
+                cv2.imwrite(
+                    os.path.join(dataset_dir, "silhouettes",
+                                 f"cam{cid}", f"{i:06d}.png"), sil)
+                written += 1
+        return written
+
+    def load_cached_silhouette(self, dataset_dir: str, i: int,
+                               cam_id: int) -> np.ndarray:
+        """Read a cached silhouette PNG (see cache_silhouettes)."""
+        path = os.path.join(dataset_dir, "silhouettes", f"cam{cam_id}",
+                            f"{i:06d}.png")
+        return cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+
+    def silhouette_matrix(self, cam_id: int, downsample: int = 8,
+                          valid_only: bool = True) -> tuple:
+        """Stack the (downsampled) silhouettes for one camera into a
+        (M, h*w) matrix — the direct input to a PCA / autoencoder shape
+        prior. Returns (matrix, (h, w), indices) where indices maps rows
+        back to sample indices."""
+        W, H = self.meta["image_size"]
+        h, w = H // downsample, W // downsample
+        rows, idx = [], []
+        for i, s in enumerate(self.samples):
+            if valid_only and not s.valid:
+                continue
+            sil = self.silhouette(i, cam_id)
+            sm = cv2.resize(sil, (w, h),
+                            interpolation=cv2.INTER_NEAREST)
+            rows.append((sm > 0).astype(np.float32).ravel())
+            idx.append(i)
+        mat = (np.stack(rows, axis=0) if rows
+               else np.zeros((0, h * w), np.float32))
+        return mat, (h, w), np.array(idx, dtype=int)
+
     @classmethod
     def load(cls, dataset_dir: str) -> "SyntheticPoseDataset":
         with open(os.path.join(dataset_dir, "meta.json")) as fh:
@@ -749,11 +876,14 @@ def generate_dataset(
         scale_range: tuple = (0.85, 1.15),
         arena_bounds: tuple = STD_ARENA,
         require_in_arena: bool = True,
+        compute_occlusion: bool = False,
         n_workers: int = 1,
         ) -> SyntheticPoseDataset:
     """Generate a synthetic-pose dataset.
 
     cameras    : {cam_id(int): P (3,4) np.ndarray}.
+    compute_occlusion : if True, visibility excludes self-occluded
+                 keypoints (Phase C; costs a per-pose occupancy build).
     n_workers  : >1 uses a multiprocessing pool. Per-pose deterministic
                  seeding makes the output identical regardless of
                  n_workers.
@@ -762,7 +892,9 @@ def generate_dataset(
     args = dict(cameras=cameras, image_size=tuple(image_size), seed=seed,
                 pose_fraction=pose_fraction, scale_range=scale_range,
                 arena_bounds=arena_bounds, require_in_arena=require_in_arena,
-                body_version=body.version)
+                body_version=body.version,
+                compute_occlusion=compute_occlusion,
+                body=body if compute_occlusion else None)
 
     if n_workers and n_workers > 1:
         from multiprocessing import Pool

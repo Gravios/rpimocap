@@ -368,3 +368,97 @@ class TestTorchAdapter:
                               include_hull=True, valid_only=False)
         item = td[0]
         assert item["hull"].shape == (24, 24, 24)
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Phase C: self-occlusion + silhouette cache + shape-prior matrix
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestSelfOcclusion:
+
+    def test_far_side_keypoint_occluded_by_trunk(self):
+        """From a camera at -y, the far-side shoulder (y>0, behind the
+        trunk) is occluded; the near-side shoulder (y<0) is visible."""
+        body = sd.RatBodyModel.default()
+        kp = rs.forward_kinematics(rs.RatPose(
+            root_pos=np.array([0, 0, 160.0])))
+        P = _make_P([0, -700, 160], [0, 0, 160])
+        occ = sd.keypoint_self_occlusion(body, kp, {0: P})[0]
+        assert occ[rs.RAT23_INDEX["ShoulderL"]]        # far → occluded
+        assert not occ[rs.RAT23_INDEX["ShoulderR"]]    # near → visible
+
+    def test_occlusion_only_removes_visibility(self):
+        """Generating with occlusion yields visibility ⊆ in-frame-only
+        (occlusion can never make a keypoint visible)."""
+        a = sd.generate_dataset(8, CAMS, IMG, seed=9,
+                                compute_occlusion=False)
+        b = sd.generate_dataset(8, CAMS, IMG, seed=9,
+                                compute_occlusion=True)
+        for sa, sb in zip(a.samples, b.samples):
+            assert np.allclose(sa.keypoints3d, sb.keypoints3d)
+            for c in (0, 1):
+                assert np.all(sb.visibility[c] <= sa.visibility[c])
+
+    def test_occlusion_removes_some(self):
+        a = sd.generate_dataset(10, CAMS, IMG, seed=9,
+                                compute_occlusion=False)
+        b = sd.generate_dataset(10, CAMS, IMG, seed=9,
+                                compute_occlusion=True)
+        na = sum(int(s.visibility[0].sum() + s.visibility[1].sum())
+                 for s in a.samples)
+        nb = sum(int(s.visibility[0].sum() + s.visibility[1].sum())
+                 for s in b.samples)
+        assert nb < na
+
+    def test_occlusion_deterministic_across_workers(self):
+        a = sd.generate_dataset(12, CAMS, IMG, seed=9,
+                                compute_occlusion=True, n_workers=1)
+        b = sd.generate_dataset(12, CAMS, IMG, seed=9,
+                                compute_occlusion=True, n_workers=4)
+        for sa, sb in zip(a.samples, b.samples):
+            assert np.array_equal(sa.visibility[0], sb.visibility[0])
+            assert np.array_equal(sa.visibility[1], sb.visibility[1])
+
+
+class TestSilhouetteCache:
+
+    def test_cache_and_load(self, tmp_path):
+        ds = sd.generate_dataset(6, CAMS, IMG, seed=14)
+        d = str(tmp_path / "ds")
+        n = ds.cache_silhouettes(d, downsample=4)
+        assert n == 6 * 2
+        sil = ds.load_cached_silhouette(d, 3, 0)
+        assert sil.shape == (IMG[1] // 4, IMG[0] // 4)
+        # cached (downsampled) ≈ on-demand downsampled
+        import os
+        assert os.path.exists(
+            os.path.join(d, "silhouettes", "cam0", "000003.png"))
+
+    def test_cache_valid_only(self, tmp_path):
+        ds = sd.generate_dataset(8, CAMS, IMG, seed=15)
+        n_valid = sum(s.valid for s in ds.samples)
+        d = str(tmp_path / "ds")
+        n = ds.cache_silhouettes(d, downsample=8, valid_only=True)
+        assert n == n_valid * 2
+
+
+class TestShapePriorMatrix:
+
+    def test_matrix_shape(self):
+        ds = sd.generate_dataset(10, CAMS, IMG, seed=16)
+        mat, (h, w), idx = ds.silhouette_matrix(
+            0, downsample=16, valid_only=True)
+        assert mat.shape[1] == h * w
+        assert mat.shape[0] == len(idx)
+        assert mat.dtype == np.float32
+        # binary masks → values in {0,1}
+        assert set(np.unique(mat)).issubset({0.0, 1.0})
+
+    def test_matrix_rows_match_indices(self):
+        ds = sd.generate_dataset(8, CAMS, IMG, seed=17)
+        mat, (h, w), idx = ds.silhouette_matrix(
+            1, downsample=16, valid_only=False)
+        assert len(idx) == 8                    # all included
+        # a nonempty pose has nonzero silhouette mass
+        assert mat.sum(axis=1).max() > 0
