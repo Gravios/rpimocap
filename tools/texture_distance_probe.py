@@ -334,6 +334,22 @@ def main(argv=None):
         print(f"\n── Cam {cam_id}: {path}")
         cap = TiffCapture(path, bayer_pattern=args.bayer_pattern)
 
+        # Per-camera frame count — the two cameras can differ (a sync
+        # drop or early stop truncates one). In track mode the loop stops
+        # when a camera runs out of frames, so a shorter cam1 produces
+        # fewer outputs; and the tail of the longer camera has no stereo
+        # partner. Surface it up front.
+        try:
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        except Exception:
+            n_frames = -1
+        print(f"  frames: {n_frames}")
+        if args.track and n_frames > 0 and args.track_end > n_frames:
+            print(f"  NOTE: --track-end {args.track_end} exceeds cam "
+                  f"{cam_id}'s {n_frames} frames; it will stop at "
+                  f"{n_frames}. For stereo, use a range both cameras "
+                  f"cover (track-end <= the smaller frame count).")
+
         # ── Build background texture model ────────────────────────
         print(f"  Building bg texture model: {args.bg_frames} frames "
               f"from idx {args.bg_start} stride {args.bg_stride}")
@@ -389,12 +405,33 @@ def main(argv=None):
             aniso_w = anisotropy_weight(
                 aniso, max_aniso=args.foreshorten_max_aniso)
             covlo = 100.0 * float((aniso_w < 0.5).sum()) / aniso_w.size
-            print(f"  Foreshorten map: {covlo:.1f}% of frame "
-                  f"down-weighted <0.5 (grazing)")
+            print(f"  Foreshorten map: aniso "
+                  f"min={float(aniso.min()):.2f} "
+                  f"max={float(aniso.max()):.2f} "
+                  f"mean={float(aniso.mean()):.2f}  |  weight "
+                  f"min={float(aniso_w.min()):.2f} "
+                  f"max={float(aniso_w.max()):.2f} "
+                  f"mean={float(aniso_w.mean()):.2f}  |  "
+                  f"{covlo:.1f}% down-weighted <0.5")
+            if float(aniso_w.max() - aniso_w.min()) < 0.05:
+                print("    (near-uniform → this camera sees the floor "
+                      "almost face-on; foreshortening correction is a "
+                      "near-no-op here, which is expected, not a bug)")
+            # grayscale (raw confidence) AND a colorized map so a subtle
+            # gradient is visible even when the weight is near-uniform.
             cv2.imwrite(
                 os.path.join(args.out,
                              f"foreshorten_w_cam{cam_id}.png"),
                 (aniso_w * 255).astype(np.uint8))
+            _fw = aniso_w.copy()
+            _lo, _hi = float(_fw.min()), float(_fw.max())
+            if _hi - _lo > 1e-6:
+                _fw = (_fw - _lo) / (_hi - _lo)      # stretch to full range
+            cv2.imwrite(
+                os.path.join(args.out,
+                             f"foreshorten_w_cam{cam_id}_color.png"),
+                cv2.applyColorMap((_fw * 255).astype(np.uint8),
+                                  cv2.COLORMAP_VIRIDIS))
         elif args.foreshorten_correct:
             print("  WARNING: --foreshorten-correct needs --calib; "
                   "skipping foreshortening.")
