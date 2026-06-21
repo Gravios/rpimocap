@@ -7,6 +7,12 @@ from rpimocap.model import synthetic_dataset as sd
 from rpimocap.reconstruction.voxel import project_points_batch
 from rpimocap.reconstruction.triangulate import triangulate_dlt
 
+try:
+    import torch as _torch          # noqa: F401
+    _HAVE_TORCH = True
+except ImportError:
+    _HAVE_TORCH = False
+
 
 def _make_P(cam_pos, look_at, f=1500, cx=1014, cy=540):
     cam_pos = np.asarray(cam_pos, float)
@@ -223,3 +229,142 @@ class TestSaveLoad:
         sil = ds2.silhouette(2, 0)
         assert sil.shape == (IMG[1], IMG[0])
         assert (sil > 0).sum() > 100
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Phase B: native-3D targets
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestComCenteredGrid:
+
+    def test_grid_centered_on_centroid(self):
+        kp = rs.forward_kinematics(rs.RatPose(
+            root_pos=np.array([10, -20, 150.0])))
+        grid = sd.com_centered_grid(kp, n_vox=64, voxel_size=4.0)
+        gc = grid.origin + 0.5 * np.array(grid.shape) * grid.voxel_size
+        assert np.allclose(gc, kp.mean(axis=0), atol=1e-6)
+
+    def test_grid_contains_keypoints(self):
+        kp = rs.forward_kinematics(rs.RatPose(
+            root_pos=np.array([0, 0, 150.0]),
+            joint_angles=rs.sample_joint_angles(
+                np.random.RandomState(0), fraction=0.4)))
+        grid = sd.com_centered_grid(kp, n_vox=64, voxel_size=4.0)
+        lo = grid.origin
+        hi = grid.origin + np.array(grid.shape) * grid.voxel_size
+        assert np.all(kp >= lo) and np.all(kp <= hi)
+
+    def test_explicit_center(self):
+        kp = rs.forward_kinematics(rs.RatPose())
+        c = np.array([5.0, 5.0, 100.0])
+        grid = sd.com_centered_grid(kp, n_vox=32, voxel_size=4.0,
+                                    center=c)
+        gc = grid.origin + 0.5 * np.array(grid.shape) * grid.voxel_size
+        assert np.allclose(gc, c)
+
+
+class TestHeatmapVolume:
+
+    def setup_method(self):
+        self.kp = rs.forward_kinematics(rs.RatPose(
+            root_pos=np.array([0, 0, 150.0]),
+            joint_angles=rs.sample_joint_angles(
+                np.random.RandomState(1), fraction=0.4)))
+        self.grid = sd.com_centered_grid(self.kp, 64, 4.0)
+
+    def test_shape_and_range(self):
+        vol = sd.keypoint_heatmap_volume(self.kp, self.grid, sigma_mm=8.0)
+        assert vol.shape == (23, 64, 64, 64)
+        assert vol.dtype == np.float32
+        assert vol.min() >= 0.0 and vol.max() <= 1.0 + 1e-6
+        assert vol.max() > 0.99            # a peak near 1 at a keypoint
+
+    def test_argmax_recovers_keypoints(self):
+        vol = sd.keypoint_heatmap_volume(self.kp, self.grid, sigma_mm=8.0)
+        rec = sd.heatmap_argmax_keypoints(vol, self.grid)
+        err = np.linalg.norm(rec - self.kp, axis=1)
+        # within one voxel half-diagonal (sqrt(3)/2 · 4 ≈ 3.46 mm)
+        assert err.max() < 3.5
+
+    def test_separable_matches_dense(self):
+        """The separable Gaussian equals the dense |c-k|² form."""
+        vol = sd.keypoint_heatmap_volume(self.kp, self.grid, sigma_mm=8.0)
+        xs, ys, zs = sd._voxel_axis_centers(self.grid)
+        gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
+        k = self.kp[4]
+        d2 = (gx - k[0]) ** 2 + (gy - k[1]) ** 2 + (gz - k[2]) ** 2
+        dense = np.exp(-d2 / (2 * 8.0 ** 2))
+        assert np.allclose(vol[4], dense, atol=1e-5)
+
+    def test_larger_sigma_spreads(self):
+        v1 = sd.keypoint_heatmap_volume(self.kp, self.grid, sigma_mm=4.0)
+        v2 = sd.keypoint_heatmap_volume(self.kp, self.grid, sigma_mm=12.0)
+        # larger sigma → more total mass above a threshold
+        assert (v2[0] > 0.5).sum() > (v1[0] > 0.5).sum()
+
+
+class TestVisualHull:
+
+    def test_hull_contains_body(self):
+        body = sd.RatBodyModel.default()
+        kp = rs.forward_kinematics(rs.RatPose(
+            root_pos=np.array([0, 0, 150.0]),
+            joint_angles=rs.sample_joint_angles(
+                np.random.RandomState(2), fraction=0.4)))
+        grid = sd.com_centered_grid(kp, 64, 4.0)
+        hull = sd.visual_hull(body, kp, CAMS, IMG, grid)
+        assert hull.sum() > 100
+        occ = body.occupancy(kp, grid=grid).occupancy
+        contained = (occ & hull).sum() / max(occ.sum(), 1)
+        assert contained > 0.95            # hull is a superset of the body
+
+
+class TestDatasetPhaseB:
+
+    def setup_method(self):
+        self.ds = sd.generate_dataset(6, CAMS, IMG, seed=4,
+                                      pose_fraction=0.5)
+
+    def test_heatmap_volume_method(self):
+        vol, grid = self.ds.heatmap_volume(2, n_vox=48, voxel_size=4.0)
+        assert vol.shape == (23, 48, 48, 48)
+        rec = sd.heatmap_argmax_keypoints(vol, grid)
+        err = np.linalg.norm(rec - self.ds.samples[2].keypoints3d, axis=1)
+        assert err.max() < 3.5
+
+    def test_visual_hull_method(self):
+        hull = self.ds.visual_hull(1, n_vox=48)
+        assert hull.shape == (48, 48, 48)
+        assert hull.sum() > 50
+
+    def test_com_grid_method(self):
+        grid = self.ds.com_grid(0, n_vox=32, voxel_size=4.0)
+        assert grid.shape == (32, 32, 32)
+
+
+@pytest.mark.skipif(not _HAVE_TORCH, reason="torch not installed")
+class TestTorchAdapter:
+    """torch is optional; these skip cleanly when it's absent."""
+
+    def test_torch_dataset_heatmap(self):
+        ds = sd.generate_dataset(4, CAMS, IMG, seed=6)
+        td = ds.torch_dataset(target="heatmap", n_vox=32, voxel_size=4.0)
+        item = td[0]
+        assert item["target"].shape == (23, 32, 32, 32)
+        assert item["keypoints3d"].shape == (23, 3)
+        assert item["keypoints2d"].shape == (2, 23, 2)
+        assert item["grid_origin"].shape == (3,)
+
+    def test_torch_dataset_keypoints(self):
+        ds = sd.generate_dataset(4, CAMS, IMG, seed=6)
+        td = ds.torch_dataset(target="keypoints", valid_only=False)
+        item = td[0]
+        assert item["target"].shape == (23, 3)
+
+    def test_torch_dataset_with_hull(self):
+        ds = sd.generate_dataset(3, CAMS, IMG, seed=6)
+        td = ds.torch_dataset(target="heatmap", n_vox=24,
+                              include_hull=True, valid_only=False)
+        item = td[0]
+        assert item["hull"].shape == (24, 24, 24)

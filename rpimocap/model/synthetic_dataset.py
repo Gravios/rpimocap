@@ -346,6 +346,114 @@ def _grid_around(kpts3d: np.ndarray, vs: float, pad: float,
 
 
 # ────────────────────────────────────────────────────────────────────
+#  Phase B: native-3D targets (COM-centered grid, heatmap volume, hull)
+# ────────────────────────────────────────────────────────────────────
+
+
+def com_centered_grid(kpts3d: np.ndarray, n_vox: int = 64,
+                      voxel_size: float = 4.0,
+                      center: Optional[np.ndarray] = None) -> VoxelGrid:
+    """A cubic VoxelGrid of n_vox³ voxels centered on the animal's COM.
+
+    Mirrors the DANNCE/FreiPose native-3D setup: a fixed-size grid placed
+    on the subject's center of mass (here the keypoint centroid, unless
+    `center` is given). Span = n_vox · voxel_size (e.g. 64 · 4 mm =
+    256 mm cube), sized to contain the body + limbs.
+    """
+    if center is None:
+        center = kpts3d.mean(axis=0)
+    center = np.asarray(center, np.float64)
+    origin = center - 0.5 * n_vox * voxel_size
+    shape = (int(n_vox), int(n_vox), int(n_vox))
+    return VoxelGrid(origin=origin, voxel_size=float(voxel_size),
+                     shape=shape, occupancy=np.zeros(shape, dtype=bool))
+
+
+def _voxel_axis_centers(grid: VoxelGrid):
+    """Per-axis voxel-center coordinate vectors (xs, ys, zs)."""
+    nx, ny, nz = grid.shape
+    o = grid.origin
+    vs = grid.voxel_size
+    xs = o[0] + (np.arange(nx) + 0.5) * vs
+    ys = o[1] + (np.arange(ny) + 0.5) * vs
+    zs = o[2] + (np.arange(nz) + 0.5) * vs
+    return xs, ys, zs
+
+
+def keypoint_heatmap_volume(kpts3d: np.ndarray, grid: VoxelGrid,
+                            sigma_mm: float = 8.0) -> np.ndarray:
+    """Per-keypoint 3-D Gaussian heatmap volume — the native-3D
+    regression target.
+
+    Returns (23, nx, ny, nz) float32, where channel k is
+    exp(-|voxel_center - kpts3d[k]|² / (2 σ²)). Computed via the
+    SEPARABLE form (a Gaussian factorizes across axes), so it's cheap and
+    low-memory: three 1-D Gaussians per keypoint, outer-product'd.
+
+    argmax over each channel recovers the keypoint's nearest voxel — a
+    built-in correctness check (and how a net's prediction is decoded).
+    """
+    xs, ys, zs = _voxel_axis_centers(grid)
+    nx, ny, nz = grid.shape
+    K = kpts3d.shape[0]
+    inv2s2 = 1.0 / (2.0 * sigma_mm * sigma_mm)
+    vol = np.empty((K, nx, ny, nz), dtype=np.float32)
+    for k in range(K):
+        kx, ky, kz = kpts3d[k]
+        gx = np.exp(-((xs - kx) ** 2) * inv2s2)        # (nx,)
+        gy = np.exp(-((ys - ky) ** 2) * inv2s2)        # (ny,)
+        gz = np.exp(-((zs - kz) ** 2) * inv2s2)        # (nz,)
+        vol[k] = (gx[:, None, None] * gy[None, :, None]
+                  * gz[None, None, :]).astype(np.float32)
+    return vol
+
+
+def heatmap_argmax_keypoints(vol: np.ndarray,
+                             grid: VoxelGrid) -> np.ndarray:
+    """Decode a heatmap volume back to (K,3) keypoint positions (the
+    argmax voxel center per channel) — the inverse of
+    keypoint_heatmap_volume, used to validate and to decode predictions.
+    """
+    xs, ys, zs = _voxel_axis_centers(grid)
+    K = vol.shape[0]
+    out = np.zeros((K, 3), np.float64)
+    for k in range(K):
+        i, j, l = np.unravel_index(int(vol[k].argmax()), vol[k].shape)
+        out[k] = (xs[i], ys[j], zs[l])
+    return out
+
+
+def visual_hull(body: "RatBodyModel", kpts3d: np.ndarray,
+                cameras: dict, image_size: tuple[int, int],
+                grid: VoxelGrid) -> np.ndarray:
+    """Carve a COM-centered grid with each camera's body silhouette →
+    a visual-hull occupancy (bool) — a ready-to-use 3-D input for native-
+    3D training derived purely from the cameras + body model.
+
+    Note: for SYNTHETIC bootstrapping the hull and the heatmap target both
+    derive from the same ground-truth pose, so a net trained on (hull →
+    keypoints) learns the lifting geometry; real deployment swaps the
+    hull for image-feature unprojection.
+    """
+    from rpimocap.reconstruction.voxel import project_points_batch
+    nx, ny, nz = grid.shape
+    xs, ys, zs = _voxel_axis_centers(grid)
+    gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
+    centers = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+    W, H = image_size
+    occ = np.ones(centers.shape[0], dtype=bool)
+    for cam_id, P in cameras.items():
+        sil = body.silhouette(kpts3d, np.asarray(P), image_size)
+        px = project_points_batch(np.asarray(P), centers)
+        xi = np.clip(px[:, 0].astype(int), 0, W - 1)
+        yi = np.clip(px[:, 1].astype(int), 0, H - 1)
+        in_frame = ((px[:, 0] >= 0) & (px[:, 0] < W)
+                    & (px[:, 1] >= 0) & (px[:, 1] < H))
+        occ &= in_frame & (sil[yi, xi] > 0)
+    return occ.reshape((nx, ny, nz))
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Data model
 # ────────────────────────────────────────────────────────────────────
 
@@ -444,6 +552,108 @@ class SyntheticPoseDataset:
     def occupancy(self, i: int, voxel_size: float = 4.0) -> VoxelGrid:
         return self.body.occupancy(
             self.samples[i].keypoints3d, voxel_size=voxel_size)
+
+    # ── Phase B: native-3D targets ──────────────────────────────────
+
+    def com_grid(self, i: int, n_vox: int = 64,
+                 voxel_size: float = 4.0) -> VoxelGrid:
+        """COM-centered VoxelGrid for sample i."""
+        return com_centered_grid(
+            self.samples[i].keypoints3d, n_vox=n_vox,
+            voxel_size=voxel_size)
+
+    def heatmap_volume(self, i: int, n_vox: int = 64,
+                       voxel_size: float = 4.0,
+                       sigma_mm: float = 8.0,
+                       grid: Optional[VoxelGrid] = None):
+        """(volume (23,n,n,n), grid) — the native-3D regression target
+        for sample i on a COM-centered grid."""
+        if grid is None:
+            grid = self.com_grid(i, n_vox, voxel_size)
+        vol = keypoint_heatmap_volume(
+            self.samples[i].keypoints3d, grid, sigma_mm=sigma_mm)
+        return vol, grid
+
+    def visual_hull(self, i: int, n_vox: int = 64,
+                    voxel_size: float = 4.0,
+                    grid: Optional[VoxelGrid] = None) -> np.ndarray:
+        """Visual-hull occupancy (bool n,n,n) for sample i, carved from
+        the body silhouettes — a 3-D input for native-3D training."""
+        if grid is None:
+            grid = self.com_grid(i, n_vox, voxel_size)
+        cams = {int(c): np.asarray(P)
+                for c, P in self.meta["cameras"].items()}
+        return visual_hull(
+            self.body, self.samples[i].keypoints3d, cams,
+            tuple(self.meta["image_size"]), grid)
+
+    def torch_dataset(self, target: str = "heatmap", *,
+                      n_vox: int = 64, voxel_size: float = 4.0,
+                      sigma_mm: float = 8.0, include_hull: bool = False,
+                      valid_only: bool = True):
+        """Return a torch.utils.data.Dataset over the samples.
+
+        Each item is a dict with the camera-space inputs + the requested
+        target:
+          keypoints3d : (23,3) ground truth (always present)
+          keypoints2d : (Ncam,23,2), visibility (Ncam,23)
+          grid_origin : (3,), voxel_size : scalar  (decode the target)
+          target      : 'heatmap' -> (23,n,n,n) Gaussian volume
+                        'keypoints' -> (23,3) (same as keypoints3d)
+          hull        : (n,n,n) visual-hull occupancy, if include_hull
+
+        torch is imported lazily so the rest of the module works without
+        it. valid_only restricts to anatomically-valid, in-arena samples.
+        """
+        import torch
+        from torch.utils.data import Dataset
+
+        parent = self
+        cam_ids = [int(c) for c in parent.meta["cameras"].keys()]
+        idx = [i for i, s in enumerate(parent.samples)
+               if (s.valid or not valid_only)]
+
+        class _SynthTorch(Dataset):
+            def __len__(self):
+                return len(idx)
+
+            def __getitem__(self, j):
+                i = idx[j]
+                s = parent.samples[i]
+                grid = parent.com_grid(i, n_vox, voxel_size)
+                item = {
+                    "keypoints3d": torch.as_tensor(
+                        s.keypoints3d, dtype=torch.float32),
+                    "keypoints2d": torch.as_tensor(
+                        np.stack([s.keypoints2d[c] for c in cam_ids]),
+                        dtype=torch.float32),
+                    "visibility": torch.as_tensor(
+                        np.stack([s.visibility[c] for c in cam_ids])),
+                    "grid_origin": torch.as_tensor(
+                        grid.origin, dtype=torch.float32),
+                    "voxel_size": torch.tensor(
+                        float(grid.voxel_size)),
+                }
+                if target == "heatmap":
+                    vol = keypoint_heatmap_volume(
+                        s.keypoints3d, grid, sigma_mm=sigma_mm)
+                    item["target"] = torch.as_tensor(
+                        vol, dtype=torch.float32)
+                elif target == "keypoints":
+                    item["target"] = item["keypoints3d"]
+                else:
+                    raise ValueError(f"unknown target {target!r}")
+                if include_hull:
+                    cams = {int(c): np.asarray(P) for c, P
+                            in parent.meta["cameras"].items()}
+                    hull = visual_hull(
+                        parent.body, s.keypoints3d, cams,
+                        tuple(parent.meta["image_size"]), grid)
+                    item["hull"] = torch.as_tensor(
+                        hull, dtype=torch.float32)
+                return item
+
+        return _SynthTorch()
 
     # ── persistence ─────────────────────────────────────────────────
 
