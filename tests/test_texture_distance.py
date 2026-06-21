@@ -605,6 +605,42 @@ class TestTextureBlobTracker:
         # Final position should be near the last blob center
         assert abs(last[0] - (40 + 7 * 25)) < 20
 
+    def test_peek_prediction_none_before_init(self):
+        trk = TextureBlobTracker()
+        assert trk.peek_prediction() is None
+
+    def test_peek_prediction_does_not_mutate(self):
+        """peek_prediction must not advance the Kalman state — calling
+        it repeatedly leaves statePost unchanged."""
+        trk = TextureBlobTracker(gate_px=80)
+        for t in range(3):
+            trk.update(_circle_mask([(40 + t * 25, 100, 30)]))
+        before = trk._kf.statePost.copy()
+        for _ in range(5):
+            trk.peek_prediction()
+        assert np.allclose(before, trk._kf.statePost)
+
+    def test_peek_matches_predict_value(self):
+        trk = TextureBlobTracker(gate_px=80)
+        for t in range(3):
+            trk.update(_circle_mask([(40 + t * 25, 100, 30)]))
+        peek = trk.peek_prediction()
+        pred = trk.predict()          # this one advances
+        assert np.allclose(peek, pred, atol=1e-4)
+
+    def test_peeking_does_not_change_track(self):
+        """A tracker that peeks every frame produces the same states as
+        one that doesn't (no double-advance)."""
+        a = TextureBlobTracker(gate_px=80)
+        b = TextureBlobTracker(gate_px=80)
+        for t in range(8):
+            m = _circle_mask([(40 + t * 25, 100, 30)])
+            a.peek_prediction(); a.peek_prediction()
+            ra = a.update(m)
+            rb = b.update(m)
+            if ra["state"] and rb["state"]:
+                assert np.allclose(ra["state"], rb["state"])
+
     def test_gates_out_distractor(self):
         """A blob far from the prediction is rejected; the tracker
         coasts instead of jumping to it."""
@@ -1016,3 +1052,75 @@ class TestGraphCutSegment:
             dist, gray=None, fg_thresh=4.0, smooth_weight=3.0,
             min_area_px=800)
         assert info["fg_px"] > 0
+
+    def test_crop_box_matches_full_inside_box(self):
+        """The predicted-ROI crop must produce an identical cut inside
+        the box (the blob fully contained) — same result, smaller
+        graph."""
+        from rpimocap.detection.texture_distance import (
+            crop_box_from_prediction)
+        rng = np.random.RandomState(0)
+        H, W = 400, 600
+        dist = np.zeros((H, W), np.float32)
+        gray = np.full((H, W), 90, np.uint8)
+        yy, xx = np.mgrid[0:H, 0:W]
+        blob = ((xx - 420) ** 2 + (yy - 200) ** 2) < 50 ** 2
+        dist[blob] = 8.0
+        gray[blob] = 200
+        dist += rng.rand(H, W).astype(np.float32) * 0.5
+        m_full, _ = graphcut_segment_distance(
+            dist, gray, fg_thresh=4.0, smooth_weight=2.0, min_area_px=200)
+        box = crop_box_from_prediction((420.0, 200.0, 50.0), (H, W),
+                                       pad_px=120)
+        m_crop, _ = graphcut_segment_distance(
+            dist, gray, fg_thresh=4.0, smooth_weight=2.0, min_area_px=200,
+            crop_box=box)
+        assert m_crop.shape == m_full.shape       # full-size output
+        inter = ((m_full > 0) & (m_crop > 0)).sum()
+        union = ((m_full > 0) | (m_crop > 0)).sum()
+        assert inter / max(union, 1) > 0.98       # identical cut
+
+    def test_crop_box_outside_is_background(self):
+        """Everything outside the crop box is background."""
+        from rpimocap.detection.texture_distance import (
+            crop_box_from_prediction)
+        H, W = 300, 400
+        dist = np.zeros((H, W), np.float32)
+        cv2.circle(dist, (200, 150), 40, 8.0, -1)
+        cv2.circle(dist, (40, 40), 30, 8.0, -1)    # blob outside the box
+        gray = np.full((H, W), 90, np.uint8)
+        box = crop_box_from_prediction((200.0, 150.0, 40.0), (H, W),
+                                       pad_px=60)
+        mask, _ = graphcut_segment_distance(
+            dist, gray, fg_thresh=4.0, smooth_weight=2.0, min_area_px=50,
+            crop_box=box)
+        assert mask[40, 40] == 0                    # outside box → bg
+        assert mask[150, 200] > 0                   # inside box → kept
+
+
+class TestCropBoxFromPrediction:
+
+    def test_none_prediction_returns_none(self):
+        from rpimocap.detection.texture_distance import (
+            crop_box_from_prediction)
+        assert crop_box_from_prediction(None, (400, 600)) is None
+
+    def test_box_centered_and_clamped(self):
+        from rpimocap.detection.texture_distance import (
+            crop_box_from_prediction)
+        box = crop_box_from_prediction((300.0, 200.0, 40.0), (400, 600),
+                                       pad_px=100)
+        x0, y0, x1, y1 = box
+        assert 0 <= x0 < 300 < x1 <= 600
+        assert 0 <= y0 < 200 < y1 <= 400
+        # half-size ≈ r + pad = 140
+        assert abs((x1 - x0) / 2 - 140) < 2
+
+    def test_box_clamps_at_border(self):
+        from rpimocap.detection.texture_distance import (
+            crop_box_from_prediction)
+        box = crop_box_from_prediction((5.0, 5.0, 40.0), (400, 600),
+                                       pad_px=120)
+        x0, y0, x1, y1 = box
+        assert x0 == 0 and y0 == 0
+        assert x1 <= 600 and y1 <= 400

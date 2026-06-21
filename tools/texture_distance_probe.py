@@ -185,6 +185,17 @@ def main(argv=None):
                     help="graphcut: logistic steepness of the data "
                          "term. Larger = more threshold-like. Default "
                          "1.0.")
+    ap.add_argument("--gc-predicted-roi", action="store_true",
+                    default=False,
+                    help="graphcut (track mode): solve the max-flow "
+                         "only inside a box around the Kalman-predicted "
+                         "rat instead of the whole frame. Big speed win "
+                         "with an identical cut inside the box; falls "
+                         "back to full-frame before a track exists.")
+    ap.add_argument("--gc-roi-pad-px", type=int, default=120,
+                    help="graphcut predicted-ROI: slack (px) added "
+                         "around the predicted blob radius. Must exceed "
+                         "the per-frame rat displacement. Default 120.")
     ap.add_argument("--illumination-correct", action="store_true",
                     default=False,
                     help="Build a static shadow/illumination field "
@@ -255,12 +266,13 @@ def main(argv=None):
         build_illumination_field, apply_illumination_correction,
         DynamicShadowModel, TextureBlobTracker,
         texture_distance_map, threshold_distance_map,
-        graphcut_segment_distance,
+        graphcut_segment_distance, crop_box_from_prediction,
         colorize_distance_map)
 
-    def _segment(dist, gray_c, roi):
+    def _segment(dist, gray_c, roi, crop_box=None):
         """Dispatch to the chosen segmentation backend, returning
-        (mask, threshold_or_flow)."""
+        (mask, threshold_or_flow). crop_box (graphcut only) restricts
+        the max-flow to a predicted-ROI band."""
         if args.segment_method == "graphcut":
             mask, info = graphcut_segment_distance(
                 dist, gray=gray_c, roi_mask=roi,
@@ -269,7 +281,8 @@ def main(argv=None):
                 smooth_weight=args.gc_smooth_weight,
                 edge_sigma=args.gc_edge_sigma,
                 min_area_px=args.min_area,
-                suppress_thin_width=args.suppress_thin_width)
+                suppress_thin_width=args.suppress_thin_width,
+                crop_box=crop_box)
             return mask, info["flow"]
         mask, thr = threshold_distance_map(
             dist, method=args.threshold_method,
@@ -530,7 +543,16 @@ def main(argv=None):
                     anisotropy_weight=aniso_w,
                     roi_mask=roi,
                     post_smooth_k=args.post_smooth_k)
-                mask, thr = _segment(dist, gray_c, roi)
+                # Predicted-ROI crop (graphcut only): peek the tracker's
+                # prediction (non-mutating) to restrict the max-flow to a
+                # band around where the rat is expected, before update().
+                crop_box = None
+                if (args.gc_predicted_roi
+                        and args.segment_method == "graphcut"):
+                    crop_box = crop_box_from_prediction(
+                        tracker.peek_prediction(), gray_c.shape,
+                        pad_px=args.gc_roi_pad_px)
+                mask, thr = _segment(dist, gray_c, roi, crop_box=crop_box)
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:

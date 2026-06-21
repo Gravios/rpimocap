@@ -899,6 +899,39 @@ def threshold_distance_map(
 # ────────────────────────────────────────────────────────────────────
 
 
+def crop_box_from_prediction(
+        pred:        Optional[tuple],
+        image_shape: tuple,
+        pad_px:      int = 120,
+        min_size:    int = 200,
+        ) -> Optional[tuple]:
+    """Build a (x0, y0, x1, y1) crop box around a Kalman prediction
+    (cx, cy, r) for the predicted-ROI graph cut.
+
+    The box is centered on the predicted blob, sized to the predicted
+    radius plus `pad_px` of slack (motion + blob-size uncertainty), and
+    clamped to the image and to a minimum size. Returns None if the
+    prediction is None (no track yet) so the caller falls back to a
+    full-frame cut.
+
+    pad_px should comfortably exceed the rat's per-frame displacement
+    plus the radius uncertainty — too tight and a fast move escapes the
+    box; the cost of a generous pad is only a slightly larger graph.
+    """
+    if pred is None:
+        return None
+    H, W = image_shape[:2]
+    cx, cy, r = pred
+    half = max(float(r) + pad_px, min_size / 2.0)
+    x0 = int(max(0, np.floor(cx - half)))
+    y0 = int(max(0, np.floor(cy - half)))
+    x1 = int(min(W, np.ceil(cx + half)))
+    y1 = int(min(H, np.ceil(cy + half)))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    return (x0, y0, x1, y1)
+
+
 def graphcut_segment_distance(
         dist:           np.ndarray,
         gray:           Optional[np.ndarray] = None,
@@ -909,6 +942,7 @@ def graphcut_segment_distance(
         edge_sigma:     float = 10.0,
         min_area_px:    int = 1000,
         suppress_thin_width: int = 0,
+        crop_box:       Optional[tuple] = None,
         ) -> tuple[np.ndarray, dict]:
     """Segment the texture-distance map into a foreground mask by
     minimizing a binary MRF energy with a graph cut (Boykov-Kolmogorov
@@ -972,6 +1006,16 @@ def graphcut_segment_distance(
     suppress_thin_width : if > 0, apply suppress_thin_structures to the
                     cut result (cable removal still helps even with the
                     smoothness term).
+    crop_box      : optional (x0, y0, x1, y1) pixel box. When given, the
+                    max-flow is solved ONLY over this sub-window (e.g. a
+                    dilated box around the Kalman-predicted rat) instead
+                    of the whole frame, and the result is placed back
+                    into a full-size mask (everything outside the box is
+                    background). This is the cheapest large perf win —
+                    a ~400×400 band is ~30k nodes vs ~2.2M for a full
+                    2028×1080 frame — with no change to the cut inside
+                    the box. Use crop_box_from_prediction() to build it
+                    from the tracker. None = full frame.
 
     Returns
     -------
@@ -986,6 +1030,28 @@ def graphcut_segment_distance(
 
     H, W = dist.shape
     d = dist.astype(np.float32)
+
+    # ── Optional predicted-ROI crop ────────────────────────────────
+    # Solve the max-flow only over a sub-window (e.g. a dilated box
+    # around the Kalman-predicted rat). We slice the data here and paste
+    # the resulting cut back into a full-size mask after the solve, so
+    # the output shape and all downstream post-processing are unchanged.
+    full_HW = (H, W)
+    cb = None
+    roi_full = roi_mask          # keep the full-frame roi for the post clamp
+    if crop_box is not None:
+        x0, y0, x1, y1 = crop_box
+        x0 = int(max(0, min(x0, W - 1)))
+        y0 = int(max(0, min(y0, H - 1)))
+        x1 = int(max(x0 + 1, min(x1, W)))
+        y1 = int(max(y0 + 1, min(y1, H)))
+        cb = (x0, y0, x1, y1)
+        d = d[y0:y1, x0:x1]
+        if gray is not None:
+            gray = gray[y0:y1, x0:x1]
+        if roi_mask is not None:
+            roi_mask = roi_mask[y0:y1, x0:x1]
+        H, W = d.shape
 
     # ── Data term ──────────────────────────────────────────────────
     # Foreground probability via logistic centered at fg_thresh.
@@ -1050,6 +1116,15 @@ def graphcut_segment_distance(
     sgm = g.get_grid_segments(nodeids)     # True = sink side
     # By our tedge convention, sink side = background.
     mask = (~sgm).astype(np.uint8) * 255
+
+    # Paste the cropped cut back into a full-size mask (outside the
+    # crop box stays background). Post-processing then runs full-frame.
+    if cb is not None:
+        x0, y0, x1, y1 = cb
+        full = np.zeros(full_HW, np.uint8)
+        full[y0:y1, x0:x1] = mask
+        mask = full
+        roi_mask = roi_full       # restore full-frame roi for the clamp
 
     # ── Post: ROI clamp, cable suppression, area filter ────────────
     if roi_mask is not None:
@@ -1202,6 +1277,21 @@ class TextureBlobTracker:
             return None
         p = self._kf.predict()
         return float(p[0, 0]), float(p[1, 0]), float(p[2, 0])
+
+    def peek_prediction(self):
+        """Predicted (cx, cy, r) WITHOUT advancing the filter.
+
+        `predict()` (and `update()`, which calls it) mutate the Kalman
+        state, so calling `predict()` separately to build a predicted-ROI
+        crop before `update()` would double-advance the motion model.
+        This reads the one-step prediction non-destructively as
+        A · statePost, leaving the filter untouched, so the caller can
+        build a crop box and then call `update()` normally. Returns None
+        if uninitialized."""
+        if not self._initialized:
+            return None
+        x = self._kf.transitionMatrix @ self._kf.statePost
+        return float(x[0, 0]), float(x[1, 0]), float(x[2, 0])
 
     # ── public step ────────────────────────────────────────────────
 
