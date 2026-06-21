@@ -65,6 +65,13 @@ from rpimocap.reconstruction.rearing import (
     RearingClassifier,
     trace_postures,
 )
+from rpimocap.reconstruction.epipolar import (
+    StereoMatch,
+    fundamental_from_projections,
+    epipolar_distance,
+    match_stereo_candidates,
+    best_stereo_point,
+)
 
 __all__ = [
     # triangulate
@@ -76,6 +83,12 @@ __all__ = [
     "smooth_trajectory",
     "fill_trajectory_gaps",
     "trajectory_stats",
+    # epipolar (tightly-coupled two-view selection)
+    "StereoMatch",
+    "fundamental_from_projections",
+    "epipolar_distance",
+    "match_stereo_candidates",
+    "best_stereo_point",
     # voxel
     "VoxelGrid",
     "build_voxel_grid",
