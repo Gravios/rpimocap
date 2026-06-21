@@ -72,6 +72,13 @@ from rpimocap.reconstruction.epipolar import (
     match_stereo_candidates,
     best_stereo_point,
 )
+from rpimocap.reconstruction.arena_gate import (
+    StaticDepthGate,
+    in_arena_volume,
+    above_floor,
+    accept_point,
+    build_static_depth_gate,
+)
 
 __all__ = [
     # triangulate
@@ -89,6 +96,12 @@ __all__ = [
     "epipolar_distance",
     "match_stereo_candidates",
     "best_stereo_point",
+    # arena gate (static-scene geometric rejection)
+    "StaticDepthGate",
+    "in_arena_volume",
+    "above_floor",
+    "accept_point",
+    "build_static_depth_gate",
     # voxel
     "VoxelGrid",
     "build_voxel_grid",
