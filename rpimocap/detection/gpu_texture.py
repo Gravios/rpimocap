@@ -93,6 +93,7 @@ def gabor_descriptor_device(
         gray, kernels: Sequence[np.ndarray],
         n_orient: int, n_scales: int,
         smooth_k: int = 7, rotation_invariant: bool = True,
+        log_transform: bool = False,
         device: str = "auto", xp=None, ndi=None):
     """Dense Gabor descriptor, computed on `device`. Mirrors
     texture_distance.dense_gabor_descriptor exactly (same pooling, same
@@ -134,6 +135,8 @@ def gabor_descriptor_device(
         out = xp.empty((D, H, W), dtype=xp.float32)
         for i, kern in enumerate(kernels):
             out[i] = _box(_filt(gray_f, kern))
+    if log_transform:
+        out = xp.log1p(out)        # variance-stabilize (see CPU twin)
     return out
 
 
@@ -141,6 +144,7 @@ def texture_distance_device(
         gray, model_mean, model_std,
         kernels: Sequence[np.ndarray], n_orient: int, n_scales: int,
         smooth_k: int = 7, rotation_invariant: bool = True,
+        log_transform: bool = False,
         persistence_map=None, persistence_power: float = 1.0,
         anisotropy_weight=None, roi_mask=None, post_smooth_k: int = 15,
         device: str = "auto", xp=None, ndi=None, return_host: bool = True):
@@ -158,7 +162,8 @@ def texture_distance_device(
 
     desc = gabor_descriptor_device(
         gray, kernels, n_orient, n_scales, smooth_k=smooth_k,
-        rotation_invariant=rotation_invariant, xp=xp, ndi=ndi)
+        rotation_invariant=rotation_invariant,
+        log_transform=log_transform, xp=xp, ndi=ndi)
 
     mean = xp.asarray(model_mean, dtype=xp.float32)
     std = xp.asarray(model_std, dtype=xp.float32)

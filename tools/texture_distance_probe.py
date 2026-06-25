@@ -99,6 +99,13 @@ def main(argv=None):
     ap.add_argument("--post-smooth-k", type=int, default=15,
                     help="Box filter on the final distance map "
                          "(crude smoothness-term stand-in).")
+    ap.add_argument("--log-descriptor", action="store_true",
+                    help="Apply log1p to the Gabor descriptor (variance-"
+                         "stabilize the exponential-like background: CoV "
+                         "~1, tails 8-16x mean over 1e9 px). Compresses "
+                         "the heavy background tail so the z-score is "
+                         "better founded. Applied to BOTH the bg model "
+                         "and the per-frame descriptor.")
     ap.add_argument("--device", default="cpu",
                     choices=["cpu", "gpu", "auto"],
                     help="Compute the Gabor descriptor + texture "
@@ -471,7 +478,7 @@ def main(argv=None):
             rat_percentile=args.persistence_rat_percentile,
             rat_min_area_px=args.persistence_rat_min_area,
             rat_dilate_px=args.persistence_rat_dilate,
-            roi_mask=roi)
+            roi_mask=roi, log_transform=args.log_descriptor)
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
@@ -494,6 +501,7 @@ def main(argv=None):
                 return texture_distance_map(
                     gray_in, model, kernels, n_orient, n_scales,
                     smooth_k=args.smooth_k, rotation_invariant=True,
+                    log_transform=args.log_descriptor,
                     persistence_map=persistence_map,
                     persistence_power=args.persistence_power,
                     anisotropy_weight=aniso_w, roi_mask=roi,
@@ -502,6 +510,7 @@ def main(argv=None):
                 gray_in, _dev_model[0], _dev_model[1], kernels,
                 n_orient, n_scales, smooth_k=args.smooth_k,
                 rotation_invariant=True,
+                log_transform=args.log_descriptor,
                 persistence_map=persistence_map,
                 persistence_power=args.persistence_power,
                 anisotropy_weight=aniso_w, roi_mask=roi,

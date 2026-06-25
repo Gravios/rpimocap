@@ -60,6 +60,17 @@ class TestCpuMatchesCanonical:
         rng = d_cv.max() - d_cv.min()
         assert np.abs(d_cv - d_dev).max() / (rng + 1e-9) < 1e-4
 
+    def test_descriptor_log_transform_matches(self):
+        _, cur = _scene(9)
+        d_cv = td.dense_gabor_descriptor(
+            cur, KERNELS, N_ORIENT, len(SCALES), smooth_k=7,
+            log_transform=True)
+        d_dev = gt.to_host(gt.gabor_descriptor_device(
+            cur, KERNELS, N_ORIENT, len(SCALES), smooth_k=7,
+            log_transform=True, device="cpu"))
+        rng = d_cv.max() - d_cv.min()
+        assert np.abs(d_cv - d_dev).max() / (rng + 1e-9) < 1e-4
+
     def test_descriptor_non_rotation_invariant(self):
         _, cur = _scene(2)
         d_cv = td.dense_gabor_descriptor(

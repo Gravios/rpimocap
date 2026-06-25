@@ -69,6 +69,7 @@ def dense_gabor_descriptor(
         n_scales:    int,
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
+        log_transform: bool = False,
         ) -> np.ndarray:
     """Compute a dense per-pixel Gabor texture descriptor.
 
@@ -127,6 +128,16 @@ def dense_gabor_descriptor(
             if smooth_k > 1:
                 r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
             out[i] = r
+    if log_transform:
+        # The pooled background descriptor is exponential-like (CoV ~ 1,
+        # tails 8-16x the mean over 1e9 samples). log1p is the variance-
+        # stabilizing transform for that family: it compresses the heavy
+        # background tail toward the bulk, so the downstream z-score /
+        # Mahalanobis (a Gaussian assumption) is far better founded and
+        # the tail produces fewer false positives. Must be applied
+        # consistently to BOTH the bg-model build and the per-frame
+        # descriptor (the model mean/std then live in log space).
+        out = np.log1p(out)
     return out
 
 
@@ -486,6 +497,7 @@ def build_persistent_texture_model(
         rat_min_area_px: int = 1500,
         rat_dilate_px:   int = 25,
         roi_mask:    Optional[np.ndarray] = None,
+        log_transform: bool = False,
         ) -> tuple["BackgroundTextureModel", np.ndarray]:
     """Build a background texture model robust to the moving rat,
     plus a persistence (temporal-stability) map.
@@ -558,7 +570,8 @@ def build_persistent_texture_model(
     for f in bg_frames:
         descs.append(dense_gabor_descriptor(
             f, kernels, n_orient, n_scales,
-            smooth_k=smooth_k, rotation_invariant=rotation_invariant))
+            smooth_k=smooth_k, rotation_invariant=rotation_invariant,
+            log_transform=log_transform))
         if mask_rat:
             rat_masks.append(_detect_rat_mask_intensity(
                 f, percentile=rat_percentile,
@@ -638,6 +651,7 @@ def texture_distance_map(
         n_scales:    int,
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
+        log_transform: bool = False,
         roi_mask:    Optional[np.ndarray] = None,
         persistence_map: Optional[np.ndarray] = None,
         persistence_power: float = 1.0,
@@ -701,7 +715,8 @@ def texture_distance_map(
     desc = dense_gabor_descriptor(
         gray, kernels, n_orient, n_scales,
         smooth_k=smooth_k,
-        rotation_invariant=rotation_invariant)
+        rotation_invariant=rotation_invariant,
+        log_transform=log_transform)
     # Per-channel z-score, then RMS across channels
     z = (desc - model.mean) / model.std
     dist = np.sqrt(np.mean(z * z, axis=0)).astype(np.float32)

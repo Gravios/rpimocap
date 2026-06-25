@@ -82,6 +82,33 @@ class TestDenseDescriptor:
         assert rel_diff > 0.2, (
             f"descriptors should differ by >20%; got {rel_diff:.2%}")
 
+    def test_log_transform_is_log1p(self):
+        """log_transform=True returns log1p of the untransformed
+        descriptor."""
+        frame = _textured_bg()
+        d = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        d_log = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            log_transform=True)
+        assert np.allclose(d_log, np.log1p(d), atol=1e-5)
+        assert d_log.shape == d.shape
+
+    def test_log_transform_compresses_tail(self):
+        """The log transform compresses the heavy descriptor tail (the
+        whole point — the background is exponential-like)."""
+        frame = _textured_bg()
+        d = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+        d_log = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            log_transform=True)
+        # ratio of 99.9th pct to median shrinks under log
+        def tailiness(x):
+            return (np.percentile(x, 99.9)
+                    / (np.median(x) + 1e-6))
+        assert tailiness(d_log) < tailiness(d)
+
 
 class TestBackgroundTextureModel:
 
