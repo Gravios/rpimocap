@@ -79,6 +79,11 @@ from rpimocap.reconstruction.arena_gate import (
     accept_point,
     build_static_depth_gate,
 )
+from rpimocap.reconstruction.stereo_track import (
+    GatedDetection,
+    gated_stereo_detection,
+    gate_trajectory,
+)
 
 __all__ = [
     # triangulate
@@ -102,6 +107,10 @@ __all__ = [
     "above_floor",
     "accept_point",
     "build_static_depth_gate",
+    # stereo-gated detection (in-arena pairing selection)
+    "GatedDetection",
+    "gated_stereo_detection",
+    "gate_trajectory",
     # voxel
     "VoxelGrid",
     "build_voxel_grid",

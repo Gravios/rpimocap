@@ -652,6 +652,8 @@ def main(argv=None):
                     alpha=args.dynamic_shadow_alpha,
                     blur_sigma=args.illumination_blur_sigma)
             traj = []          # (frame_idx, cx, cy, r, measured, coasting)
+            cands = []         # (frame_idx, cx, cy, area) — all blobs,
+            #                    for downstream stereo gating (stereo_track)
             montage_frames = []
             n_meas = n_coast = n_lost = 0
             for fi in range(args.track_start, args.track_end,
@@ -683,6 +685,17 @@ def main(argv=None):
                         tracker.peek_prediction(), gray_c.shape,
                         pad_px=args.gc_roi_pad_px)
                 mask, thr = _segment(dist, gray_c, roi, crop_box=crop_box)
+                # Record ALL candidate blob centroids (not just the
+                # tracked one) so a downstream stereo pass can gate them
+                # against the arena volume (rejects through-the-glass
+                # floor patches a single 2-D view can't disambiguate).
+                ncc, lbl, stats, cents = cv2.connectedComponentsWithStats(
+                    (mask > 0).astype(np.uint8), connectivity=8)
+                for ci in range(1, ncc):
+                    area = int(stats[ci, cv2.CC_STAT_AREA])
+                    if area >= args.min_area:
+                        cands.append((fi, float(cents[ci][0]),
+                                      float(cents[ci][1]), area))
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:
@@ -762,6 +775,15 @@ def main(argv=None):
                     fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
                              f"{row[3]:.2f},{int(row[4])},"
                              f"{int(row[5])}\n")
+            # Write candidates CSV (all blobs per frame) for the stereo
+            # gating pass (tools/stereo_gate.py).
+            cand_csv = os.path.join(
+                args.out, f"candidates_cam{cam_id}.csv")
+            with open(cand_csv, "w") as fh:
+                fh.write("frame,cx,cy,area\n")
+                for row in cands:
+                    fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
+                             f"{row[3]}\n")
             # Write montage. Each cell is now a 3-panel strip
             # [raw+circle | heatmap | mask], so use 2 columns to keep
             # the grid readable.
