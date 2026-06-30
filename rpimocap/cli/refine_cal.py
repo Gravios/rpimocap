@@ -155,6 +155,8 @@ def main() -> None:
     conv = "converged" if result["converged"] else "WARNING: not converged"
     print(f"  Status: {conv}")
     print(f"\n  Saved: {out_path}")
+    print(f"  (dlt_P0/dlt_P1 recomputed from the refined geometry, so "
+          f"stereo_gate.py / stereo_diagnose.py use the refinement)")
     print(f"\n  Use with rpimocap-segment:")
     print(f"    rpimocap-segment --calib {out_path} ...")
 

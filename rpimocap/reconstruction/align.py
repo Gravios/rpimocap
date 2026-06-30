@@ -375,10 +375,22 @@ def refine_calibration_from_arena(corner_points, edges, calib_path, out_path,
 
     out_path = Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
     cal_out = dict(np.load(calib_path))
+    # Recompute the ARENA-FRAME projection matrices (dlt_P0/dlt_P1) from
+    # the refined parameters, so downstream tools that read dlt_P0/dlt_P1
+    # (stereo_gate, stereo_diagnose) pick up the refinement instead of
+    # the stale pre-refinement DLT. cam0's arena pose is the optimised
+    # (rvec_p, tvec_p); cam1 = stereo[R|T] composed with cam0's pose.
+    Rp_f, _ = cv2.Rodrigues(xf[20:23].astype(np.float64))
+    tp_f = xf[23:26].reshape(3, 1)
+    M0 = np.hstack([Rp_f, tp_f])                       # world(arena)->cam0
+    M1 = np.hstack([Rf, Tf]) @ np.vstack([M0, [0, 0, 0, 1]])  # ->cam1
+    dlt_P0f = K0f @ M0
+    dlt_P1f = K1f @ M1
     cal_out.update({"K0":K0f,"K1":K1f,"dist0":d0f.reshape(1,5),"dist1":d1f.reshape(1,5),
                     "R":Rf,"T":Tf,
                     "P0":K0f@np.hstack([np.eye(3),np.zeros((3,1))]),
-                    "P1":K1f@np.hstack([Rf,Tf])})
+                    "P1":K1f@np.hstack([Rf,Tf]),
+                    "dlt_P0":dlt_P0f, "dlt_P1":dlt_P1f})
     np.savez(out_path, **cal_out)
 
     return {"cost_before":cost0,"cost_after":cost1,"converged":result.success,
