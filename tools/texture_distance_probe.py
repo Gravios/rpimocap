@@ -54,6 +54,15 @@ def _to_gray(frame: np.ndarray, use_green: bool) -> np.ndarray:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
 
+def _read_gray_at(cap, idx, use_green):
+    """Seek to frame idx and return its gray (or None)."""
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+    ok, frame = cap.read()
+    if not ok or frame is None:
+        return None
+    return _to_gray(frame, use_green)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -99,6 +108,22 @@ def main(argv=None):
     ap.add_argument("--post-smooth-k", type=int, default=15,
                     help="Box filter on the final distance map "
                          "(crude smoothness-term stand-in).")
+    ap.add_argument("--bg-select", default="stride",
+                    choices=["stride", "motion"],
+                    help="How to pick background-model frames. 'stride' "
+                         "(default) samples at a fixed interval; 'motion' "
+                         "picks frames where the rat is actively moving "
+                         "(high inter-frame motion in the ROI), so a "
+                         "dwelling rat is NOT baked into the median "
+                         "background (avoids the persistence hole that "
+                         "suppresses the rat).")
+    ap.add_argument("--bg-motion-oversample", type=int, default=4,
+                    help="With --bg-select motion: scan this many times "
+                         "--bg-frames candidates to score for motion.")
+    ap.add_argument("--bg-motion-min-pct", type=float, default=40.0,
+                    help="With --bg-select motion: discard candidate "
+                         "frames below this motion percentile (still "
+                         "frames that would contaminate the median).")
     ap.add_argument("--log-descriptor", action="store_true",
                     help="Apply log1p to the Gabor descriptor (variance-"
                          "stabilize the exponential-like background: CoV "
@@ -364,14 +389,46 @@ def main(argv=None):
         # background texture model. With the rat in every frame, the
         # per-pixel temporal median rejects the rat as an outlier.
         bg_grays = []
-        idx = args.bg_start
-        while len(bg_grays) < args.bg_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-            bg_grays.append(_to_gray(frame, args.green_channel))
-            idx += args.bg_stride
+        if args.bg_select == "motion":
+            # Motion-aware: pick frames where the rat is moving so a
+            # dwelling rat isn't baked into the median background.
+            from rpimocap.detection.bg_select import select_active_frames
+            # ROI for motion scoring (build from a probe frame's shape)
+            probe_g = None
+            cap.set(cv2.CAP_PROP_POS_FRAMES, args.bg_start)
+            ok, _pf = cap.read()
+            if ok and _pf is not None:
+                probe_g = _to_gray(_pf, args.green_channel)
+            motion_roi = None
+            if probe_g is not None and dlt_P[cam_id] is not None:
+                motion_roi = arena_roi_mask(
+                    dlt_P[cam_id], _ARENA_CORNERS, probe_g.shape,
+                    pad_px=args.roi_pad_px)
+            sel_end = (n_frames if n_frames > 0
+                       else args.bg_start + args.bg_frames
+                       * args.bg_stride * args.bg_motion_oversample)
+            sel_idx, _cand, _motion = select_active_frames(
+                cap, args.bg_frames, args.bg_start, sel_end,
+                green_channel=args.green_channel, roi_mask=motion_roi,
+                oversample=args.bg_motion_oversample,
+                min_motion_percentile=args.bg_motion_min_pct)
+            print(f"  motion-selected {len(sel_idx)} bg frames "
+                  f"(of {len(_cand)} scanned); motion "
+                  f"min={_motion.min():.2f} max={_motion.max():.2f} "
+                  f"mean={_motion.mean():.2f}")
+            for fi in sel_idx:
+                g = _read_gray_at(cap, fi, args.green_channel)
+                if g is not None:
+                    bg_grays.append(g)
+        else:
+            idx = args.bg_start
+            while len(bg_grays) < args.bg_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                bg_grays.append(_to_gray(frame, args.green_channel))
+                idx += args.bg_stride
         if len(bg_grays) < 3:
             print(f"  ERROR: only {len(bg_grays)} bg frames collected")
             cap.release()
