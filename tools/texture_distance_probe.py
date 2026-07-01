@@ -108,6 +108,21 @@ def main(argv=None):
     ap.add_argument("--post-smooth-k", type=int, default=15,
                     help="Box filter on the final distance map "
                          "(crude smoothness-term stand-in).")
+    ap.add_argument("--roi-mode", default="box",
+                    choices=["box", "floor", "volume"],
+                    help="Detection ROI extent. 'box' (legacy) = convex "
+                         "hull of all 8 arena corners — ~3.6x the floor "
+                         "area, ~73%% of it the through-wall region seen "
+                         "past the transparent walls, which locks "
+                         "detection onto non-corresponding per-camera "
+                         "artifacts. 'floor' = the 4 floor corners only "
+                         "(arena footprint). 'volume' = floor + a "
+                         "--roi-max-height-mm band (covers a reared "
+                         "animal, excludes the upper through-wall "
+                         "region). Use floor or volume for stereo.")
+    ap.add_argument("--roi-max-height-mm", type=float, default=120.0,
+                    help="Height (mm) of the volume band above the floor "
+                         "for --roi-mode volume.")
     ap.add_argument("--bg-select", default="stride",
                     choices=["stride", "motion"],
                     help="How to pick background-model frames. 'stride' "
@@ -299,7 +314,8 @@ def main(argv=None):
     # Lazy imports from the package
     from rpimocap.io.export import TiffCapture
     from rpimocap.detection.rat_texture import build_gabor_kernels
-    from rpimocap.detection.segment import arena_roi_mask
+    from rpimocap.detection.segment import (
+        arena_roi_mask, arena_roi_corners)
     from rpimocap.detection.texture_distance import (
         dense_gabor_descriptor, BackgroundTextureModel,
         build_persistent_texture_model,
@@ -341,6 +357,15 @@ def main(argv=None):
         [-140, -215, 388], [ 140, -215, 388],
         [ 140,  215, 388], [-140,  215, 388],
     ], dtype=np.float64)
+    # Corner subset defining the detection ROI (box / floor / volume).
+    _ROI_CORNERS = arena_roi_corners(
+        _ARENA_CORNERS, mode=args.roi_mode,
+        max_height_mm=args.roi_max_height_mm)
+    if args.roi_mode != "box":
+        print(f"  ROI mode: {args.roi_mode}"
+              + (f" (height band {args.roi_max_height_mm:.0f}mm)"
+                 if args.roi_mode == "volume" else "")
+              + f" — {len(_ROI_CORNERS)} corners (was 8-corner box hull)")
     # Load DLT projection matrices if a calibration was given
     dlt_P = {0: None, 1: None}
     if args.calib:
@@ -402,7 +427,7 @@ def main(argv=None):
             motion_roi = None
             if probe_g is not None and dlt_P[cam_id] is not None:
                 motion_roi = arena_roi_mask(
-                    dlt_P[cam_id], _ARENA_CORNERS, probe_g.shape,
+                    dlt_P[cam_id], _ROI_CORNERS, probe_g.shape,
                     pad_px=args.roi_pad_px)
             sel_end = (n_frames if n_frames > 0
                        else args.bg_start + args.bg_frames
@@ -442,7 +467,7 @@ def main(argv=None):
         roi = None
         if dlt_P[cam_id] is not None:
             roi = arena_roi_mask(
-                dlt_P[cam_id], _ARENA_CORNERS,
+                dlt_P[cam_id], _ROI_CORNERS,
                 bg_grays[0].shape, pad_px=args.roi_pad_px)
             cov = 100.0 * float((roi > 0).sum()) / roi.size
             print(f"  Arena ROI: {cov:.1f}% of frame inside")

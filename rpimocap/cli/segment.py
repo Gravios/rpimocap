@@ -756,6 +756,17 @@ def main() -> None:
     det.add_argument("--no-roi-mask", action="store_true", default=False,
                     help="Disable the automatic arena ROI mask. "
                          "Use if the mask clips the animal at the walls.")
+    det.add_argument("--roi-mode", default="box",
+                    choices=["box", "floor", "volume"],
+                    help="Arena ROI extent. 'box' (legacy) = hull of all "
+                         "8 corners (~3.6x floor area, includes the "
+                         "through-wall region past the transparent "
+                         "walls). 'floor' = 4 floor corners (footprint). "
+                         "'volume' = floor + --roi-max-height-mm band. "
+                         "floor/volume are recommended for stereo.")
+    det.add_argument("--roi-max-height-mm", type=float, default=120.0,
+                    help="Height (mm) of the volume band above the floor "
+                         "for --roi-mode volume.")
     det.add_argument("--bg-adapt-alpha", type=float, default=None,
                     metavar="A",
                     help="Enable temporal background adaptation with the "
@@ -1069,11 +1080,16 @@ def main() -> None:
         P0_dlt = cal.get("dlt_P0", cal.get("P0", None))
         P1_dlt = cal.get("dlt_P1", cal.get("P1", None))
         if P0_dlt is not None and P1_dlt is not None:
-            roi_mask0 = arena_roi_mask(P0_dlt, _ARENA_CORNERS,
+            from rpimocap.detection.segment import arena_roi_corners
+            roi_corners = arena_roi_corners(
+                _ARENA_CORNERS, mode=getattr(args, "roi_mode", "box"),
+                max_height_mm=getattr(args, "roi_max_height_mm", 120.0))
+            roi_mask0 = arena_roi_mask(P0_dlt, roi_corners,
                                        (vid_h, vid_w), pad_px=20)
-            roi_mask1 = arena_roi_mask(P1_dlt, _ARENA_CORNERS,
+            roi_mask1 = arena_roi_mask(P1_dlt, roi_corners,
                                        (vid_h, vid_w), pad_px=20)
-            print("  Arena ROI masks computed from DLT projection matrices")
+            print(f"  Arena ROI masks computed from DLT projection "
+                  f"matrices (roi-mode: {getattr(args,'roi_mode','box')})")
             if args.wall_decay > 0:
                 from rpimocap.detection.segment import arena_wall_weight
                 wall_weight0 = arena_wall_weight(P0_dlt, _ARENA_CORNERS,

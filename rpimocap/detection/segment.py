@@ -503,6 +503,46 @@ class BackgroundModel:
 #  Foreground detector                                                         #
 # --------------------------------------------------------------------------- #
 
+def arena_roi_corners(arena_pts: np.ndarray,
+                      mode: str = "box",
+                      max_height_mm: float = 120.0) -> np.ndarray:
+    """Select the arena 3D corner subset that defines the detection ROI.
+
+    The 2D convex hull of ALL 8 box corners (mode='box') is far larger
+    than the arena floor — through the transparent acrylic walls each
+    camera sees a large, camera-specific volume above/beyond the floor
+    that projects INSIDE that hull (~73% of the box-hull area is not
+    floor). Detection allowed in that region locks onto non-corresponding
+    per-camera artifacts, which cannot triangulate (the constant epipolar
+    error). Restricting the ROI removes it.
+
+    Parameters
+    ----------
+    arena_pts : (8, 3) box corners, floor (z=zmin) first 4, ceiling last 4.
+    mode :
+        'box'    — all 8 corners (full box silhouette; legacy behaviour).
+        'floor'  — the 4 floor corners only (arena footprint; tightest).
+        'volume' — the 4 floor corners plus 4 corners lifted to
+                   z = zmin + max_height_mm: the arena floor plus a
+                   realistic animal-height band, so a reared animal is
+                   covered while the upper through-wall region is still
+                   excluded.
+    max_height_mm : height of the band above the floor for mode='volume'.
+    """
+    arena_pts = np.asarray(arena_pts, dtype=np.float64)
+    floor = arena_pts[:4]
+    if mode == "box":
+        return arena_pts
+    if mode == "floor":
+        return floor
+    if mode == "volume":
+        top = floor.copy()
+        top[:, 2] = floor[:, 2] + float(max_height_mm)
+        return np.vstack([floor, top])
+    raise ValueError(f"unknown roi mode {mode!r} "
+                     "(expected box|floor|volume)")
+
+
 def arena_roi_mask(P: np.ndarray,
                    arena_pts: np.ndarray,
                    image_shape: tuple,
