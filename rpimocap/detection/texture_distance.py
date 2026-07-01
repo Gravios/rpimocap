@@ -1279,9 +1279,13 @@ class TextureBlobTracker:
                  meas_noise:    float = 6.0,
                  gate_px:       float = 120.0,
                  max_coast:     int   = 10,
-                 select:        str   = "compactness",
+                 select:        str   = "geometry",
                  fill_power:    float = 1.0,
-                 min_fill:      float = 0.0):
+                 min_fill:      float = 0.0,
+                 solidity_power: float = 1.0,
+                 elongation_power: float = 1.0,
+                 min_solidity:  float = 0.0,
+                 max_elongation: float = 0.0):
         """
         Parameters
         ----------
@@ -1300,20 +1304,27 @@ class TextureBlobTracker:
                                         sparse cable+headstage composite
                                         out-competes the compact rat).
                         'nearest'     : closest to prediction.
-                        'compactness' : (default) rank by
-                                        area * fill_ratio**fill_power,
-                                        where fill_ratio = area / bbox.
-                                        A thin cable (even fused with the
-                                        headstage by morphological close)
-                                        has low fill and is demoted below
-                                        the compact rat, which fills its
-                                        bounding box. The rat's shape, not
-                                        just its size, decides.
-        fill_power    : exponent on fill_ratio for 'compactness'. Higher
-                        = harsher penalty on elongated/sparse blobs.
-        min_fill      : reject candidates whose fill_ratio is below this
-                        outright (0 = keep all). A hard floor for very
-                        sparse cable blobs.
+                        'compactness' : area * fill_ratio**fill_power
+                                        (bbox-based; orientation-dependent).
+                        'geometry'    : (default) higher-order,
+                                        rotation-invariant shape score
+                                        area * fill**fill_power
+                                        * solidity**solidity_power
+                                        / elongation**elongation_power.
+                                        Uses the blob's 2nd central
+                                        moments (elongation) and convex
+                                        hull (solidity), so a thin cable
+                                        at ANY angle — even fused with the
+                                        headstage — is demoted below the
+                                        compact, convex rat.
+        fill_power / solidity_power / elongation_power
+                      : exponents shaping the 'geometry' score.
+        min_fill / min_solidity / max_elongation
+                      : hard reject thresholds (0 / 0 / 0 = disabled). A
+                        candidate failing any is dropped outright — e.g.
+                        max_elongation=6 rejects anything more than 6x
+                        elongated (cable), min_solidity=0.6 rejects
+                        concave composites.
         """
         self.dt            = float(dt)
         self.process_noise = float(process_noise)
@@ -1323,6 +1334,10 @@ class TextureBlobTracker:
         self.select        = select
         self.fill_power    = float(fill_power)
         self.min_fill      = float(min_fill)
+        self.solidity_power = float(solidity_power)
+        self.elongation_power = float(elongation_power)
+        self.min_solidity  = float(min_solidity)
+        self.max_elongation = float(max_elongation)
         self._kf           = None      # built lazily on first detection
         self._initialized  = False
         self.coast_count   = 0
@@ -1382,12 +1397,73 @@ class TextureBlobTracker:
         a = stats_row[cv2.CC_STAT_AREA]
         return a / float(max(w * h, 1))
 
-    def _select_score(self, stats_row):
-        """Compactness-weighted area: area * fill_ratio**fill_power.
-        Demotes large-but-sparse cable/headstage composites below the
-        compact rat."""
+    @staticmethod
+    def _geom_features(labels, idx, stats_row):
+        """Higher-order (rotation-invariant) blob geometry, computed on
+        the component cropped to its bounding box:
+
+          elongation : sqrt(λ_major/λ_minor) of the pixel-covariance
+                       (2nd central moments). ~1 for a compact rat,
+                       large for a thin cable at ANY angle (unlike the
+                       bbox fill-ratio, which is orientation-dependent).
+          solidity   : area / convex-hull-area. ~1 for the convex rat,
+                       low for the concave/branchy cable+headstage.
+          fill       : area / bbox-area (kept for continuity).
+
+        Returns (fill, solidity, elongation).
+        """
+        x = int(stats_row[cv2.CC_STAT_LEFT])
+        y = int(stats_row[cv2.CC_STAT_TOP])
+        w = int(stats_row[cv2.CC_STAT_WIDTH])
+        h = int(stats_row[cv2.CC_STAT_HEIGHT])
         a = float(stats_row[cv2.CC_STAT_AREA])
+        fill = a / float(max(w * h, 1))
+        sub = (labels[y:y + h, x:x + w] == idx).astype(np.uint8)
+        M = cv2.moments(sub, binaryImage=True)
+        if M["m00"] <= 0:
+            return fill, 1.0, 1.0
+        mu20 = M["mu20"] / M["m00"]
+        mu02 = M["mu02"] / M["m00"]
+        mu11 = M["mu11"] / M["m00"]
+        common = np.sqrt(max((mu20 - mu02) ** 2 + 4.0 * mu11 ** 2, 0.0))
+        l1 = (mu20 + mu02 + common) / 2.0
+        l2 = (mu20 + mu02 - common) / 2.0
+        elong = float(np.sqrt(l1 / max(l2, 1e-6)))
+        cnts, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        if cnts:
+            hull = cv2.contourArea(cv2.convexHull(
+                max(cnts, key=cv2.contourArea)))
+            solidity = a / max(hull, 1.0)
+        else:
+            solidity = 1.0
+        return fill, solidity, elong
+
+    def _select_score(self, stats_row, labels=None, idx=None):
+        """Blob ranking score. 'compactness' uses bbox fill only;
+        'geometry' folds in rotation-invariant solidity + elongation."""
+        a = float(stats_row[cv2.CC_STAT_AREA])
+        if self.select == "geometry" and labels is not None:
+            fill, solidity, elong = self._geom_features(
+                labels, idx, stats_row)
+            return (a * (fill ** self.fill_power)
+                    * (solidity ** self.solidity_power)
+                    / (max(elong, 1e-6) ** self.elongation_power))
         return a * (self._fill_ratio(stats_row) ** self.fill_power)
+
+    def _rejected(self, stats_row, labels=None, idx=None):
+        """True if a blob fails a hard shape threshold (dropped outright)."""
+        if self.min_fill > 0 and self._fill_ratio(stats_row) < self.min_fill:
+            return True
+        if labels is not None and (self.min_solidity > 0
+                                   or self.max_elongation > 0):
+            _, solidity, elong = self._geom_features(
+                labels, idx, stats_row)
+            if self.min_solidity > 0 and solidity < self.min_solidity:
+                return True
+            if self.max_elongation > 0 and elong > self.max_elongation:
+                return True
+        return False
 
     def predict(self):
         """Advance the filter one step; return (cx, cy, r) prediction
@@ -1426,24 +1502,26 @@ class TextureBlobTracker:
         """
         n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(
             (mask > 0).astype(np.uint8))
-        cands = [stats[i] for i in range(1, n_cc)]
+        cands = [(i, stats[i]) for i in range(1, n_cc)]
         n_cand = len(cands)
 
         pred = self.predict()
 
         # No track yet — initialize from the best-scoring candidate
         if not self._initialized:
-            usable = [s for s in cands
-                      if self._fill_ratio(s) >= self.min_fill]
+            usable = [(i, s) for (i, s) in cands
+                      if not self._rejected(s, labels, i)]
             if not usable:
                 return dict(state=None, measured=False,
                             coasting=False, lost=True,
                             n_candidates=0)
             if self.select == "area":
-                first = max(usable, key=lambda s: s[cv2.CC_STAT_AREA])
+                first = max(usable, key=lambda t: t[1][cv2.CC_STAT_AREA])
             else:
-                first = max(usable, key=self._select_score)
-            cx, cy, r = self._blob_measurement(first)
+                first = max(usable,
+                            key=lambda t: self._select_score(
+                                t[1], labels, t[0]))
+            cx, cy, r = self._blob_measurement(first[1])
             self._build_kf(cx, cy, r)
             self.n_updates += 1
             return dict(state=(cx, cy, r), measured=True,
@@ -1453,13 +1531,13 @@ class TextureBlobTracker:
         # Gate candidates against the prediction
         px, py, _ = pred
         in_gate = []
-        for s in cands:
-            if self._fill_ratio(s) < self.min_fill:
+        for i, s in cands:
+            if self._rejected(s, labels, i):
                 continue
             cx, cy, r = self._blob_measurement(s)
             d = np.hypot(cx - px, cy - py)
             if d <= self.gate_px:
-                in_gate.append((s, cx, cy, r, d))
+                in_gate.append((i, s, cx, cy, r, d))
             else:
                 self.n_gated_out += 1
 
@@ -1479,12 +1557,14 @@ class TextureBlobTracker:
 
         # Select the best in-gate candidate
         if self.select == "nearest":
-            best = min(in_gate, key=lambda t: t[4])
+            best = min(in_gate, key=lambda t: t[5])
         elif self.select == "area":
-            best = max(in_gate, key=lambda t: t[0][cv2.CC_STAT_AREA])
-        else:  # compactness (default): area weighted by fill_ratio
-            best = max(in_gate, key=lambda t: self._select_score(t[0]))
-        _, cx, cy, r, _ = best
+            best = max(in_gate, key=lambda t: t[1][cv2.CC_STAT_AREA])
+        else:  # compactness / geometry: shape-weighted area
+            best = max(in_gate,
+                       key=lambda t: self._select_score(
+                           t[1], labels, t[0]))
+        _, _, cx, cy, r, _ = best
         meas = np.array([[cx], [cy], [r]], dtype=np.float32)
         self._kf.correct(meas)
         self.coast_count = 0

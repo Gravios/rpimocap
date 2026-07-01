@@ -644,6 +644,62 @@ def _circle_mask(blobs, shape=(200, 400)):
 
 class TestTextureBlobTracker:
 
+    def test_geometry_prefers_rat_over_diagonal_cable(self):
+        """Higher-order geometry: a DIAGONAL cable+headstage composite of
+        LARGER area than the rat (worst case for bbox fill-ratio) must
+        still be demoted below the compact convex rat."""
+        import cv2
+        H, W = 460, 620
+        m = np.zeros((H, W), np.uint8)
+        cv2.ellipse(m, (140, 230), (40, 30), 20, 0, 360, 255, -1)  # rotated rat
+        cv2.circle(m, (330, 120), 30, 255, -1)                     # headstage
+        cv2.line(m, (330, 120), (560, 420), 255, 11)               # diagonal cable
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        # area picks the (larger) cable
+        assert TextureBlobTracker(select="area").update(m)["state"][0] > 250
+        # geometry picks the rat
+        assert TextureBlobTracker(
+            select="geometry").update(m)["state"][0] < 250
+
+    def test_max_elongation_rejects_cable(self):
+        import cv2
+        H, W = 460, 620
+        m = np.zeros((H, W), np.uint8)
+        cv2.ellipse(m, (140, 230), (40, 30), 20, 0, 360, 255, -1)
+        cv2.circle(m, (330, 120), 30, 255, -1)
+        cv2.line(m, (330, 120), (560, 420), 255, 11)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        r = TextureBlobTracker(select="geometry",
+                               max_elongation=6.0).update(m)
+        assert r["state"][0] < 250
+
+    def test_min_solidity_rejects_cable(self):
+        import cv2
+        H, W = 460, 620
+        m = np.zeros((H, W), np.uint8)
+        cv2.ellipse(m, (140, 230), (40, 30), 20, 0, 360, 255, -1)
+        cv2.circle(m, (330, 120), 30, 255, -1)
+        cv2.line(m, (330, 120), (560, 420), 255, 11)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        r = TextureBlobTracker(select="geometry",
+                               min_solidity=0.6).update(m)
+        assert r["state"][0] < 250
+
+    def test_geom_features_values(self):
+        """Elongation ~1 and solidity ~1 for a compact disc; elongation
+        large for a thin line."""
+        import cv2
+        m = np.zeros((300, 300), np.uint8)
+        cv2.circle(m, (150, 150), 40, 255, -1)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+        _, sol, el = TextureBlobTracker._geom_features(lab, 1, st[1])
+        assert el < 1.2 and sol > 0.9
+        m2 = np.zeros((300, 300), np.uint8)
+        cv2.line(m2, (30, 150), (270, 150), 255, 6)
+        n2, lab2, st2, _ = cv2.connectedComponentsWithStats(m2)
+        _, _, el2 = TextureBlobTracker._geom_features(lab2, 1, st2[1])
+        assert el2 > 8.0
+
     def test_compactness_prefers_rat_over_larger_cable(self):
         """The core cable fix: a LARGER but sparse cable+headstage
         composite must NOT out-compete the compact rat under the default

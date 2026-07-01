@@ -294,19 +294,33 @@ def main(argv=None):
     ap.add_argument("--track-start", type=int, default=0)
     ap.add_argument("--track-end", type=int, default=500)
     ap.add_argument("--track-step", type=int, default=1)
-    ap.add_argument("--track-select", default="compactness",
-                    choices=["area", "nearest", "compactness"],
+    ap.add_argument("--track-select", default="geometry",
+                    choices=["area", "nearest", "compactness", "geometry"],
                     help="How the tracker ranks in-gate blobs. "
-                         "'compactness' (default) = area * "
-                         "fill_ratio**power, demoting a large sparse "
-                         "cable+headstage composite below the compact "
-                         "rat (which fills its bounding box). 'area' = "
-                         "largest (legacy; lets the cable win). "
+                         "'geometry' (default) = higher-order "
+                         "rotation-invariant shape score "
+                         "area*fill^fp*solidity^sp/elongation^ep, "
+                         "demoting a thin cable+headstage composite at "
+                         "ANY angle below the compact convex rat. "
+                         "'compactness' = area*fill^fp (bbox only). "
+                         "'area' = largest (legacy; lets the cable win). "
                          "'nearest' = closest to prediction.")
-    ap.add_argument("--track-fill-power", type=float, default=1.5,
-                    help="Exponent on fill_ratio for --track-select "
-                         "compactness. Higher = harsher penalty on "
-                         "elongated/sparse (cable-like) blobs.")
+    ap.add_argument("--track-fill-power", type=float, default=1.0,
+                    help="Exponent on fill_ratio in the shape score.")
+    ap.add_argument("--track-solidity-power", type=float, default=1.0,
+                    help="Exponent on solidity (area/convex-hull) in the "
+                         "geometry score. Higher = harsher on concave "
+                         "cable+headstage composites.")
+    ap.add_argument("--track-elongation-power", type=float, default=1.0,
+                    help="Exponent on elongation (2nd-moment axis ratio) "
+                         "in the geometry score. Higher = harsher on "
+                         "thin/elongated cable blobs.")
+    ap.add_argument("--track-min-solidity", type=float, default=0.0,
+                    help="Reject blobs with solidity below this outright "
+                         "(0 = disabled, e.g. 0.6 rejects the cable).")
+    ap.add_argument("--track-max-elongation", type=float, default=0.0,
+                    help="Reject blobs more elongated than this outright "
+                         "(0 = disabled, e.g. 6 rejects the cable).")
     ap.add_argument("--track-min-fill", type=float, default=0.0,
                     help="Reject blobs with fill_ratio below this "
                          "outright (0 = keep all). A hard floor for very "
@@ -703,7 +717,11 @@ def main(argv=None):
                 max_coast=args.track_max_coast,
                 select=args.track_select,
                 fill_power=args.track_fill_power,
-                min_fill=args.track_min_fill)
+                min_fill=args.track_min_fill,
+                solidity_power=args.track_solidity_power,
+                elongation_power=args.track_elongation_power,
+                min_solidity=args.track_min_solidity,
+                max_elongation=args.track_max_elongation)
             dsm = None
             if args.dynamic_shadow and illum_field is not None:
                 dsm = DynamicShadowModel(
@@ -756,8 +774,12 @@ def main(argv=None):
                         w = int(stats[ci, cv2.CC_STAT_WIDTH])
                         h = int(stats[ci, cv2.CC_STAT_HEIGHT])
                         fill = area / float(max(w * h, 1))
+                        _, solidity, elong = \
+                            TextureBlobTracker._geom_features(
+                                lbl, ci, stats[ci])
                         cands.append((fi, float(cents[ci][0]),
-                                      float(cents[ci][1]), area, fill))
+                                      float(cents[ci][1]), area, fill,
+                                      solidity, elong))
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:
@@ -842,10 +864,11 @@ def main(argv=None):
             cand_csv = os.path.join(
                 args.out, f"candidates_cam{cam_id}.csv")
             with open(cand_csv, "w") as fh:
-                fh.write("frame,cx,cy,area,fill\n")
+                fh.write("frame,cx,cy,area,fill,solidity,elongation\n")
                 for row in cands:
                     fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
-                             f"{row[3]},{row[4]:.3f}\n")
+                             f"{row[3]},{row[4]:.3f},{row[5]:.3f},"
+                             f"{row[6]:.2f}\n")
             # Write montage. Each cell is now a 3-panel strip
             # [raw+circle | heatmap | mask], so use 2 columns to keep
             # the grid readable.
