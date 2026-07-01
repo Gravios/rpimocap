@@ -169,3 +169,67 @@ class TestWriteCsv:
         assert len(rows) == 6              # header written once
         assert sum(c.startswith("desc") for c in rows[0]) == 9
         assert rows[0]["klass"] == "fur"
+
+
+class TestBlobGeometry:
+
+    def _rat_cable_frame(self):
+        import cv2
+        H, W = 400, 500
+        g = np.full((H, W), 60, np.uint8)
+        cv2.ellipse(g, (140, 200), (40, 30), 15, 0, 360, 220, -1)  # rat
+        cv2.circle(g, (300, 110), 16, 220, -1)                     # headstage
+        cv2.polylines(g, [np.array([[300, 110], [360, 180],
+                                    [340, 260], [420, 320]], np.int32)],
+                      False, 220, 6)                               # curved cable
+        return g
+
+    def test_geometry_at_click_separates_rat_cable(self):
+        g = self._rat_cable_frame()
+        rat = tes.blob_geometry_at(g, 140, 200)
+        cab = tes.blob_geometry_at(g, 350, 200)
+        assert rat["geom_elongation"] < cab["geom_elongation"]
+        assert rat["geom_solidity"] > cab["geom_solidity"]
+        assert rat["geom_fill"] > cab["geom_fill"]
+
+    def test_record_has_geometry_fields(self):
+        g = self._rat_cable_frame()
+        rec = tes.extract_record(g, 140, 200, "fur", "texture", 48,
+                                 KERNELS, N_ORIENT, 3, cam=0, frame_idx=0)
+        for f in ("geom_area", "geom_fill", "geom_solidity",
+                  "geom_elongation"):
+            assert f in rec
+
+    def test_seed_thresholds_from_labels(self, tmp_path):
+        import cv2
+        rng = np.random.RandomState(1)
+        recs = []
+        for _ in range(10):
+            f = np.full((400, 500), 60, np.uint8)
+            cx, cy = 140 + rng.randint(-6, 6), 200 + rng.randint(-6, 6)
+            cv2.ellipse(f, (cx, cy), (40, 30), rng.randint(0, 180),
+                        0, 360, 220, -1)
+            recs.append(tes.extract_record(
+                f, cx, cy, "fur", "texture", 48, KERNELS, N_ORIENT, 3,
+                cam=0, frame_idx=0))
+        for _ in range(10):
+            f = np.full((400, 500), 60, np.uint8)
+            ox, oy = rng.randint(60, 140), rng.randint(60, 140)
+            cv2.circle(f, (ox, oy), 16, 220, -1)
+            cv2.polylines(f, [np.array([[ox, oy], [ox + 60, oy + 70],
+                                        [ox + 40, oy + 150],
+                                        [ox + 120, oy + 210]], np.int32)],
+                          False, 220, 6)
+            recs.append(tes.extract_record(
+                f, ox + 40, oy + 90, "cable", "texture", 48,
+                KERNELS, N_ORIENT, 3, cam=0, frame_idx=0))
+        path = str(tmp_path / "lab.csv")
+        tes.write_csv(path, recs, recs[0]["_n_desc"])
+        res = tes.seed_thresholds_from_csv(path)
+        assert res["n_rat"] == 10 and res["n_cable"] == 10
+        # elongation & solidity should separate; a threshold is proposed
+        assert res["features"]["elongation"]["dprime"] > 1.0
+        assert "max_elongation" in res and "min_solidity" in res
+        # proposed max_elongation sits below the cable's mean
+        assert (res["max_elongation"]
+                < res["features"]["elongation"]["cable_mean"])

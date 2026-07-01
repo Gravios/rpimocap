@@ -85,6 +85,8 @@ _BASE_FIELDS = [
     "grad_mag_mean", "grad_mag_max", "orient_deg", "coherence",
     # cross-edge profile (meaningful for edges; computed for all)
     "edge_contrast", "edge_width_px",
+    # higher-order blob geometry (rat vs cable) — from the clicked blob
+    "geom_area", "geom_fill", "geom_solidity", "geom_elongation",
 ]
 
 
@@ -196,6 +198,133 @@ def gabor_descriptor_at(gray: np.ndarray, cx: int, cy: int,
     return desc[:, cy, cx].astype(np.float32)
 
 
+def blob_geometry_at(gray: np.ndarray, cx: int, cy: int,
+                     win: int = 201,
+                     thresh_pct: float = 60.0) -> dict:
+    """Higher-order geometry of the blob under the click (cx, cy).
+
+    Segments the local window by Otsu (the rat/cable are brighter than
+    bedding under IR), takes the connected component containing the
+    click, and returns the SAME rotation-invariant shape features the
+    tracker ranks on — fill (area/bbox), solidity (area/convex-hull),
+    elongation (2nd-moment axis ratio) — plus area. This lets clicked
+    rat vs cable samples pre-seed the tracker's shape thresholds
+    (min_solidity / max_elongation).
+
+    The window must be large enough to contain both the object AND
+    surrounding background so the object is separable; a window smaller
+    than the object degenerates (whole window = foreground). Returns
+    neutral defaults for a degenerate/no-blob click so records stay
+    schema-stable.
+    """
+    from rpimocap.detection.texture_distance import TextureBlobTracker
+    H, W = gray.shape
+    half = win // 2
+    x0 = int(np.clip(cx - half, 0, max(W - win, 0)))
+    y0 = int(np.clip(cy - half, 0, max(H - win, 0)))
+    sub = gray[y0:y0 + win, x0:x0 + win]
+    if sub.size == 0:
+        return {"geom_area": 0.0, "geom_fill": 0.0,
+                "geom_solidity": 1.0, "geom_elongation": 1.0}
+    sub8 = sub.astype(np.uint8) if sub.dtype != np.uint8 else sub
+    # Otsu separates the bright object from darker background; fall back
+    # to a percentile if Otsu degenerates (flat window).
+    thr_otsu, binm = cv2.threshold(
+        sub8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    frac = float((binm > 0).mean())
+    if frac > 0.9 or frac < 0.01:                 # Otsu degenerate
+        thr = np.percentile(sub8, thresh_pct)
+        binm = (sub8 >= thr).astype(np.uint8) * 255
+    binm = (binm > 0).astype(np.uint8)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(binm)
+    if n_cc <= 1:
+        return {"geom_area": 0.0, "geom_fill": 0.0,
+                "geom_solidity": 1.0, "geom_elongation": 1.0}
+    lx = int(np.clip(cx - x0, 0, win - 1))
+    ly = int(np.clip(cy - y0, 0, win - 1))
+    idx = int(labels[ly, lx])
+    if idx == 0:                                  # click landed on bg
+        idx = 1 + int(np.argmax([stats[i, cv2.CC_STAT_AREA]
+                                 for i in range(1, n_cc)]))
+    fill, solidity, elong = TextureBlobTracker._geom_features(
+        labels, idx, stats[idx])
+    return {"geom_area": float(stats[idx, cv2.CC_STAT_AREA]),
+            "geom_fill": float(fill),
+            "geom_solidity": float(solidity),
+            "geom_elongation": float(elong)}
+
+
+def seed_thresholds_from_csv(csv_path: str,
+                             rat_classes=("fur", "rat"),
+                             cable_classes=("cable", "wire", "tether",
+                                            "headstage"),
+                             margin: float = 0.5) -> dict:
+    """Turn labeled clicks into pre-seeded tracker shape thresholds.
+
+    Reads the sampler CSV, splits the geometry features (solidity,
+    elongation, fill) into rat vs cable groups by class name, and
+    proposes reject thresholds placed between the two distributions:
+
+      min_solidity  : below the rat's solidity spread (rejects the
+                      concave cable+headstage).
+      max_elongation: above the rat's elongation spread (rejects the
+                      thin cable).
+
+    `margin` (in pooled-std units) sets how far the threshold sits from
+    the rat distribution toward the cable one. Returns a dict with the
+    proposed thresholds and the per-class stats, plus a d-prime per
+    feature so you can see which shape feature separates best.
+    """
+    rows = []
+    with open(csv_path) as fh:
+        for r in csv.DictReader(fh):
+            rows.append(r)
+
+    def group(names):
+        out = {"solidity": [], "elongation": [], "fill": []}
+        for r in rows:
+            if r.get("klass", "").lower() in names:
+                for k, col in (("solidity", "geom_solidity"),
+                               ("elongation", "geom_elongation"),
+                               ("fill", "geom_fill")):
+                    try:
+                        v = float(r.get(col, ""))
+                    except (TypeError, ValueError):
+                        continue
+                    if v > 0 or k == "solidity":
+                        out[k].append(v)
+        return {k: np.asarray(v, float) for k, v in out.items()}
+
+    rat = group(set(c.lower() for c in rat_classes))
+    cab = group(set(c.lower() for c in cable_classes))
+
+    def dprime(a, b):
+        if len(a) < 2 or len(b) < 2:
+            return float("nan")
+        return abs(a.mean() - b.mean()) / np.sqrt(
+            0.5 * (a.var() + b.var()) + 1e-9)
+
+    result = {"n_rat": len(rat["solidity"]),
+              "n_cable": len(cab["solidity"]),
+              "features": {}}
+    for k in ("solidity", "elongation", "fill"):
+        result["features"][k] = {
+            "rat_mean": float(rat[k].mean()) if len(rat[k]) else None,
+            "rat_std": float(rat[k].std()) if len(rat[k]) else None,
+            "cable_mean": float(cab[k].mean()) if len(cab[k]) else None,
+            "cable_std": float(cab[k].std()) if len(cab[k]) else None,
+            "dprime": dprime(rat[k], cab[k]),
+        }
+
+    # Propose thresholds only if both groups are populated
+    if len(rat["solidity"]) >= 2 and len(cab["solidity"]) >= 2:
+        result["min_solidity"] = float(
+            rat["solidity"].mean() - margin * rat["solidity"].std())
+        result["max_elongation"] = float(
+            rat["elongation"].mean() + margin * rat["elongation"].std())
+    return result
+
+
 def extract_record(gray: np.ndarray, cx: int, cy: int,
                    klass: str, kind: str, win: int,
                    kernels, n_orient: int, n_scales: int,
@@ -220,6 +349,13 @@ def extract_record(gray: np.ndarray, cx: int, cy: int,
     st = structure_tensor_stats(window)
     rec.update(st)
     rec.update(cross_edge_profile(gray, cx, cy, st["orient_deg"]))
+    # Higher-order blob geometry (rat vs cable shape) — only meaningful
+    # for texture-kind clicks on an object; edges get neutral defaults.
+    if kind == "texture":
+        rec.update(blob_geometry_at(gray, cx, cy, win=max(win * 2 + 1, 81)))
+    else:
+        rec.update({"geom_area": 0.0, "geom_fill": 0.0,
+                    "geom_solidity": 1.0, "geom_elongation": 1.0})
     desc = gabor_descriptor_at(
         gray, cx, cy, kernels, n_orient, n_scales, smooth_k=smooth_k)
     for i, v in enumerate(desc):
@@ -402,7 +538,25 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cam0", required=True)
+    ap.add_argument("--seed-thresholds", metavar="LABELED_CSV",
+                    default=None,
+                    help="Aggregation mode (no GUI): read a sampler CSV "
+                         "and print pre-seeded tracker shape thresholds "
+                         "(min_solidity / max_elongation) derived from "
+                         "the labeled rat vs cable geometry. Exits after.")
+    ap.add_argument("--rat-classes", nargs="+",
+                    default=["fur", "rat"],
+                    help="Class names counted as rat for --seed-thresholds.")
+    ap.add_argument("--cable-classes", nargs="+",
+                    default=["cable", "wire", "tether", "headstage"],
+                    help="Class names counted as cable/artifact for "
+                         "--seed-thresholds.")
+    ap.add_argument("--seed-margin", type=float, default=0.5,
+                    help="Threshold placement (pooled-std units) from the "
+                         "rat distribution toward the cable one.")
+    ap.add_argument("--cam0", default=None,
+                    help="Camera-0 TIFF (required for sampling; omit for "
+                         "--seed-thresholds).")
     ap.add_argument("--cam1", default=None,
                     help="Optional second camera TIFF.")
     ap.add_argument("--bayer-pattern", default="RGGB")
@@ -429,6 +583,37 @@ def main(argv=None):
     ap.add_argument("--window", default="texture_edge_sampler")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
+
+    # Aggregation mode: derive shape thresholds from a labeled CSV, no GUI.
+    if args.seed_thresholds:
+        import json
+        res = seed_thresholds_from_csv(
+            args.seed_thresholds,
+            rat_classes=args.rat_classes,
+            cable_classes=args.cable_classes,
+            margin=args.seed_margin)
+        print(f"labeled samples: rat={res['n_rat']} "
+              f"cable={res['n_cable']}")
+        print("per-feature separation (rat vs cable):")
+        for k, f in res["features"].items():
+            if f["rat_mean"] is None or f["cable_mean"] is None:
+                print(f"  {k:11}: (insufficient samples)")
+                continue
+            print(f"  {k:11}: rat {f['rat_mean']:.2f}±{f['rat_std']:.2f}"
+                  f"  cable {f['cable_mean']:.2f}±{f['cable_std']:.2f}"
+                  f"  d'={f['dprime']:.2f}")
+        if "min_solidity" in res:
+            print("\nproposed tracker thresholds (pass to the probe):")
+            print(f"  --track-min-solidity {res['min_solidity']:.2f} "
+                  f"--track-max-elongation {res['max_elongation']:.1f}")
+        else:
+            print("\n(need >=2 rat AND >=2 cable samples to propose "
+                  "thresholds; label some cable/headstage clicks.)")
+        return
+
+    if not args.cam0:
+        ap.error("--cam0 is required for sampling "
+                 "(or use --seed-thresholds for aggregation).")
 
     os.makedirs(args.out, exist_ok=True)
 
