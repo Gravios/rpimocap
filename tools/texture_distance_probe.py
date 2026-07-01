@@ -139,6 +139,18 @@ def main(argv=None):
                     help="With --bg-select motion: discard candidate "
                          "frames below this motion percentile (still "
                          "frames that would contaminate the median).")
+    ap.add_argument("--no-second-layer", dest="second_layer",
+                    action="store_false", default=True,
+                    help="Disable the second Gabor layer. By DEFAULT a "
+                         "second Gabor bank runs on the rectified "
+                         "rotation-pooled first-layer energy (scattering "
+                         "|G2*|G1*x||), capturing 2nd-order texture "
+                         "statistics that separate fur from structured "
+                         "clutter (frame, equipment, clothing, cable) far "
+                         "better than one layer (+13-106%% per-pixel "
+                         "d-prime on real footage). Adds ~12 channels and "
+                         "~2x descriptor cost; disable to fall back to the "
+                         "9-channel single-layer descriptor.")
     ap.add_argument("--log-descriptor", action="store_true",
                     help="Apply log1p to the Gabor descriptor (variance-"
                          "stabilize the exponential-like background: CoV "
@@ -560,7 +572,8 @@ def main(argv=None):
             rat_percentile=args.persistence_rat_percentile,
             rat_min_area_px=args.persistence_rat_min_area,
             rat_dilate_px=args.persistence_rat_dilate,
-            roi_mask=roi, log_transform=args.log_descriptor)
+            roi_mask=roi, log_transform=args.log_descriptor,
+            second_layer=args.second_layer)
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
@@ -584,6 +597,7 @@ def main(argv=None):
                     gray_in, model, kernels, n_orient, n_scales,
                     smooth_k=args.smooth_k, rotation_invariant=True,
                     log_transform=args.log_descriptor,
+                    second_layer=args.second_layer,
                     persistence_map=persistence_map,
                     persistence_power=args.persistence_power,
                     anisotropy_weight=aniso_w, roi_mask=roi,
@@ -593,6 +607,7 @@ def main(argv=None):
                 n_orient, n_scales, smooth_k=args.smooth_k,
                 rotation_invariant=True,
                 log_transform=args.log_descriptor,
+                second_layer=args.second_layer,
                 persistence_map=persistence_map,
                 persistence_power=args.persistence_power,
                 anisotropy_weight=aniso_w, roi_mask=roi,

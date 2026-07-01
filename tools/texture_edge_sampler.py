@@ -189,7 +189,8 @@ def gabor_descriptor_at(gray: np.ndarray, cx: int, cy: int,
     from rpimocap.detection.texture_distance import dense_gabor_descriptor
     desc = dense_gabor_descriptor(
         gray, kernels, n_orient, n_scales,
-        smooth_k=smooth_k, rotation_invariant=True)   # (D, H, W)
+        smooth_k=smooth_k, rotation_invariant=True,
+        second_layer=False)   # (D, H, W) — fixed 3*n_scales schema
     cy = int(np.clip(cy, 0, desc.shape[1] - 1))
     cx = int(np.clip(cx, 0, desc.shape[2] - 1))
     return desc[:, cy, cx].astype(np.float32)

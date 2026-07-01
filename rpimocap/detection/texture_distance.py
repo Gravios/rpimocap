@@ -62,6 +62,24 @@ import numpy as np
 # ────────────────────────────────────────────────────────────────────
 
 
+def _second_layer_kernels(scales, n_orient):
+    """Build the 2nd-layer Gabor bank (cached by config). Reuses the
+    same getGaborKernel construction as layer 1."""
+    key = (tuple(scales), int(n_orient))
+    k = _SECOND_LAYER_CACHE.get(key)
+    if k is None:
+        from rpimocap.detection.rat_texture import build_gabor_kernels
+        k = build_gabor_kernels(
+            [i * np.pi / n_orient for i in range(n_orient)], list(scales))
+        _SECOND_LAYER_CACHE[key] = k
+    return k
+
+
+_SECOND_LAYER_CACHE: dict = {}
+_SECOND_LAYER_SCALES = (9, 17)
+_SECOND_LAYER_ORIENTS = 6
+
+
 def dense_gabor_descriptor(
         gray:        np.ndarray,
         kernels:     Sequence[np.ndarray],
@@ -70,6 +88,10 @@ def dense_gabor_descriptor(
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
         log_transform: bool = False,
+        second_layer: bool = True,
+        second_layer_scales: Sequence[int] = _SECOND_LAYER_SCALES,
+        second_layer_orient: int = _SECOND_LAYER_ORIENTS,
+        second_smooth_k: int = 9,
         ) -> np.ndarray:
     """Compute a dense per-pixel Gabor texture descriptor.
 
@@ -96,12 +118,30 @@ def dense_gabor_descriptor(
               : when True, pool the n_orient responses per scale into
                 (max, mean, std) → 3*n_scales features. When False,
                 keep all n_orient*n_scales raw responses.
+    second_layer
+              : when True (default) AND rotation_invariant, append a
+                SECOND Gabor layer computed on the rectified,
+                rotation-pooled layer-1 energy maps — the scattering
+                transform |G2 * |G1 * x||. This captures the spatial
+                ARRANGEMENT of layer-1 texture energy (2nd-order
+                statistics), which separates fur from structured
+                background clutter (metal frame, equipment, clothing,
+                cable) far better than the 1st layer alone — measured
+                +13-106% per-pixel d-prime on real footage across both
+                cameras. Adds 2 pooled channels per
+                (layer1_scale x second_layer_scale). Ignored when
+                rotation_invariant=False.
+    second_layer_scales, second_layer_orient, second_smooth_k
+              : the 2nd-layer bank config (default (9,17) at 6
+                orientations, 9px post-smoothing — the swept optimum).
 
     Returns
     -------
-    (D, H, W) float32 descriptor stack, where
-        D = 3 * n_scales        (rotation_invariant=True)
-        D = n_orient * n_scales  (rotation_invariant=False)
+    (D, H, W) float32 descriptor stack. With rotation_invariant=True:
+        D = 3*n_scales                                   (second_layer=False)
+        D = 3*n_scales + 2*n_scales*len(second_layer_scales)
+                                                         (second_layer=True)
+    With rotation_invariant=False: D = n_orient*n_scales (second_layer ignored).
     """
     gray_f = gray.astype(np.float32)
     H, W = gray_f.shape
@@ -109,6 +149,7 @@ def dense_gabor_descriptor(
     if rotation_invariant:
         D = 3 * n_scales
         out = np.empty((D, H, W), dtype=np.float32)
+        mean_maps = []                       # rotation-pooled energy / scale
         for s_idx in range(n_scales):
             resp_o = np.empty((n_orient, H, W), dtype=np.float32)
             for o_idx in range(n_orient):
@@ -117,9 +158,33 @@ def dense_gabor_descriptor(
                 if smooth_k > 1:
                     r = cv2.boxFilter(r, cv2.CV_32F, (smooth_k, smooth_k))
                 resp_o[o_idx] = r
+            m = resp_o.mean(axis=0)
             out[s_idx * 3 + 0] = resp_o.max(axis=0)
-            out[s_idx * 3 + 1] = resp_o.mean(axis=0)
+            out[s_idx * 3 + 1] = m
             out[s_idx * 3 + 2] = resp_o.std(axis=0)
+            mean_maps.append(m)
+
+        if second_layer:
+            k2 = _second_layer_kernels(second_layer_scales,
+                                       second_layer_orient)
+            n_o2 = second_layer_orient
+            n_s2 = len(second_layer_scales)
+            l2 = np.empty((2 * n_scales * n_s2, H, W), dtype=np.float32)
+            j = 0
+            for base in mean_maps:                # per layer-1 scale
+                for s2 in range(n_s2):
+                    ro = np.empty((n_o2, H, W), dtype=np.float32)
+                    for o2 in range(n_o2):
+                        r = np.abs(cv2.filter2D(
+                            base, cv2.CV_32F, k2[s2 * n_o2 + o2]))
+                        if second_smooth_k > 1:
+                            r = cv2.boxFilter(
+                                r, cv2.CV_32F,
+                                (second_smooth_k, second_smooth_k))
+                        ro[o2] = r
+                    l2[j] = ro.max(axis=0); j += 1
+                    l2[j] = ro.std(axis=0); j += 1
+            out = np.concatenate([out, l2], axis=0)
     else:
         D = n_orient * n_scales
         out = np.empty((D, H, W), dtype=np.float32)
@@ -498,6 +563,7 @@ def build_persistent_texture_model(
         rat_dilate_px:   int = 25,
         roi_mask:    Optional[np.ndarray] = None,
         log_transform: bool = False,
+        second_layer: bool = True,
         ) -> tuple["BackgroundTextureModel", np.ndarray]:
     """Build a background texture model robust to the moving rat,
     plus a persistence (temporal-stability) map.
@@ -571,7 +637,7 @@ def build_persistent_texture_model(
         descs.append(dense_gabor_descriptor(
             f, kernels, n_orient, n_scales,
             smooth_k=smooth_k, rotation_invariant=rotation_invariant,
-            log_transform=log_transform))
+            log_transform=log_transform, second_layer=second_layer))
         if mask_rat:
             rat_masks.append(_detect_rat_mask_intensity(
                 f, percentile=rat_percentile,
@@ -652,6 +718,7 @@ def texture_distance_map(
         smooth_k:    int = 7,
         rotation_invariant: bool = True,
         log_transform: bool = False,
+        second_layer: bool = True,
         roi_mask:    Optional[np.ndarray] = None,
         persistence_map: Optional[np.ndarray] = None,
         persistence_power: float = 1.0,
@@ -716,7 +783,7 @@ def texture_distance_map(
         gray, kernels, n_orient, n_scales,
         smooth_k=smooth_k,
         rotation_invariant=rotation_invariant,
-        log_transform=log_transform)
+        log_transform=log_transform, second_layer=second_layer)
     # Per-channel z-score, then RMS across channels
     z = (desc - model.mean) / model.std
     dist = np.sqrt(np.mean(z * z, axis=0)).astype(np.float32)

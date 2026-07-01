@@ -94,6 +94,9 @@ def gabor_descriptor_device(
         n_orient: int, n_scales: int,
         smooth_k: int = 7, rotation_invariant: bool = True,
         log_transform: bool = False,
+        second_layer: bool = True,
+        second_layer_scales=(9, 17), second_layer_orient: int = 6,
+        second_smooth_k: int = 9,
         device: str = "auto", xp=None, ndi=None):
     """Dense Gabor descriptor, computed on `device`. Mirrors
     texture_distance.dense_gabor_descriptor exactly (same pooling, same
@@ -123,13 +126,41 @@ def gabor_descriptor_device(
     if rotation_invariant:
         D = 3 * n_scales
         out = xp.empty((D, H, W), dtype=xp.float32)
+        mean_maps = []
         for s in range(n_scales):
             resp = xp.empty((n_orient, H, W), dtype=xp.float32)
             for o in range(n_orient):
                 resp[o] = _box(_filt(gray_f, kernels[s * n_orient + o]))
             out[s * 3 + 0] = resp.max(axis=0)
-            out[s * 3 + 1] = resp.mean(axis=0)
+            m = resp.mean(axis=0)
+            out[s * 3 + 1] = m
             out[s * 3 + 2] = resp.std(axis=0)
+            mean_maps.append(m)
+
+        if second_layer:
+            from rpimocap.detection.texture_distance import (
+                _second_layer_kernels)
+            k2 = _second_layer_kernels(second_layer_scales,
+                                       second_layer_orient)
+            n_o2 = second_layer_orient
+            n_s2 = len(second_layer_scales)
+
+            def _box2(img):
+                if second_smooth_k > 1:
+                    return ndi.uniform_filter(
+                        img, size=second_smooth_k, mode="mirror")
+                return img
+
+            l2 = xp.empty((2 * n_scales * n_s2, H, W), dtype=xp.float32)
+            j = 0
+            for base in mean_maps:
+                for s2 in range(n_s2):
+                    ro = xp.empty((n_o2, H, W), dtype=xp.float32)
+                    for o2 in range(n_o2):
+                        ro[o2] = _box2(_filt(base, k2[s2 * n_o2 + o2]))
+                    l2[j] = ro.max(axis=0); j += 1
+                    l2[j] = ro.std(axis=0); j += 1
+            out = xp.concatenate([out, l2], axis=0)
     else:
         D = n_orient * n_scales
         out = xp.empty((D, H, W), dtype=xp.float32)
@@ -144,7 +175,7 @@ def texture_distance_device(
         gray, model_mean, model_std,
         kernels: Sequence[np.ndarray], n_orient: int, n_scales: int,
         smooth_k: int = 7, rotation_invariant: bool = True,
-        log_transform: bool = False,
+        log_transform: bool = False, second_layer: bool = True,
         persistence_map=None, persistence_power: float = 1.0,
         anisotropy_weight=None, roi_mask=None, post_smooth_k: int = 15,
         device: str = "auto", xp=None, ndi=None, return_host: bool = True):
@@ -163,7 +194,8 @@ def texture_distance_device(
     desc = gabor_descriptor_device(
         gray, kernels, n_orient, n_scales, smooth_k=smooth_k,
         rotation_invariant=rotation_invariant,
-        log_transform=log_transform, xp=xp, ndi=ndi)
+        log_transform=log_transform, second_layer=second_layer,
+        xp=xp, ndi=ndi)
 
     mean = xp.asarray(model_mean, dtype=xp.float32)
     std = xp.asarray(model_std, dtype=xp.float32)

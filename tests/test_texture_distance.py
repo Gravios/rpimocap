@@ -46,13 +46,21 @@ class TestDenseDescriptor:
 
     def test_shape_rotation_invariant(self):
         frame = _textured_bg()
+        # single-layer: 3 features per scale
         desc = dense_gabor_descriptor(
             frame, KERNELS, N_ORIENT, N_SCALES,
-            smooth_k=7, rotation_invariant=True)
-        # 3 features per scale
+            smooth_k=7, rotation_invariant=True, second_layer=False)
         assert desc.shape == (3 * N_SCALES, frame.shape[0],
                               frame.shape[1])
         assert desc.dtype == np.float32
+        # default (second_layer=True) appends 2 pooled channels per
+        # (layer1_scale x second_layer_scale); default second bank = 2 scales
+        desc2 = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES,
+            smooth_k=7, rotation_invariant=True)
+        assert desc2.shape[0] == 3 * N_SCALES + 2 * N_SCALES * 2
+        # first channels identical to single-layer (layer-2 only appends)
+        assert np.allclose(desc2[:3 * N_SCALES], desc)
 
     def test_shape_directional(self):
         frame = _textured_bg()
@@ -108,6 +116,33 @@ class TestDenseDescriptor:
             return (np.percentile(x, 99.9)
                     / (np.median(x) + 1e-6))
         assert tailiness(d_log) < tailiness(d)
+
+
+    def test_second_layer_channel_count(self):
+        """Default second_layer=True appends 2 pooled channels per
+        (layer1_scale x second_layer_scale); default 2 second scales."""
+        frame = _textured_bg()
+        d1 = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, second_layer=False)
+        d2 = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, second_layer=True)
+        assert d1.shape[0] == 3 * N_SCALES
+        assert d2.shape[0] == 3 * N_SCALES + 2 * N_SCALES * 2
+        assert np.allclose(d2[:3 * N_SCALES], d1)     # layer-2 appends
+
+    def test_second_layer_default_on(self):
+        """Opt-out: the second layer is ON unless disabled."""
+        frame = _textured_bg()
+        default = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES)
+        assert default.shape[0] == 3 * N_SCALES + 2 * N_SCALES * 2
+
+    def test_second_layer_scales_configurable(self):
+        frame = _textured_bg()
+        d = dense_gabor_descriptor(
+            frame, KERNELS, N_ORIENT, N_SCALES, second_layer=True,
+            second_layer_scales=(9, 17, 25))
+        assert d.shape[0] == 3 * N_SCALES + 2 * N_SCALES * 3
 
 
 class TestBackgroundTextureModel:
@@ -270,7 +305,8 @@ class TestPersistentModel:
         frames = [_frame_moving_rat(s, positions[s % len(positions)])
                   for s in range(16)]
         model, pers = build_persistent_texture_model(
-            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7)
+            frames, KERNELS, N_ORIENT, N_SCALES, smooth_k=7,
+            second_layer=False)
         assert model.mean.shape == (3 * N_SCALES,) + frames[0].shape
         assert pers.shape == frames[0].shape
         # persistence in [0, 1]
