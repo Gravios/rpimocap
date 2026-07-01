@@ -1279,7 +1279,9 @@ class TextureBlobTracker:
                  meas_noise:    float = 6.0,
                  gate_px:       float = 120.0,
                  max_coast:     int   = 10,
-                 select:        str   = "area"):
+                 select:        str   = "compactness",
+                 fill_power:    float = 1.0,
+                 min_fill:      float = 0.0):
         """
         Parameters
         ----------
@@ -1293,8 +1295,25 @@ class TextureBlobTracker:
                         on fast moves, too loose admits reflections.
         max_coast     : consecutive missed frames the track survives
                         on prediction alone before being marked lost.
-        select        : 'area' picks the largest in-gate blob;
-                        'nearest' picks the one closest to prediction.
+        select        : how to rank in-gate candidates —
+                        'area'        : largest blob (legacy; a large
+                                        sparse cable+headstage composite
+                                        out-competes the compact rat).
+                        'nearest'     : closest to prediction.
+                        'compactness' : (default) rank by
+                                        area * fill_ratio**fill_power,
+                                        where fill_ratio = area / bbox.
+                                        A thin cable (even fused with the
+                                        headstage by morphological close)
+                                        has low fill and is demoted below
+                                        the compact rat, which fills its
+                                        bounding box. The rat's shape, not
+                                        just its size, decides.
+        fill_power    : exponent on fill_ratio for 'compactness'. Higher
+                        = harsher penalty on elongated/sparse blobs.
+        min_fill      : reject candidates whose fill_ratio is below this
+                        outright (0 = keep all). A hard floor for very
+                        sparse cable blobs.
         """
         self.dt            = float(dt)
         self.process_noise = float(process_noise)
@@ -1302,6 +1321,8 @@ class TextureBlobTracker:
         self.gate_px       = float(gate_px)
         self.max_coast     = int(max_coast)
         self.select        = select
+        self.fill_power    = float(fill_power)
+        self.min_fill      = float(min_fill)
         self._kf           = None      # built lazily on first detection
         self._initialized  = False
         self.coast_count   = 0
@@ -1352,6 +1373,22 @@ class TextureBlobTracker:
         r  = float(np.sqrt(a / np.pi))
         return cx, cy, r
 
+    @staticmethod
+    def _fill_ratio(stats_row):
+        """area / bounding-box-area — 1.0 = fills its box (compact rat),
+        low = sparse/elongated (thin cable, even fused with headstage)."""
+        w = stats_row[cv2.CC_STAT_WIDTH]
+        h = stats_row[cv2.CC_STAT_HEIGHT]
+        a = stats_row[cv2.CC_STAT_AREA]
+        return a / float(max(w * h, 1))
+
+    def _select_score(self, stats_row):
+        """Compactness-weighted area: area * fill_ratio**fill_power.
+        Demotes large-but-sparse cable/headstage composites below the
+        compact rat."""
+        a = float(stats_row[cv2.CC_STAT_AREA])
+        return a * (self._fill_ratio(stats_row) ** self.fill_power)
+
     def predict(self):
         """Advance the filter one step; return (cx, cy, r) prediction
         or None if uninitialized."""
@@ -1394,14 +1431,19 @@ class TextureBlobTracker:
 
         pred = self.predict()
 
-        # No track yet — initialize from the largest candidate
+        # No track yet — initialize from the best-scoring candidate
         if not self._initialized:
-            if n_cand == 0:
+            usable = [s for s in cands
+                      if self._fill_ratio(s) >= self.min_fill]
+            if not usable:
                 return dict(state=None, measured=False,
                             coasting=False, lost=True,
                             n_candidates=0)
-            largest = max(cands, key=lambda s: s[cv2.CC_STAT_AREA])
-            cx, cy, r = self._blob_measurement(largest)
+            if self.select == "area":
+                first = max(usable, key=lambda s: s[cv2.CC_STAT_AREA])
+            else:
+                first = max(usable, key=self._select_score)
+            cx, cy, r = self._blob_measurement(first)
             self._build_kf(cx, cy, r)
             self.n_updates += 1
             return dict(state=(cx, cy, r), measured=True,
@@ -1412,6 +1454,8 @@ class TextureBlobTracker:
         px, py, _ = pred
         in_gate = []
         for s in cands:
+            if self._fill_ratio(s) < self.min_fill:
+                continue
             cx, cy, r = self._blob_measurement(s)
             d = np.hypot(cx - px, cy - py)
             if d <= self.gate_px:
@@ -1436,8 +1480,10 @@ class TextureBlobTracker:
         # Select the best in-gate candidate
         if self.select == "nearest":
             best = min(in_gate, key=lambda t: t[4])
-        else:  # area
+        elif self.select == "area":
             best = max(in_gate, key=lambda t: t[0][cv2.CC_STAT_AREA])
+        else:  # compactness (default): area weighted by fill_ratio
+            best = max(in_gate, key=lambda t: self._select_score(t[0]))
         _, cx, cy, r, _ = best
         meas = np.array([[cx], [cy], [r]], dtype=np.float32)
         self._kf.correct(meas)

@@ -644,6 +644,54 @@ def _circle_mask(blobs, shape=(200, 400)):
 
 class TestTextureBlobTracker:
 
+    def test_compactness_prefers_rat_over_larger_cable(self):
+        """The core cable fix: a LARGER but sparse cable+headstage
+        composite must NOT out-compete the compact rat under the default
+        compactness selection (it does under 'area')."""
+        import cv2
+        H, W = 400, 600
+        m = np.zeros((H, W), np.uint8)
+        # compact rat (smaller area) at x=130
+        cv2.ellipse(m, (130, 200), (38, 28), 0, 0, 360, 255, -1)
+        # cable+headstage composite (LARGER area) at x~360, sparse
+        cv2.circle(m, (330, 120), 28, 255, -1)
+        pts = np.array([[330, 120], [380, 190], [360, 260],
+                        [420, 330], [400, 380]], np.int32)
+        cv2.polylines(m, [pts], False, 255, 10)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+
+        # area selection picks the cable (the bug)
+        rc = TextureBlobTracker(select="area").update(m)
+        assert rc["state"][0] > 250            # cable side
+
+        # compactness selection picks the rat (the fix)
+        rf = TextureBlobTracker(select="compactness",
+                                fill_power=1.5).update(m)
+        assert rf["state"][0] < 250            # rat side
+
+    def test_min_fill_rejects_sparse_cable(self):
+        import cv2
+        H, W = 400, 600
+        m = np.zeros((H, W), np.uint8)
+        cv2.ellipse(m, (130, 200), (38, 28), 0, 0, 360, 255, -1)
+        cv2.circle(m, (330, 120), 28, 255, -1)
+        pts = np.array([[330, 120], [380, 190], [360, 260],
+                        [420, 330], [400, 380]], np.int32)
+        cv2.polylines(m, [pts], False, 255, 10)
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        r = TextureBlobTracker(select="compactness",
+                               min_fill=0.3).update(m)
+        assert r["state"][0] < 250             # only the rat survives
+
+    def test_area_mode_unchanged(self):
+        """Legacy 'area' selection still picks the largest blob."""
+        import cv2
+        m = np.zeros((300, 500), np.uint8)
+        cv2.circle(m, (120, 150), 20, 255, -1)     # small
+        cv2.circle(m, (350, 150), 40, 255, -1)     # large
+        r = TextureBlobTracker(select="area").update(m)
+        assert abs(r["state"][0] - 350) < 10
+
     def test_initializes_from_first_detection(self):
         trk = TextureBlobTracker()
         r = trk.update(_circle_mask([(100, 100, 30)]))

@@ -294,6 +294,23 @@ def main(argv=None):
     ap.add_argument("--track-start", type=int, default=0)
     ap.add_argument("--track-end", type=int, default=500)
     ap.add_argument("--track-step", type=int, default=1)
+    ap.add_argument("--track-select", default="compactness",
+                    choices=["area", "nearest", "compactness"],
+                    help="How the tracker ranks in-gate blobs. "
+                         "'compactness' (default) = area * "
+                         "fill_ratio**power, demoting a large sparse "
+                         "cable+headstage composite below the compact "
+                         "rat (which fills its bounding box). 'area' = "
+                         "largest (legacy; lets the cable win). "
+                         "'nearest' = closest to prediction.")
+    ap.add_argument("--track-fill-power", type=float, default=1.5,
+                    help="Exponent on fill_ratio for --track-select "
+                         "compactness. Higher = harsher penalty on "
+                         "elongated/sparse (cable-like) blobs.")
+    ap.add_argument("--track-min-fill", type=float, default=0.0,
+                    help="Reject blobs with fill_ratio below this "
+                         "outright (0 = keep all). A hard floor for very "
+                         "sparse cable blobs, e.g. 0.3.")
     ap.add_argument("--track-gate-px", type=float, default=120.0,
                     help="Kalman gate radius (px). Candidates farther "
                          "than this from the prediction are rejected.")
@@ -684,7 +701,9 @@ def main(argv=None):
             tracker = TextureBlobTracker(
                 gate_px=args.track_gate_px,
                 max_coast=args.track_max_coast,
-                select="area")
+                select=args.track_select,
+                fill_power=args.track_fill_power,
+                min_fill=args.track_min_fill)
             dsm = None
             if args.dynamic_shadow and illum_field is not None:
                 dsm = DynamicShadowModel(
@@ -734,8 +753,11 @@ def main(argv=None):
                 for ci in range(1, ncc):
                     area = int(stats[ci, cv2.CC_STAT_AREA])
                     if area >= args.min_area:
+                        w = int(stats[ci, cv2.CC_STAT_WIDTH])
+                        h = int(stats[ci, cv2.CC_STAT_HEIGHT])
+                        fill = area / float(max(w * h, 1))
                         cands.append((fi, float(cents[ci][0]),
-                                      float(cents[ci][1]), area))
+                                      float(cents[ci][1]), area, fill))
                 res = tracker.update(mask)
                 # Update the dynamic shadow, masking the tracked rat
                 if dsm is not None:
@@ -820,10 +842,10 @@ def main(argv=None):
             cand_csv = os.path.join(
                 args.out, f"candidates_cam{cam_id}.csv")
             with open(cand_csv, "w") as fh:
-                fh.write("frame,cx,cy,area\n")
+                fh.write("frame,cx,cy,area,fill\n")
                 for row in cands:
                     fh.write(f"{row[0]},{row[1]:.2f},{row[2]:.2f},"
-                             f"{row[3]}\n")
+                             f"{row[3]},{row[4]:.3f}\n")
             # Write montage. Each cell is now a 3-panel strip
             # [raw+circle | heatmap | mask], so use 2 columns to keep
             # the grid readable.
