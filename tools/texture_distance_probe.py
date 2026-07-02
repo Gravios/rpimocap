@@ -205,6 +205,27 @@ def main(argv=None):
                          "(~largest scale + smooth-k) so the rat's "
                          "descriptor halo is also excluded. Default "
                          "35.")
+    ap.add_argument("--edge-persistence", action="store_true",
+                    help="DIAGNOSTIC: also build a persistence map in the "
+                         "Laplacian (edge) domain and dump "
+                         "edge_persistence_cam{N}.png. Complements the "
+                         "Gabor-descriptor persistence — catches sharp "
+                         "isotropic static structure (frame/rails/maze "
+                         "edges) the oriented bank can under-respond to. "
+                         "By itself this only changes an output PNG; pass "
+                         "--edge-persistence-weight to fold it into the "
+                         "damping. NOTE: same stable-vs-transient axis, so "
+                         "it does NOT separate the (moving) cable from the "
+                         "rat, nor suppress shimmering reflections.")
+    ap.add_argument("--edge-persistence-sigma", type=float, default=2.0,
+                    help="Gaussian pre-blur sigma (px) for the LoG used "
+                         "by --edge-persistence. 0 = raw 3x3 Laplacian.")
+    ap.add_argument("--edge-persistence-weight", type=float, default=0.0,
+                    help="Fuse edge-persistence into the damping: "
+                         "combined = 1-(1-p_tex)*(1-w*p_edge). 0 (default) "
+                         "= dump only, no effect on detection. Try "
+                         "0.5-1.0 ONLY after the dumped map shows static "
+                         "structure bright and the rat/cable dark.")
     ap.add_argument("--max-aspect-ratio", type=float, default=6.0,
                     help="Reject thresholded components more "
                          "elongated than this (the cable is a thin "
@@ -362,6 +383,7 @@ def main(argv=None):
     from rpimocap.detection.texture_distance import (
         dense_gabor_descriptor, BackgroundTextureModel,
         build_persistent_texture_model,
+        build_edge_persistence, combine_persistence,
         build_illumination_field, apply_illumination_correction,
         DynamicShadowModel, TextureBlobTracker,
         texture_distance_map, threshold_distance_map,
@@ -608,6 +630,26 @@ def main(argv=None):
         print(f"  Persistent model built from {model.n} frames "
               f"(median + MAD), mean shape {model.mean.shape}")
 
+        # ── Optional Laplacian-domain (edge) persistence ───────────
+        # Diagnostic-first: build it on the SAME bg frames, dump it for
+        # visual comparison, and only fold it into the damping when a
+        # weight > 0 is given (0 = strictly no effect on detection).
+        edge_pers = None
+        if args.edge_persistence or args.edge_persistence_weight > 0:
+            edge_pers = build_edge_persistence(
+                bg_grays, log_sigma=args.edge_persistence_sigma,
+                roi_mask=roi)
+            ep_med = float(np.median(edge_pers[roi > 0])) \
+                if roi is not None else float(np.median(edge_pers))
+            print(f"  edge (LoG) persistence: median={ep_med:.3f} "
+                  f"(in-ROI; 1=static structure/flat, 0=transient)")
+            if args.edge_persistence_weight > 0:
+                persistence_map = combine_persistence(
+                    persistence_map, edge_pers,
+                    edge_weight=args.edge_persistence_weight)
+                print(f"    fused into damping "
+                      f"(weight={args.edge_persistence_weight:.2f})")
+
         # ── Device dispatch for the descriptor + distance ──────────
         # On 'cpu' use the canonical OpenCV path; on 'gpu'/'auto' use the
         # CuPy port, uploading the bg model once (resident). The two
@@ -660,6 +702,12 @@ def main(argv=None):
         cv2.imwrite(
             os.path.join(args.out, f"persistence_cam{cam_id}.png"),
             pers_heat)
+        if edge_pers is not None:
+            ep_vis = (edge_pers * 255).astype(np.uint8)
+            cv2.imwrite(
+                os.path.join(args.out,
+                             f"edge_persistence_cam{cam_id}.png"),
+                cv2.applyColorMap(ep_vis, cv2.COLORMAP_VIRIDIS))
 
         # ── Probe frames ──────────────────────────────────────────
         for pf in args.probe_frames:

@@ -704,6 +704,112 @@ def build_persistent_texture_model(
     return model, persistence_map
 
 
+def build_edge_persistence(
+        bg_frames: Sequence[np.ndarray],
+        log_sigma: float = 2.0,
+        roi_mask: Optional[np.ndarray] = None,
+        ) -> np.ndarray:
+    """Temporal-stability (persistence) map in the Laplacian (edge)
+    domain — a complement to the Gabor-descriptor persistence.
+
+    Rationale
+    ---------
+    The descriptor persistence built by ``build_persistent_texture_model``
+    measures stability of the *oriented Gabor* response. A finite
+    orientation bank can under-respond to sharp, isotropic intensity
+    discontinuities — the rigid arena frame, rails, and maze edges. The
+    isotropic Laplacian-of-Gaussian catches those directly, so its
+    per-pixel temporal stability is an independent read on which EDGES
+    belong to the static environment.
+
+    Mechanism (identical stable-vs-transient axis, edge feature)
+    ------------------------------------------------------------
+      * A static edge (rail) has a constant LoG value over the bg frames
+        → temporal MAD ≈ 0 → persistence ≈ 1 (suppress).
+      * A flat region has LoG ≈ 0 constant → also persistence ≈ 1.
+      * A pixel the rat / cable sweeps through has a LoG that appears and
+        disappears → high temporal MAD → persistence ≈ 0 (keep).
+
+    IMPORTANT: because this is the same stable-vs-moving axis, it does NOT
+    separate the cable from the rat (both move → both low persistence),
+    nor does it suppress shimmering view-dependent specular reflections
+    (also unstable). Its value is confined to suppressing the *static*
+    rigid structure — which is what lets a looser ROI be used safely.
+
+    Parameters
+    ----------
+    bg_frames : the SAME background frames handed to
+                ``build_persistent_texture_model`` (gray, or color whose
+                green channel is used). LoG is computed per frame.
+    log_sigma : Gaussian pre-blur sigma for the LoG (px). 0 disables the
+                blur (raw 3×3 Laplacian).
+    roi_mask  : optional (H, W); the instability distribution is scaled
+                against in-ROI pixels only and persistence is zeroed
+                outside the ROI — matching the descriptor persistence.
+
+    Returns
+    -------
+    edge_persistence : (H, W) float32 in [0, 1]; 1 = perfectly persistent
+                       (static edge or flat), 0 = maximally transient.
+    """
+    logs = []
+    for f in bg_frames:
+        g = f
+        if g.ndim == 3:
+            g = g[:, :, 1]                 # green channel (matches probe)
+        g = g.astype(np.float32)
+        if log_sigma and log_sigma > 0:
+            k = int(round(log_sigma * 4)) | 1
+            k = max(3, k)
+            g = cv2.GaussianBlur(g, (k, k), float(log_sigma))
+        logs.append(cv2.Laplacian(g, cv2.CV_32F, ksize=3))
+
+    stack = np.stack(logs, axis=0)                     # (T, H, W)
+    median = np.median(stack, axis=0)
+    # Per-pixel temporal MAD of the LoG response = edge instability.
+    instability = np.median(np.abs(stack - median), axis=0)
+
+    # Normalize against the in-ROI instability distribution (same p5/p95
+    # scheme as the descriptor persistence, so the two maps are directly
+    # comparable and combinable).
+    if roi_mask is not None:
+        inside_vals = instability[roi_mask > 0]
+        if inside_vals.size == 0:
+            inside_vals = instability.ravel()
+    else:
+        inside_vals = instability.ravel()
+    lo = float(np.percentile(inside_vals, 5))
+    hi = float(np.percentile(inside_vals, 95))
+    norm = np.clip((instability - lo) / (hi - lo + 1e-6), 0, 1)
+    edge_persistence = (1.0 - norm).astype(np.float32)
+    if roi_mask is not None:
+        edge_persistence = edge_persistence * (roi_mask > 0).astype(
+            np.float32)
+    return edge_persistence
+
+
+def combine_persistence(
+        texture_persistence: np.ndarray,
+        edge_persistence: np.ndarray,
+        edge_weight: float = 1.0) -> np.ndarray:
+    """Probabilistic-OR fusion of two persistence maps: a pixel is
+    persistent if it is persistent in EITHER domain.
+
+        combined = 1 - (1 - p_tex) * (1 - w * p_edge)
+
+    With ``edge_weight=0`` this returns ``texture_persistence`` unchanged
+    (a true no-op), so the edge channel is strictly opt-in. Since the
+    distance map damps by ``(1 - persistence)``, the fused damping is
+    ``(1 - p_tex)*(1 - w*p_edge)`` — a pixel must be transient in BOTH to
+    survive, which is what suppresses the static rigid structure.
+    """
+    w = float(edge_weight)
+    if w == 0.0:                       # true no-op (bit-exact, no round-trip)
+        return texture_persistence.astype(np.float32, copy=False)
+    keep = (1.0 - texture_persistence) * (1.0 - w * edge_persistence)
+    return np.clip(1.0 - keep, 0.0, 1.0).astype(np.float32)
+
+
 # ────────────────────────────────────────────────────────────────────
 #  Texture-distance map (the diagnostic signal)
 # ────────────────────────────────────────────────────────────────────
