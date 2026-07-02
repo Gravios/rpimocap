@@ -601,7 +601,10 @@ def main(argv=None):
     ap.add_argument("--smooth-k", type=int, default=7)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--window", default="texture_edge_sampler")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default=None,
+                    help="Output directory for samples.csv + provenance "
+                         "patches (required for sampling; not used by "
+                         "--seed-thresholds).")
     args = ap.parse_args(argv)
 
     # Aggregation mode: derive shape thresholds from a labeled CSV, no GUI.
@@ -633,6 +636,9 @@ def main(argv=None):
 
     if not args.cam0:
         ap.error("--cam0 is required for sampling "
+                 "(or use --seed-thresholds for aggregation).")
+    if not args.out:
+        ap.error("--out is required for sampling "
                  "(or use --seed-thresholds for aggregation).")
 
     os.makedirs(args.out, exist_ok=True)
