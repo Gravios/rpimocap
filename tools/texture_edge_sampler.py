@@ -646,7 +646,16 @@ def main(argv=None):
 
     sess = _Session(args, caps, kernels, n_orient, n_scales,
                     classes, kinds)
-    cv2.namedWindow(args.window, cv2.WINDOW_NORMAL)
+    # WINDOW_GUI_NORMAL disables the Qt "expanded" GUI (toolbar, status
+    # bar, and the right-click context menu). Without it, right-click —
+    # which we use to skip to a new patch — also pops the Qt context
+    # menu. Fall back to plain WINDOW_NORMAL on non-Qt builds where the
+    # flag isn't defined.
+    try:
+        flags = cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL
+    except AttributeError:                     # pragma: no cover
+        flags = cv2.WINDOW_NORMAL
+    cv2.namedWindow(args.window, flags)
     cv2.setMouseCallback(args.window, sess.on_mouse)
     sess.new_patch()
 
