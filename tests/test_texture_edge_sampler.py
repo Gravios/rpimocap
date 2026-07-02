@@ -233,3 +233,37 @@ class TestBlobGeometry:
         # proposed max_elongation sits below the cable's mean
         assert (res["max_elongation"]
                 < res["features"]["elongation"]["cable_mean"])
+
+
+class TestClassSwitching:
+    """next_class_of_kind (Tab) cycles within a kind, skipping the other."""
+
+    class _Stub:
+        def __init__(self, classes, kinds):
+            self.classes, self.kinds, self.ci = classes, kinds, 0
+        _render = lambda self: None
+        next_class_of_kind = tes._Session.next_class_of_kind
+        next_class = tes._Session.next_class
+
+    def test_tab_cycles_texture_skipping_edges(self):
+        s = self._Stub(["bedding", "fur", "wall", "maze_edge", "rat_edge"],
+                       ["texture", "texture", "texture", "edge", "edge"])
+        seen = []
+        for _ in range(5):
+            seen.append(s.classes[s.ci]); s.next_class_of_kind(+1)
+        assert seen == ["bedding", "fur", "wall", "bedding", "fur"]
+
+    def test_tab_on_edge_cycles_edges(self):
+        s = self._Stub(["bedding", "fur", "maze_edge", "rat_edge"],
+                       ["texture", "texture", "edge", "edge"])
+        s.ci = 2
+        seen = []
+        for _ in range(3):
+            seen.append(s.classes[s.ci]); s.next_class_of_kind(+1)
+        assert seen == ["maze_edge", "rat_edge", "maze_edge"]
+
+    def test_tab_singleton_kind_stays(self):
+        s = self._Stub(["fur", "rat_edge"], ["texture", "edge"])
+        s.ci = 0
+        s.next_class_of_kind(+1)
+        assert s.ci == 0                    # only one texture class

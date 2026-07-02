@@ -25,7 +25,9 @@ and for the CURRENT class:
   * RIGHT-CLICK               → no example here; skip to another patch.
 
 Keyboard:
-  n / SPACE → next class        p → previous class
+  click → save a sample (stays on the image)
+  SPACE → next image           Tab → next texture class (same kind)
+  n → next class (any kind)    p → previous class
   u         → undo last save     s → save CSV now
   r         → new random patch   q / ESC → quit (auto-saves)
 
@@ -507,7 +509,9 @@ class _Session:
                            f"{klass}_{n:04d}.png")
         cv2.imwrite(pth, self.disp)
         cv2.waitKey(120)                 # brief flash of the marker
-        self.new_patch()
+        # Stay on the SAME patch so multiple samples can be taken from
+        # one image; advance only when the user presses SPACE.
+        self._render()
 
     # ── persistence ────────────────────────────────────────────────
 
@@ -531,6 +535,22 @@ class _Session:
 
     def next_class(self, step=1):
         self.ci = (self.ci + step) % len(self.classes)
+        self._render()
+
+    def next_class_of_kind(self, step=1):
+        """Advance to the next class of the SAME kind as the current one
+        (texture→texture, edge→edge). Bound to Tab so switching between
+        texture label classes skips over the edge classes. Falls back to
+        plain cycling if only one class shares the current kind."""
+        cur_kind = self.kinds[self.ci]
+        n = len(self.classes)
+        for k in range(1, n + 1):
+            j = (self.ci + step * k) % n
+            if self.kinds[j] == cur_kind:
+                self.ci = j
+                self._render()
+                return
+        # only one class of this kind — nothing to switch to
         self._render()
 
 
@@ -641,7 +661,8 @@ def main(argv=None):
     for c, k in zip(classes, kinds):
         print(f"  [{k}] {c}")
     print("\nControls: LEFT-click=save  RIGHT-click=skip  "
-          "n/SPACE=next class  p=prev  u=undo  s=save  r=new patch  "
+          "SPACE=next image  Tab=next texture class  n=next(any)  "
+          "p=prev  u=undo  s=save  r=next image  "
           "q/ESC=quit\n")
 
     sess = _Session(args, caps, kernels, n_orient, n_scales,
@@ -663,7 +684,11 @@ def main(argv=None):
         key = cv2.waitKey(20) & 0xFF
         if key in (ord("q"), 27):        # q or ESC
             break
-        elif key in (ord("n"), ord(" ")):
+        elif key == ord(" "):            # SPACE → next image/patch
+            sess.new_patch()
+        elif key == 9:                   # Tab → next texture class (same kind)
+            sess.next_class_of_kind(+1)
+        elif key == ord("n"):            # n → next class (any kind)
             sess.next_class(+1)
         elif key == ord("p"):
             sess.next_class(-1)
@@ -671,7 +696,7 @@ def main(argv=None):
             sess.undo()
         elif key == ord("s"):
             sess.flush()
-        elif key == ord("r"):
+        elif key == ord("r"):            # r → also next image (kept)
             sess.new_patch()
         # window closed?
         if cv2.getWindowProperty(args.window,
