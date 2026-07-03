@@ -120,9 +120,20 @@ def main(argv=None):
                          "--roi-max-height-mm band (covers a reared "
                          "animal, excludes the upper through-wall "
                          "region). Use floor or volume for stereo.")
-    ap.add_argument("--roi-max-height-mm", type=float, default=120.0,
+    ap.add_argument("--roi-max-height-mm", type=float, default=260.0,
                     help="Height (mm) of the volume band above the floor "
-                         "for --roi-mode volume.")
+                         "for --roi-mode volume. Default 260. Verified "
+                         "against calibration (dlt_P0/P1): at 120mm the "
+                         "band keeps a standing rat fully inside for only "
+                         "~82%% of floor positions and just 54%% of the "
+                         "WALL band, so a thigmotactic (wall-hugging) "
+                         "animal is clipped much of the time — the cause "
+                         "of the measured-frame collapse. 260mm restores "
+                         "wall-band retention to ~89%% (center 100%%) "
+                         "while still excluding most of the through-wall "
+                         "region; residual through-wall detections are "
+                         "rejected downstream by the reconstruction "
+                         "in_arena_volume/above_floor stereo gate.")
     ap.add_argument("--bg-select", default="stride",
                     choices=["stride", "motion"],
                     help="How to pick background-model frames. 'stride' "

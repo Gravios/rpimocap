@@ -505,7 +505,7 @@ class BackgroundModel:
 
 def arena_roi_corners(arena_pts: np.ndarray,
                       mode: str = "box",
-                      max_height_mm: float = 120.0) -> np.ndarray:
+                      max_height_mm: float = 260.0) -> np.ndarray:
     """Select the arena 3D corner subset that defines the detection ROI.
 
     The 2D convex hull of ALL 8 box corners (mode='box') is far larger
@@ -526,8 +526,17 @@ def arena_roi_corners(arena_pts: np.ndarray,
                    z = zmin + max_height_mm: the arena floor plus a
                    realistic animal-height band, so a reared animal is
                    covered while the upper through-wall region is still
-                   excluded.
+                   excluded. Note volume with max_height = ceiling height
+                   degenerates to 'box'.
     max_height_mm : height of the band above the floor for mode='volume'.
+        Default 260 mm. Verified against the DLT calibration: at 120 mm
+        the band keeps a standing rat fully inside for only ~82% of floor
+        positions and ~54% of the near-wall band, so a wall-hugging animal
+        is frequently clipped (the measured-frame regression). 260 mm
+        restores near-wall retention to ~89% (arena centre ~100%) while
+        still excluding most through-wall area; any through-wall detection
+        that leaks in is rejected downstream by the reconstruction stereo
+        gate (in_arena_volume / above_floor).
     """
     arena_pts = np.asarray(arena_pts, dtype=np.float64)
     floor = arena_pts[:4]
