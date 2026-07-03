@@ -302,6 +302,47 @@ def apply_illumination_correction(
     return np.clip(corrected, 0, 255).astype(np.uint8)
 
 
+def illumination_intensity(gray: np.ndarray,
+                           illum_sigma: float = 151.0,
+                           smooth_k: int = 7) -> np.ndarray:
+    """Illumination-flattened intensity channel for the coarse
+    (body-scale) background model.
+
+    Fine-scale Gabor texture does NOT separate the rat — the fur reads
+    as bedding-like or smoother (verified against the pooled background:
+    the rat's texture-distance is below the bedding's). The reliable cue
+    is that the rat is BRIGHT. This channel supplies that: a single
+    illumination-flattened intensity map, so a pooled background model
+    (mostly bedding) captures a tight intensity distribution and the
+    bright rat sits many sigmas outside it.
+
+    The flattening uses a per-frame low-frequency field (a large-sigma
+    Gaussian) rather than the temporal median, so it is self-contained
+    per frame; ``illum_sigma`` is large enough (default 151 px) that the
+    rat is a small fraction of the blur window and barely biases the
+    field, keeping its contrast intact.
+
+    Parameters
+    ----------
+    gray        : (H, W) grayscale frame (uint8 or float).
+    illum_sigma : Gaussian sigma (px) of the illumination field. Large =
+                  flatten only the broad IR falloff, preserve the rat.
+    smooth_k    : light box-smoothing of the result (px); 0 disables.
+                  Match the Gabor descriptor's ``smooth_k`` so the
+                  intensity channel has comparable spatial support.
+
+    Returns
+    -------
+    (H, W) float32 illumination-flattened intensity.
+    """
+    g = gray.astype(np.float32)
+    field = cv2.GaussianBlur(g, (0, 0), float(illum_sigma))
+    corr = g / np.maximum(field, 1.0) * float(field.mean())
+    if smooth_k and int(smooth_k) > 1:
+        corr = cv2.blur(corr, (int(smooth_k), int(smooth_k)))
+    return corr.astype(np.float32)
+
+
 # ────────────────────────────────────────────────────────────────────
 #  Dynamic shadow model (slow EMA, rat-masked)
 # ────────────────────────────────────────────────────────────────────

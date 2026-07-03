@@ -49,12 +49,12 @@ def _texture_stats_for_session(args_tuple):
     Returns (count, sum, sumsq, vmin, vmax) per descriptor channel, or
     None if unreadable."""
     (path, bayer, green, scales, n_orient, smooth_k,
-     bg_frames, bg_start, bg_stride) = args_tuple
+     bg_frames, bg_start, bg_stride, intensity, illum_sigma) = args_tuple
     try:
         import cv2
         from rpimocap.io.export import TiffCapture
         from rpimocap.detection.texture_distance import (
-            dense_gabor_descriptor)
+            dense_gabor_descriptor, illumination_intensity)
         from rpimocap.detection.rat_texture import build_gabor_kernels
 
         kernels = build_gabor_kernels(
@@ -79,6 +79,13 @@ def _texture_stats_for_session(args_tuple):
                 gray = frame
             desc = dense_gabor_descriptor(
                 gray, kernels, n_orient, len(scales), smooth_k=smooth_k)
+            if intensity:
+                # Prepend the illumination-flattened intensity channel:
+                # the cue that actually separates the (bright) rat, since
+                # coarse Gabor alone rings the boundary. Channel 0 = intensity.
+                ich = illumination_intensity(
+                    gray, illum_sigma=illum_sigma, smooth_k=smooth_k)
+                desc = np.concatenate([ich[None], desc], axis=0)
             D = desc.shape[0]
             flat = desc.reshape(D, -1)
             if count is None:
@@ -112,9 +119,25 @@ def main(argv=None):
     ap.add_argument("--texture-stats", action="store_true",
                     help="Also pool background descriptor stats across "
                          "all sessions (heavier; parallel).")
-    ap.add_argument("--scales", type=int, nargs="+", default=[5, 9, 13])
+    ap.add_argument("--scales", type=int, nargs="+", default=[5, 9, 13],
+                    help="Gabor kernel sizes (px). Fine [5 9 13] do NOT "
+                         "separate the rat; use body-scale (e.g. 65 129) "
+                         "so the rat is a genuine texture outlier.")
     ap.add_argument("--n-orientations", type=int, default=8)
     ap.add_argument("--smooth-k", type=int, default=7)
+    ap.add_argument("--intensity", action="store_true",
+                    help="Prepend an illumination-flattened intensity "
+                         "channel (channel 0) to the pooled descriptor. "
+                         "This is the cue that actually separates the "
+                         "bright rat; pair with body-scale --scales for a "
+                         "background model the distance detector can "
+                         "threshold on. Output npz format is unchanged "
+                         "(mean/std/vmin/vmax gain one leading channel).")
+    ap.add_argument("--illum-sigma", type=float, default=151.0,
+                    help="Gaussian sigma (px) of the per-frame "
+                         "illumination field for --intensity. Large keeps "
+                         "the rat's brightness intact while flattening the "
+                         "IR falloff.")
     ap.add_argument("--bg-frames", type=int, default=60)
     ap.add_argument("--bg-start", type=int, default=0)
     ap.add_argument("--bg-stride", type=int, default=40)
@@ -158,7 +181,8 @@ def main(argv=None):
         for path in (s.cam0_path, s.cam1_path):
             tasks.append((path, args.bayer_pattern, args.green_channel,
                           args.scales, args.n_orientations, args.smooth_k,
-                          args.bg_frames, args.bg_start, args.bg_stride))
+                          args.bg_frames, args.bg_start, args.bg_stride,
+                          args.intensity, args.illum_sigma))
     print(f"\nPooling background descriptor stats over {len(tasks)} "
           f"camera files ({args.n_workers} workers)…")
 
@@ -201,6 +225,12 @@ def main(argv=None):
         "n_descriptor_channels": int(mean.shape[0]),
         "scales": args.scales,
         "n_orientations": args.n_orientations,
+        "intensity_channel": bool(args.intensity),
+        "illum_sigma": float(args.illum_sigma) if args.intensity else None,
+        "channel_layout": (["intensity"] if args.intensity else [])
+        + [f"gabor_s{s}" for s in args.scales for _ in range(
+            (int(mean.shape[0]) - (1 if args.intensity else 0))
+            // max(len(args.scales), 1))],
         "channel_mean": mean.tolist(),
         "channel_std": std.tolist(),
     }
