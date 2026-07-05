@@ -46,7 +46,8 @@ class TestTopoTrackCLI:
         mask[40:80, 60:100] = 1
         det = Detection(True, (80.0, 60.0), mask, mask, -3.0, [(80.0, 60.0)])
         g = np.full((H, W), 100, np.uint8)
-        R = StereoResult(np.array([0.0, 195.0, 40.0]), True, 2.5, det, det)
+        R = StereoResult(np.array([0.0, 195.0, 40.0]), True, 2.5, det, det,
+                         (80.0, 60.0), (80.0, 60.0))
         out = tt._overlay(g, g, R, 7, out_w=200)
         assert out.dtype == np.uint8 and out.ndim == 3 and out.shape[2] == 3
         assert out.shape[1] == 400               # two 200-wide panels

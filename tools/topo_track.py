@@ -49,7 +49,7 @@ def _overlay(g0, g1, R, idx, out_w=1000):
     banner with the triangulated point / accepted / reprojection error — so a
     whole session run can be eyeballed frame by frame.
     """
-    def draw(g, det):
+    def draw(g, det, matched):
         v = g.astype(np.float32)
         a, b = np.percentile(v, 1), np.percentile(v, 99)
         v = np.clip((v - a) / (b - a + 1e-6), 0, 1)
@@ -61,12 +61,15 @@ def _overlay(g0, g1, R, idx, out_w=1000):
             cv2.drawContours(img, cnts, -1, (60, 220, 60), 3)     # green mask
             for cx, cy in det.candidates:
                 cv2.circle(img, (int(cx), int(cy)), 8, (0, 140, 255), -1)  # orange
-            cv2.circle(img, (int(det.centroid[0]), int(det.centroid[1])),
-                       12, (255, 255, 0), -1)                     # cyan centroid
+            # the MATCHED centroid (the one that produced the 3D point) in
+            # cyan; if this view had no accepted match, show its primary grey.
+            pt = matched if matched is not None else det.centroid
+            col = (255, 255, 0) if matched is not None else (180, 180, 180)
+            cv2.circle(img, (int(pt[0]), int(pt[1])), 12, col, -1)
         s = out_w / img.shape[1]
         return cv2.resize(img, (out_w, int(round(img.shape[0] * s))))
 
-    v0, v1 = draw(g0, R.det0), draw(g1, R.det1)
+    v0, v1 = draw(g0, R.det0, R.pt0), draw(g1, R.det1, R.pt1)
     h = max(v0.shape[0], v1.shape[0])
     combo = np.zeros((h + 40, v0.shape[1] + v1.shape[1], 3), np.uint8)
     combo[40:40 + v0.shape[0], :v0.shape[1]] = v0
@@ -206,8 +209,8 @@ def main(argv=None):
                                          f"frame_{idx:06d}.png"),
                             _overlay(_green(fr0), _green(fr1), R, idx))
             if acc and X is not None:
-                fh.write(f"{idx},1,{d0.centroid[0]:.1f},{d0.centroid[1]:.1f},"
-                         f"{d1.centroid[0]:.1f},{d1.centroid[1]:.1f},"
+                fh.write(f"{idx},1,{R.pt0[0]:.1f},{R.pt0[1]:.1f},"
+                         f"{R.pt1[0]:.1f},{R.pt1[1]:.1f},"
                          f"{X[0]:.1f},{X[1]:.1f},{X[2]:.1f},1,"
                          f"{R.reproj_err:.1f},"
                          f"{d0.separation:.2f},{d1.separation:.2f}\n")

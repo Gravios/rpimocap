@@ -370,6 +370,9 @@ class StereoResult:
     reproj_err: float               # max per-view reprojection error (px)
     det0: Detection
     det1: Detection
+    pt0: Optional[Tuple[float, float]] = None   # cam0 centroid that PRODUCED
+    pt1: Optional[Tuple[float, float]] = None   # point (the matched candidate,
+                                    # not necessarily each view's primary)
 
 
 def detect_stereo(gray0: np.ndarray, gray1: np.ndarray,
@@ -410,5 +413,7 @@ def detect_stereo(gray0: np.ndarray, gray1: np.ndarray,
         arena_bounds=STD_ARENA, require_in_arena=True)
     if match is None:
         return StereoResult(None, False, float("nan"), d0, d1)
+    pt0 = tuple(float(v) for v in d0.candidates[match.i0])
+    pt1 = tuple(float(v) for v in d1.candidates[match.i1])
     return StereoResult(np.asarray(match.point), True,
-                        float(match.reproj_err), d0, d1)
+                        float(match.reproj_err), d0, d1, pt0, pt1)
