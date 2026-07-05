@@ -38,3 +38,18 @@ class TestTopoTrackCLI:
     def test_required_args_enforced(self):
         with pytest.raises(SystemExit):
             tt.main([])                              # missing --cam0/--cam1/...
+
+    def test_overlay_renders_bgr(self):
+        from rpimocap.detection.topo_detect import Detection, StereoResult
+        H, W = 120, 160
+        mask = np.zeros((H, W), np.uint8)
+        mask[40:80, 60:100] = 1
+        det = Detection(True, (80.0, 60.0), mask, mask, -3.0, [(80.0, 60.0)])
+        g = np.full((H, W), 100, np.uint8)
+        R = StereoResult(np.array([0.0, 195.0, 40.0]), True, 2.5, det, det)
+        out = tt._overlay(g, g, R, 7, out_w=200)
+        assert out.dtype == np.uint8 and out.ndim == 3 and out.shape[2] == 3
+        assert out.shape[1] == 400               # two 200-wide panels
+        # the no-consistent-pair case must render without crashing
+        R2 = StereoResult(None, False, float("nan"), det, det)
+        assert tt._overlay(g, g, R2, 3, out_w=200).dtype == np.uint8

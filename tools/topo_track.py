@@ -18,6 +18,7 @@ Example
   tools/topo_track.sh cam0.tif cam1.tif calib_from_corners.npz track3d.csv
 """
 import argparse
+import os
 import sys
 import time
 
@@ -39,6 +40,46 @@ def _green(frame):
     if frame is None:
         return None
     return frame[:, :, 1] if frame.ndim == 3 else frame
+
+
+def _overlay(g0, g1, R, idx, out_w=1000):
+    """Side-by-side cam0|cam1 detection overlay for one frame (BGR uint8).
+
+    green = segmented mask, cyan = centroid, orange = candidate blobs, plus a
+    banner with the triangulated point / accepted / reprojection error — so a
+    whole session run can be eyeballed frame by frame.
+    """
+    def draw(g, det):
+        v = g.astype(np.float32)
+        a, b = np.percentile(v, 1), np.percentile(v, 99)
+        v = np.clip((v - a) / (b - a + 1e-6), 0, 1)
+        img = cv2.cvtColor((v * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        if det.found:
+            cnts, _ = cv2.findContours(det.mask.astype(np.uint8),
+                                       cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(img, cnts, -1, (60, 220, 60), 3)     # green mask
+            for cx, cy in det.candidates:
+                cv2.circle(img, (int(cx), int(cy)), 8, (0, 140, 255), -1)  # orange
+            cv2.circle(img, (int(det.centroid[0]), int(det.centroid[1])),
+                       12, (255, 255, 0), -1)                     # cyan centroid
+        s = out_w / img.shape[1]
+        return cv2.resize(img, (out_w, int(round(img.shape[0] * s))))
+
+    v0, v1 = draw(g0, R.det0), draw(g1, R.det1)
+    h = max(v0.shape[0], v1.shape[0])
+    combo = np.zeros((h + 40, v0.shape[1] + v1.shape[1], 3), np.uint8)
+    combo[40:40 + v0.shape[0], :v0.shape[1]] = v0
+    combo[40:40 + v1.shape[0], v0.shape[1]:v0.shape[1] + v1.shape[1]] = v1
+    if R.point is not None:
+        txt = (f"frame {idx}  X=({R.point[0]:.0f},{R.point[1]:.0f},"
+               f"{R.point[2]:.0f})mm  accepted={R.accepted}  "
+               f"reproj={R.reproj_err:.1f}px")
+    else:
+        txt = f"frame {idx}  no consistent stereo pair"
+    cv2.putText(combo, txt, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (255, 255, 255), 2, cv2.LINE_AA)
+    return combo
 
 
 def main(argv=None):
@@ -80,6 +121,9 @@ def main(argv=None):
                     help="max symmetric epipolar distance for a stereo match")
     ap.add_argument("--max-reproj-px", type=float, default=60.0,
                     help="max reprojection error for a stereo match")
+    ap.add_argument("--overlay-dir", default=None,
+                    help="if set, write a per-frame detection overlay PNG "
+                         "(cam0|cam1, mask+centroid+candidates+3D) here")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max-frames", type=int, default=0, help="0 = all")
@@ -125,6 +169,8 @@ def main(argv=None):
           + f"  patch={args.patch}px  blob_sigma={args.blob_sigma:.0f}")
 
     rng = np.random.default_rng(args.seed)
+    if args.overlay_dir:
+        os.makedirs(args.overlay_dir, exist_ok=True)
     kw = dict(patch=args.patch, blob_sigma=args.blob_sigma,
               barrier_pct=args.barrier_pct, detect_pct=args.detect_pct,
               min_area=args.min_area, seg_barrier=args.seg_barrier,
@@ -155,6 +201,10 @@ def main(argv=None):
             found = d0.found and d1.found
             n_found += int(found)
             n_accept += int(acc)
+            if args.overlay_dir:
+                cv2.imwrite(os.path.join(args.overlay_dir,
+                                         f"frame_{idx:06d}.png"),
+                            _overlay(_green(fr0), _green(fr1), R, idx))
             if acc and X is not None:
                 fh.write(f"{idx},1,{d0.centroid[0]:.1f},{d0.centroid[1]:.1f},"
                          f"{d1.centroid[0]:.1f},{d1.centroid[1]:.1f},"
