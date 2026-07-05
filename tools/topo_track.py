@@ -71,6 +71,14 @@ def main(argv=None):
                          "Laplacian energy, or both (double barrier)")
     ap.add_argument("--barrier-sigma", type=float, default=3.0,
                     help="Gaussian sigma for the Laplacian-energy barrier")
+    ap.add_argument("--cable-suppress", action="store_true",
+                    help="use the cable-suppressed (invert-mix) centroid, "
+                         "which folds the tether into bedding so it stops "
+                         "dragging the centroid")
+    ap.add_argument("--max-epipolar-px", type=float, default=60.0,
+                    help="max symmetric epipolar distance for a stereo match")
+    ap.add_argument("--max-reproj-px", type=float, default=60.0,
+                    help="max reprojection error for a stereo match")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max-frames", type=int, default=0, help="0 = all")
@@ -119,7 +127,8 @@ def main(argv=None):
     kw = dict(patch=args.patch, blob_sigma=args.blob_sigma,
               barrier_pct=args.barrier_pct, detect_pct=args.detect_pct,
               min_area=args.min_area, seg_barrier=args.seg_barrier,
-              barrier_sigma=args.barrier_sigma)
+              barrier_sigma=args.barrier_sigma,
+              cable_suppress=args.cable_suppress)
 
     last = (min(args.start + args.max_frames * args.stride, n)
             if args.max_frames > 0 else n)
@@ -129,7 +138,7 @@ def main(argv=None):
     n_found = n_accept = n_rows = 0
     with open(args.out, "w") as fh:
         fh.write("frame,found,cam0_cx,cam0_cy,cam1_cx,cam1_cy,"
-                 "X_mm,Y_mm,Z_mm,accepted,sep0,sep1\n")
+                 "X_mm,Y_mm,Z_mm,accepted,reproj_px,sep0,sep1\n")
         for idx in idxs:
             cap0.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok0, fr0 = cap0.read()
@@ -138,21 +147,24 @@ def main(argv=None):
             if not (ok0 and ok1):
                 continue
             n_rows += 1
-            X, acc, d0, d1 = detect_stereo(_green(fr0), _green(fr1),
-                                           fl0, fl1, P0, P1, rng=rng, **kw)
+            R = detect_stereo(_green(fr0), _green(fr1), fl0, fl1, P0, P1,
+                              max_epipolar_px=args.max_epipolar_px,
+                              max_reproj_px=args.max_reproj_px, rng=rng, **kw)
+            d0, d1, X, acc = R.det0, R.det1, R.point, R.accepted
             found = d0.found and d1.found
             n_found += int(found)
             n_accept += int(acc)
-            if found and X is not None:
+            if acc and X is not None:
                 fh.write(f"{idx},1,{d0.centroid[0]:.1f},{d0.centroid[1]:.1f},"
                          f"{d1.centroid[0]:.1f},{d1.centroid[1]:.1f},"
-                         f"{X[0]:.1f},{X[1]:.1f},{X[2]:.1f},{int(acc)},"
+                         f"{X[0]:.1f},{X[1]:.1f},{X[2]:.1f},1,"
+                         f"{R.reproj_err:.1f},"
                          f"{d0.separation:.2f},{d1.separation:.2f}\n")
             else:
                 c0 = d0.centroid if d0.found else (float("nan"),) * 2
                 c1 = d1.centroid if d1.found else (float("nan"),) * 2
-                fh.write(f"{idx},0,{c0[0]:.1f},{c0[1]:.1f},{c1[0]:.1f},"
-                         f"{c1[1]:.1f},nan,nan,nan,0,"
+                fh.write(f"{idx},{int(found)},{c0[0]:.1f},{c0[1]:.1f},"
+                         f"{c1[0]:.1f},{c1[1]:.1f},nan,nan,nan,0,nan,"
                          f"{d0.separation:.2f},{d1.separation:.2f}\n")
             if n_rows % 200 == 0:
                 fps = n_rows / (time.time() - t0)

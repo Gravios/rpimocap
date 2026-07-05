@@ -11,9 +11,9 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from rpimocap.detection.topo_detect import (
-    Detection, body_blob, circle_grow_segment, combine_barriers, detect,
-    detect_stereo, grain_count_map, grain_peaks, laplacian_magnitude,
-    median_bandpass)
+    Detection, StereoResult, body_blob, cable_suppressed_map,
+    circle_grow_segment, combine_barriers, detect, detect_stereo,
+    grain_count_map, grain_peaks, laplacian_magnitude, median_bandpass)
 
 
 def _grainy_with_blob(H=400, W=500, cx=250, cy=200, R=60, seed=0):
@@ -158,17 +158,53 @@ class TestStereo:
         Xtrue = np.array([0.0, 0.0, 40.0])
         P0, P1, g0, g1 = self._scenes(Xtrue)
         fl = np.full(g0.shape, 255, np.uint8)
-        X, acc, d0, d1 = detect_stereo(g0, g1, fl, fl, P0, P1,
-                                       patch=64, blob_sigma=40, min_area=500)
-        assert d0.found and d1.found and X is not None
-        assert np.linalg.norm(X[:3] - Xtrue) < 45      # near truth
-        assert acc is True                              # in-arena, above floor
+        R = detect_stereo(g0, g1, fl, fl, P0, P1,
+                          patch=64, blob_sigma=40, min_area=500)
+        assert isinstance(R, StereoResult)
+        assert R.det0.found and R.det1.found and R.point is not None
+        assert R.accepted is True                       # in-arena, consistent
+        assert np.linalg.norm(R.point[:3] - Xtrue) < 45  # near truth
 
     def test_below_floor_rejected(self):
         # a reflection triangulates below z=0 and must be gated out
         Xrefl = np.array([0.0, 0.0, -40.0])
         P0, P1, g0, g1 = self._scenes(Xrefl)
         fl = np.full(g0.shape, 255, np.uint8)
-        X, acc, d0, d1 = detect_stereo(g0, g1, fl, fl, P0, P1,
-                                       patch=64, blob_sigma=40, min_area=500)
-        assert (X is None) or (acc is False)
+        R = detect_stereo(g0, g1, fl, fl, P0, P1,
+                          patch=64, blob_sigma=40, min_area=500)
+        assert (R.point is None) or (not R.accepted)
+
+    def test_epipolar_rejects_noncorresponding_pair(self):
+        # cam0 sees a blob at A, cam1 sees one at a DIFFERENT 3D point B —
+        # no epipolar-consistent pairing, so the match must be dropped.
+        P0, P1, g0, _ = self._scenes(np.array([0.0, 0.0, 40.0]))
+        _, _, _, g1 = self._scenes(np.array([120.0, -180.0, 60.0]))
+        fl = np.full(g0.shape, 255, np.uint8)
+        R = detect_stereo(g0, g1, fl, fl, P0, P1, patch=64, blob_sigma=40,
+                          min_area=500, max_epipolar_px=10, max_reproj_px=10)
+        assert (R.point is None) or (not R.accepted)
+
+
+class TestCableSuppressionAndCandidates:
+
+    def test_cable_suppressed_map_low_on_blob(self):
+        img, disk = _grainy_with_blob()
+        mix = cable_suppressed_map(img, median_bandpass(img),
+                                   np.full(img.shape, 255, np.uint8),
+                                   illum_sigma=81.0, barrier_sigma=16.0)
+        assert mix[disk > 0].mean() < mix[disk == 0].mean()   # rat is the min
+
+    def test_candidates_populated_and_best_first(self):
+        img, _ = _grainy_with_blob()
+        det = detect(img, np.full(img.shape, 255, np.uint8),
+                     patch=64, blob_sigma=40, min_area=500, max_candidates=3)
+        assert len(det.candidates) >= 1
+        assert det.candidates[0] == det.centroid          # best candidate first
+
+    def test_cable_suppress_still_finds_blob(self):
+        img, disk = _grainy_with_blob()
+        det = detect(img, np.full(img.shape, 255, np.uint8), patch=64,
+                     blob_sigma=40, min_area=500, cable_suppress=True,
+                     illum_sigma=81.0, cable_barrier_sigma=16.0)
+        assert det.found
+        assert abs(det.centroid[0] - 250) < 55 and abs(det.centroid[1] - 200) < 55
