@@ -42,11 +42,12 @@ fi
 
 PY="${PYTHON:-python3}"
 
-# Work from a plain checkout too: make `import rpimocap` resolve without a
-# pip install (harmless if it's already installed editable).
+# Resolve rpimocap without a pip install (harmless if installed editable).
+# Do NOT cd into the repo: that would resolve the caller's relative paths
+# (TIFFs / calib / output) against the repo dir. Run the CLI by absolute
+# path and stay in the caller's working directory.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-cd "${REPO_ROOT}"
 echo "topo_track: ${CAM0} + ${CAM1}  (calib ${CALIB})  →  ${OUT}"
-exec "${PY}" tools/topo_track.py \
+exec "${PY}" "${SCRIPT_DIR}/topo_track.py" \
     --cam0 "${CAM0}" --cam1 "${CAM1}" --calib "${CALIB}" --out "${OUT}" "$@"

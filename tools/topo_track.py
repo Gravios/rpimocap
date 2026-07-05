@@ -76,10 +76,19 @@ def main(argv=None):
     from rpimocap.io.export import TiffCapture
 
     cal = np.load(args.calib)
-    P0 = cal["dlt_P0"] if "dlt_P0" in cal else cal.get("P0", None)
-    P1 = cal["dlt_P1"] if "dlt_P1" in cal else cal.get("P1", None)
-    if P0 is None or P1 is None:
-        sys.exit(f"error: {args.calib} has no dlt_P0/dlt_P1 (or P0/P1)")
+    if "dlt_P0" in cal and "dlt_P1" in cal:
+        P0, P1 = cal["dlt_P0"], cal["dlt_P1"]
+    elif "P0" in cal and "P1" in cal:
+        P0, P1 = cal["P0"], cal["P1"]
+        print("WARNING: calib has no dlt_P0/dlt_P1 — falling back to P0/P1.\n"
+              "  topo_track needs the ARENA-registered DLT matrices\n"
+              "  (arena mm -> pixel), e.g. calib_from_corners.npz. Standard\n"
+              "  projection matrices from autocalib.npz use a different frame\n"
+              "  and will make every triangulation wrong. Re-run with the\n"
+              "  corner-calibrated .npz.", file=sys.stderr)
+    else:
+        sys.exit(f"error: {args.calib} has no dlt_P0/dlt_P1 (or P0/P1). "
+                 f"Use the arena-registered calibration (calib_from_corners.npz).")
 
     cap0 = TiffCapture(args.cam0, bayer_pattern=args.bayer_pattern)
     cap1 = TiffCapture(args.cam1, bayer_pattern=args.bayer_pattern)
