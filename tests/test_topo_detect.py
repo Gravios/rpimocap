@@ -11,8 +11,9 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from rpimocap.detection.topo_detect import (
-    Detection, body_blob, circle_grow_segment, detect, detect_stereo,
-    grain_count_map, grain_peaks, median_bandpass)
+    Detection, body_blob, circle_grow_segment, combine_barriers, detect,
+    detect_stereo, grain_count_map, grain_peaks, laplacian_magnitude,
+    median_bandpass)
 
 
 def _grainy_with_blob(H=400, W=500, cx=250, cy=200, R=60, seed=0):
@@ -86,6 +87,47 @@ class TestSegment:
         a = circle_grow_segment(seed, gc, floor, rng=np.random.default_rng(3))
         b = circle_grow_segment(seed, gc, floor, rng=np.random.default_rng(3))
         assert np.array_equal(a, b)
+
+
+class TestLaplacianBarrier:
+
+    def test_magnitude_low_on_blob(self):
+        img, disk = _grainy_with_blob()
+        lm = laplacian_magnitude(median_bandpass(img), sigma=3.0)
+        assert lm[disk > 0].mean() < lm[disk == 0].mean()    # rat low, bed high
+
+    def test_magnitude_is_sigma_robust(self):
+        img, disk = _grainy_with_blob()
+        mbp = median_bandpass(img)
+
+        def sep(s):
+            lm = laplacian_magnitude(mbp, s)
+            return lm[disk == 0].mean() / max(lm[disk > 0].mean(), 1e-6)
+
+        s2, s8 = sep(2.0), sep(8.0)
+        assert s2 > 1.5 and s8 > 1.5               # separates at both
+        assert abs(s2 - s8) / s2 < 0.4             # and is roughly flat in sigma
+
+    def test_combine_is_and_of_lows(self):
+        img, disk = _grainy_with_blob()
+        mbp = median_bandpass(img)
+        floor = np.full(img.shape, 255, np.uint8)
+        comb = combine_barriers(
+            [grain_count_map(mbp, 64), laplacian_magnitude(mbp, 3.0)], floor)
+        assert comb[disk > 0].mean() < comb[disk == 0].mean()
+
+
+class TestSegBarrierOptions:
+
+    def test_all_barriers_find_and_cover_blob(self):
+        img, disk = _grainy_with_blob()
+        floor = np.full(img.shape, 255, np.uint8)
+        for mode in ("grain", "laplacian", "both"):
+            det = detect(img, floor, patch=64, blob_sigma=40, min_area=500,
+                         seg_barrier=mode)
+            assert det.found, mode
+            inter = int(((det.mask > 0) & (disk > 0)).sum())
+            assert inter > 0.3 * int(disk.sum()), mode
 
 
 class TestStereo:

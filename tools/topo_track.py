@@ -65,6 +65,12 @@ def main(argv=None):
                          "(raise for the lower-contrast view)")
     ap.add_argument("--detect-pct", type=float, default=90.0)
     ap.add_argument("--min-area", type=int, default=1500)
+    ap.add_argument("--seg-barrier", default="grain",
+                    choices=["grain", "laplacian", "both"],
+                    help="segmentation barrier: grain-count (default), "
+                         "Laplacian energy, or both (double barrier)")
+    ap.add_argument("--barrier-sigma", type=float, default=3.0,
+                    help="Gaussian sigma for the Laplacian-energy barrier")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--max-frames", type=int, default=0, help="0 = all")
@@ -112,7 +118,8 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
     kw = dict(patch=args.patch, blob_sigma=args.blob_sigma,
               barrier_pct=args.barrier_pct, detect_pct=args.detect_pct,
-              min_area=args.min_area)
+              min_area=args.min_area, seg_barrier=args.seg_barrier,
+              barrier_sigma=args.barrier_sigma)
 
     last = (min(args.start + args.max_frames * args.stride, n)
             if args.max_frames > 0 else n)

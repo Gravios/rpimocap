@@ -108,31 +108,72 @@ def body_blob(gray: np.ndarray, sigma: float = 80.0) -> np.ndarray:
     return -(float(sigma) ** 2) * gaussian_laplace(g, float(sigma))
 
 
+def laplacian_magnitude(mbp: np.ndarray, sigma: float = 3.0) -> np.ndarray:
+    """Sigma-robust texture-energy barrier: ``Gaussian(|Laplacian(mbp)|)``.
+
+    The Laplacian of the median bandpass turns each bedding grain into a
+    +/- zero-crossing pair; its magnitude is a non-negative energy — HIGH
+    over bedding, LOW over the smooth rat. Because it is rectified, Gaussian
+    smoothing preserves the local mean, so the rat/bedding separation is
+    nearly independent of sigma (measured ~6x for cam0, ~3.7x for cam1, flat
+    from sigma 0.5 to 20) — unlike the *signed* Laplacian field, whose
+    separation collapses as the grain oscillations cancel. sigma ~ 2-4 keeps
+    the map contiguous while denoising, and the choice is forgiving.
+
+    An alternative to the grain-count map as the segmentation barrier: same
+    "high = bedding, low = rat" polarity, keyed on grain energy rather than
+    grain count. Pair the two with :func:`combine_barriers` for robustness.
+    """
+    lap = cv2.Laplacian(mbp.astype(np.float32), cv2.CV_32F, ksize=3)
+    return cv2.GaussianBlur(np.abs(lap), (0, 0), float(sigma))
+
+
+def combine_barriers(maps, floor_mask) -> np.ndarray:
+    """Combine several "high = bedding" barrier maps into one.
+
+    Each map is z-scored within the floor ROI (so grain-count and Laplacian
+    energy are comparable), then the elementwise maximum is taken. Because a
+    pixel is 'inside the rat' only where the combined barrier is LOW, and
+    max(a, b) < t iff a < t AND b < t, thresholding the combined map keeps
+    only pixels that are smooth by *every* measure — the double barrier that
+    closes the low-texture leak channels a single measure can miss.
+    """
+    floor = (floor_mask > 0)
+    z = []
+    for m in maps:
+        mf = m[floor]
+        z.append((m - float(mf.mean())) / (float(mf.std()) + 1e-6))
+    return np.maximum.reduce(z).astype(np.float32)
+
+
 # ────────────────────────────────────────────────────────────────────
 #  Segmentation — grow circles from the seed against the grain barrier
 # ────────────────────────────────────────────────────────────────────
-def circle_grow_segment(seed_blob: np.ndarray, grain_count: np.ndarray,
+def circle_grow_segment(seed_blob: np.ndarray, barrier: np.ndarray,
                         floor_mask: np.ndarray, barrier_pct: float = 45.0,
                         n_seeds: int = 120, min_radius: int = 3,
                         open_k: int = 7, close_k: int = 21,
                         rng: Optional[np.random.Generator] = None
                         ) -> np.ndarray:
-    """Grow circles from ``seed_blob`` outward against the grain-count barrier.
+    """Grow circles from ``seed_blob`` outward against a texture ``barrier``.
 
-    'Inside the rat' means the (smoothed) grain count is below the
-    ``barrier_pct`` percentile of the in-floor distribution — i.e. as smooth
-    as the rat. Circles seeded across the blob grow to the distance to the
-    nearest barrier (a distance transform of the smooth region); their union
-    is the silhouette. Because the barrier is *texture*, not brightness, this
-    holds on the low-contrast camera where a brightness fill leaks.
+    ``barrier`` is any "high = bedding, low = rat" map — the grain-count map
+    (:func:`grain_count_map`), the Laplacian energy
+    (:func:`laplacian_magnitude`), or their combination
+    (:func:`combine_barriers`). 'Inside the rat' means the (smoothed) barrier
+    is below the ``barrier_pct`` percentile of the in-floor distribution — as
+    smooth as the rat. Circles seeded across the blob grow to the distance to
+    the nearest barrier (a distance transform of the smooth region); their
+    union is the silhouette. Because the barrier is *texture*, not brightness,
+    this holds on the low-contrast camera where a brightness fill leaks.
 
     ``barrier_pct`` is the one knob for the harder view: raise it to let the
-    circles reach a little further before the grain wall stops them.
+    circles reach a little further before the texture wall stops them.
     """
     if rng is None:
         rng = np.random.default_rng(0)
     floor = (floor_mask > 0)
-    gcs = cv2.GaussianBlur(grain_count, (0, 0), 9)
+    gcs = cv2.GaussianBlur(barrier, (0, 0), 9)
     thr = float(np.percentile(gcs[floor], barrier_pct))
     free = ((gcs < thr) & floor).astype(np.uint8)
     if open_k:
@@ -170,9 +211,18 @@ class Detection:
 def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
            blob_sigma: float = 80.0, detect_pct: float = 90.0,
            min_area: int = 1500, barrier_pct: float = 45.0,
-           peak_frac: float = 0.5,
+           peak_frac: float = 0.5, seg_barrier: str = "grain",
+           barrier_sigma: float = 3.0,
            rng: Optional[np.random.Generator] = None) -> Detection:
     """Detect the rat in one camera view.
+
+    Localization always uses the grain-count map (the robust localizer). The
+    segmentation barrier is selectable via ``seg_barrier``:
+      'grain'     — grain-count map (default),
+      'laplacian' — Laplacian energy (:func:`laplacian_magnitude`, sigma
+                    ``barrier_sigma``),
+      'both'      — the double barrier (:func:`combine_barriers`), a pixel is
+                    inside only where it is smooth by *both* measures.
 
     Returns a :class:`Detection` with the body-scale centroid, the segmented
     mask, and the grain-count separation (rat vs bedding, in sigma; negative
@@ -212,8 +262,15 @@ def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
     masked = np.where(region > 0, blob, -np.inf)
     py, px = np.unravel_index(int(np.argmax(masked)), masked.shape)
 
-    # 3) segment: circles grown from the seed against the grain barrier
-    mask = circle_grow_segment(seed_blob, gc, floor, barrier_pct, rng=rng)
+    # 3) segment: circles grown from the seed against the texture barrier
+    if seg_barrier == "laplacian":
+        barrier = laplacian_magnitude(mbp, barrier_sigma)
+    elif seg_barrier == "both":
+        barrier = combine_barriers(
+            [gc, laplacian_magnitude(mbp, barrier_sigma)], floor)
+    else:  # "grain"
+        barrier = gc
+    mask = circle_grow_segment(seed_blob, barrier, floor, barrier_pct, rng=rng)
 
     return Detection(True, (float(px), float(py)), mask, seed_blob, float(sep))
 
