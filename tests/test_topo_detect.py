@@ -122,9 +122,10 @@ class TestSegBarrierOptions:
     def test_all_barriers_find_and_cover_blob(self):
         img, disk = _grainy_with_blob()
         floor = np.full(img.shape, 255, np.uint8)
-        for mode in ("grain", "laplacian", "both"):
+        for mode in ("grain", "laplacian", "both", "fur", "grain+fur"):
             det = detect(img, floor, patch=64, blob_sigma=40, min_area=500,
-                         seg_barrier=mode)
+                         seg_barrier=mode, illum_sigma=81.0,
+                         cable_barrier_sigma=16.0)
             assert det.found, mode
             inter = int(((det.mask > 0) & (disk > 0)).sum())
             assert inter > 0.3 * int(disk.sum()), mode

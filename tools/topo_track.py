@@ -60,15 +60,16 @@ def main(argv=None):
                     help="grain-count window px (detection scale)")
     ap.add_argument("--blob-sigma", type=float, default=80.0,
                     help="body-scale -LoG sigma for the centroid")
-    ap.add_argument("--barrier-pct", type=float, default=45.0,
+    ap.add_argument("--barrier-pct", type=float, default=55.0,
                     help="grain barrier percentile for segmentation "
                          "(raise for the lower-contrast view)")
     ap.add_argument("--detect-pct", type=float, default=90.0)
     ap.add_argument("--min-area", type=int, default=1500)
     ap.add_argument("--seg-barrier", default="grain",
-                    choices=["grain", "laplacian", "both"],
+                    choices=["grain", "laplacian", "both", "fur", "grain+fur"],
                     help="segmentation barrier: grain-count (default), "
-                         "Laplacian energy, or both (double barrier)")
+                         "Laplacian energy, both, fur (cable-suppressed "
+                         "bright+smooth body), or grain+fur")
     ap.add_argument("--barrier-sigma", type=float, default=3.0,
                     help="Gaussian sigma for the Laplacian-energy barrier")
     ap.add_argument("--cable-suppress", action="store_true",

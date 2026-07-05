@@ -185,7 +185,7 @@ def cable_suppressed_map(gray: np.ndarray, mbp: np.ndarray,
 #  Segmentation — grow circles from the seed against the grain barrier
 # ────────────────────────────────────────────────────────────────────
 def circle_grow_segment(seed_blob: np.ndarray, barrier: np.ndarray,
-                        floor_mask: np.ndarray, barrier_pct: float = 45.0,
+                        floor_mask: np.ndarray, barrier_pct: float = 55.0,
                         n_seeds: int = 120, min_radius: int = 3,
                         open_k: int = 7, close_k: int = 21,
                         rng: Optional[np.random.Generator] = None
@@ -247,7 +247,7 @@ class Detection:
 
 def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
            blob_sigma: float = 80.0, detect_pct: float = 90.0,
-           min_area: int = 1500, barrier_pct: float = 45.0,
+           min_area: int = 1500, barrier_pct: float = 55.0,
            peak_frac: float = 0.5, seg_barrier: str = "grain",
            barrier_sigma: float = 3.0, cable_suppress: bool = False,
            illum_sigma: float = 201.0, cable_barrier_sigma: float = 32.0,
@@ -256,8 +256,10 @@ def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
     """Detect the rat in one camera view.
 
     Localization uses the grain-count map (the robust localizer). The
-    segmentation barrier is selectable via ``seg_barrier`` ('grain' default,
-    'laplacian', or 'both').
+    segmentation barrier is selectable via ``seg_barrier``: 'grain' (default),
+    'laplacian', 'both' (grain AND laplacian), 'fur' (the cable-suppressed
+    fur map — bright + smooth body, cable dropped; fills a weak-contrast view
+    but can over-grow elsewhere), or 'grain+fur' (grain AND fur).
 
     Centroid: the body-scale -LoG peak by default. With ``cable_suppress``
     the centroid is taken from the low region of the cable-suppressed map
@@ -293,10 +295,11 @@ def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
     comps.sort(key=lambda i: -st[i, cv2.CC_STAT_AREA])
     comps = comps[:max(1, int(max_candidates))]
 
-    # centroid helper: cable-suppressed low region if requested, else -LoG peak
+    # cable-suppressed / fur map — needed for the cable-suppressed centroid
+    # and/or a fur-limited segmentation border; compute once, reuse.
+    need_fur = cable_suppress or seg_barrier in ("fur", "grain+fur")
     mix = (cable_suppressed_map(gray, mbp, floor, illum_sigma,
-                                cable_barrier_sigma)
-           if cable_suppress else None)
+                                cable_barrier_sigma) if need_fur else None)
     bb = body_blob(gray, blob_sigma)
 
     def _centroid(i):
@@ -328,6 +331,16 @@ def detect(gray: np.ndarray, floor_mask: np.ndarray, patch: int = 112,
     elif seg_barrier == "both":
         barrier = combine_barriers(
             [gc, laplacian_magnitude(mbp, barrier_sigma)], floor)
+    elif seg_barrier == "fur":
+        # limit the border with the fur map (bright + smooth = rat body;
+        # cable + bedding = high) — fills a weak-contrast view and drops the
+        # cable, but can over-grow where other bright-smooth patches exist.
+        barrier = mix
+    elif seg_barrier == "grain+fur":
+        # require BOTH grain-smoothness and fur: each catches the other's
+        # leak (grain reins in the fur's bright-patch over-grow; fur fills
+        # where grain under-segments).
+        barrier = combine_barriers([gc, mix], floor)
     else:  # "grain"
         barrier = gc
     mask = circle_grow_segment(seed_blob, barrier, floor, barrier_pct, rng=rng)
