@@ -50,7 +50,8 @@ the camera are dropped. `silhouette_iou(a, b)` scores the overlap of two masks.
 ## Fitting a pose
 
 ```python
-from rpimocap.model.fit import fit_pose, fit_pose_multistart, multiview_iou
+from rpimocap.model.fit import (fit_pose, fit_pose_multistart,
+                                fit_pose_staged, curled_pose, multiview_iou)
 ```
 
 The objective is **mean silhouette IoU** across cameras, maximized with a
@@ -65,14 +66,31 @@ several initial headings and keeps the best.
 pose, iou = fit_pose_multistart(masks, [dlt_P0, dlt_P1], root_pos=seed_xyz,
                                 headings=6, downscale=4)
 
-# refine specific joints too (each adds 3 Euler angles):
+# refine specific joints too (each adds 3 Euler angles, clamped to limits):
 pose, iou = fit_pose(masks, [dlt_P0, dlt_P1], pose,
                      joints=["SpineF", "SpineL"], downscale=4)
 ```
 
 `downscale` renders and compares at reduced resolution for speed. Fitting only
 the root + scale places, orients, and sizes the body; add `joints` to bend the
-spine or tuck limbs.
+spine or tuck limbs. Fitted joint angles are **clamped to the skeleton's
+`JOINT_LIMITS`** (`clamp=True`), so the optimizer can't produce an
+anatomically impossible pose.
+
+### Staged fit for a curled rat
+
+Fitting all joints at once is high-dimensional and gets stuck. `fit_pose_staged`
+does it coarse-to-fine: root + scale (multistart), then **tuck the limbs**
+(`TUCKED_ANGLES` / `curled_pose` — forelimb and hindlimb hinges folded up into
+the compact shape of a resting animal), then add joint groups progressively
+(spine, then limb hinges), each a clamped `fit_pose` refinement:
+
+```python
+pose, iou = fit_pose_staged(masks, [dlt_P0, dlt_P1], root_pos=seed_xyz,
+                            headings=4, tucked=True,
+                            stages=(("SpineF", "SpineL"),
+                                    ("ElbowL", "ElbowR", "KneeL", "KneeR")))
+```
 
 ---
 
@@ -105,9 +123,13 @@ sil0 = render_pose_silhouette(pose, P0, image_shape=g0.shape)   # overlay on cam
   IoU ≈ 0.96 with the heading, scale, and position close to truth — the fitter
   and renderer are correct.
 - **Real frames:** on a grooming (curled) rat, the root + scale fit places,
-  orients, and sizes the body but reaches only moderate IoU (~0.5), because
-  the rest-pose limbs don't match a tucked animal. Adding joint angles to the
-  fit (`joints=`) is the next step; a curled-limb initialization helps.
+  orients, and sizes the body but reaches only moderate IoU (~0.46), because
+  the rest-pose limbs don't match a tucked animal. `fit_pose_staged` with the
+  tucked init and spine + limb-hinge stages raises this to ~0.52; the ceiling
+  is then set by **inconsistency between the two views' detector masks** (one
+  over-, one under-segmented), which no single 3D pose can satisfy — more
+  consistent masks (e.g. `--seg-barrier fur` on the under-segmenting view)
+  raise it further, as would adding more joints.
 - **Speed:** the fit is derivative-free and renders per evaluation — seconds
   per frame per heading, not real-time. It is a **refinement/analysis** tool,
   not a per-frame tracker. For speed, warm-start each frame from the previous
@@ -115,6 +137,7 @@ sil0 = render_pose_silhouette(pose, P0, image_shape=g0.shape)   # overlay on cam
   silhouette renderer for gradient-based fitting.
 - **Shape, not appearance:** the objective is silhouette overlap only — no
   shading or texture. It constrains pose and size, not surface detail.
-- **Joint limits:** the fitter does not yet enforce the skeleton's
-  `JOINT_LIMITS` on the optimized angles; clamp or penalize with
-  `check_joint_angles` when fitting joints.
+- **Joint limits** are enforced by clamping fitted angles to `JOINT_LIMITS`
+  (`clamp=True`); the fit cannot leave the valid range, though it uses
+  projection (clamping) rather than a smooth barrier, so angles can pin to a
+  limit.

@@ -23,7 +23,36 @@ import numpy as np
 from scipy.optimize import minimize
 
 from .body_model import DEFAULT_RADII, render_silhouette, silhouette_iou
-from .rat_skeleton import RatPose, forward_kinematics
+from .rat_skeleton import JOINT_LIMITS, RatPose, forward_kinematics
+
+
+def _clamp_joint(child: str, angles) -> tuple:
+    """Clamp a joint's (rx, ry, rz) to its anatomical JOINT_LIMITS."""
+    lims = JOINT_LIMITS.get(child)
+    if lims is None:
+        return tuple(float(v) for v in angles)
+    return tuple(float(np.clip(v, lo, hi)) for v, (lo, hi) in zip(angles, lims))
+
+
+#: A tucked / curled limb configuration — forelimb and hindlimb hinges
+#: strongly flexed so hands and feet fold up toward the body, giving the
+#: compact silhouette of a resting or grooming rat. Angles are within
+#: JOINT_LIMITS. Use as the joint-angle init for fitting a curled animal.
+TUCKED_ANGLES = {
+    "ElbowL": (0.0, -1.40, 0.0), "ElbowR": (0.0, -1.40, 0.0),   # fold forearm up
+    "WristL": (0.0, -0.60, 0.0), "WristR": (0.0, -0.60, 0.0),
+    "KneeL":  (0.0, 1.40, 0.0),  "KneeR":  (0.0, 1.40, 0.0),     # fold shank up
+    "AnkleL": (0.0, 0.70, 0.0),  "AnkleR": (0.0, 0.70, 0.0),
+}
+
+
+def curled_pose(root_pos, root_rot=(0.0, 0.0, 0.0), scale: float = 1.0) -> RatPose:
+    """A resting/curled starting pose: given root placement, with the limbs
+    tucked (:data:`TUCKED_ANGLES`)."""
+    return RatPose(root_pos=np.asarray(root_pos, float),
+                   root_rot=np.asarray(root_rot, float), scale=float(scale),
+                   joint_angles={k: _clamp_joint(k, v)
+                                 for k, v in TUCKED_ANGLES.items()})
 
 
 def _scale_P(P: np.ndarray, s: float) -> np.ndarray:
@@ -44,7 +73,7 @@ def multiview_iou(pose: RatPose, Ps, masks, radii: dict = DEFAULT_RADII) -> floa
 
 def fit_pose(observed_masks, Ps, init_pose: RatPose,
              radii: dict = DEFAULT_RADII, joints=None,
-             downscale: int = 4, maxiter: int = 300):
+             downscale: int = 4, maxiter: int = 300, clamp: bool = True):
     """Optimize a ``RatPose`` to match observed silhouettes across cameras.
 
     Parameters
@@ -81,7 +110,9 @@ def fit_pose(observed_masks, Ps, init_pose: RatPose,
                     joint_angles=dict(init_pose.joint_angles))
         k = 7
         for jn in joints:
-            p.joint_angles[jn] = tuple(float(v) for v in x[k:k + 3])
+            ang = x[k:k + 3]
+            p.joint_angles[jn] = (_clamp_joint(jn, ang) if clamp
+                                  else tuple(float(v) for v in ang))
             k += 3
         return p
 
@@ -110,3 +141,42 @@ def fit_pose_multistart(observed_masks, Ps, root_pos, headings: int = 6,
         if best is None or iou > best[1]:
             best = (pose, iou)
     return best
+
+
+def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
+                    tucked: bool = True,
+                    stages=(("SpineF", "SpineL"),
+                            ("ElbowL", "ElbowR", "KneeL", "KneeR")),
+                    radii: dict = DEFAULT_RADII, downscale: int = 4,
+                    maxiter: int = 200):
+    """Coarse-to-fine articulated fit.
+
+    1. Root + scale, sweeping initial headings (:func:`fit_pose_multistart`).
+    2. Optionally tuck the limbs (:data:`TUCKED_ANGLES`) so a *curled* rat is
+       the starting shape rather than the splayed rest pose.
+    3. Progressively add joint groups from ``stages`` (accumulating), each a
+       :func:`fit_pose` refinement with joint-limit clamping.
+
+    Fitting all joints at once is high-dimensional and gets stuck; adding
+    them in stages, from a good root and a tucked init, is far more reliable.
+    ``stages`` defaults to the spine, then the forelimb/hindlimb hinges.
+
+    Returns ``(pose, iou)``.
+    """
+    pose, iou = fit_pose_multistart(observed_masks, Ps, root_pos,
+                                    headings=headings, radii=radii,
+                                    downscale=downscale, maxiter=maxiter)
+    if tucked:
+        pose = RatPose(root_pos=pose.root_pos, root_rot=pose.root_rot,
+                       scale=pose.scale,
+                       joint_angles={k: _clamp_joint(k, v)
+                                     for k, v in TUCKED_ANGLES.items()})
+    joints = []
+    for stage in stages:
+        for j in stage:
+            if j not in joints:
+                joints.append(j)
+        pose, iou = fit_pose(observed_masks, Ps, pose, radii=radii,
+                             joints=joints, downscale=downscale,
+                             maxiter=maxiter)
+    return pose, iou
