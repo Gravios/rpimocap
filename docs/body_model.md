@@ -47,6 +47,44 @@ sil = render_pose_silhouette(pose, dlt_P0, image_shape=(1080, 2028))
 `P` is the arena-DLT matrix for that camera (`dlt_P0`/`dlt_P1`). Points behind
 the camera are dropped. `silhouette_iou(a, b)` scores the overlap of two masks.
 
+## Skinned mesh surface (higher fidelity)
+
+`rpimocap.model.mesh_model` provides a smoother, more rat-shaped alternative to
+the capsule union, with proper **joint deformation** (linear blend skinning).
+Grounded in rat side-profile references — a rounded body tapering to a pointed
+snout, small ears, thin tucked limbs, a thick-to-thin tail.
+
+- Each bone contributes a tapered-capsule signed distance; a smooth-minimum
+  blends them (metaball style) into one organic surface, and marching cubes
+  extracts a watertight triangle mesh in the rest pose.
+- Each vertex is bound to its nearest bones (inverse-square falloff), so
+  vertices near a joint blend the two bones' frames — smooth bending, no rigid
+  crease. `skin_mesh` uses the per-joint world transforms from
+  `forward_kinematics_transforms`.
+
+```python
+from rpimocap.model.mesh_model import (build_rat_mesh, skin_mesh,
+                                        render_mesh_pose_silhouette)
+
+mesh  = build_rat_mesh()                      # once — marching cubes + weights
+verts = skin_mesh(mesh, pose)                 # (V, 3) posed vertices (LBS)
+sil   = render_mesh_pose_silhouette(mesh, pose, dlt_P0, image_shape=(1080, 2028))
+```
+
+Build the mesh once (marching cubes + weights are the cost, ~1 s); skinning
+(~7 ms) and rendering (~25 ms) per pose are fast. To fit the mesh instead of
+the capsules, pass it as the fitter's `render_fn`:
+
+```python
+render_fn = lambda pose, P, shape: render_mesh_pose_silhouette(mesh, pose, P, shape)
+pose, iou = fit_pose_staged(masks, [dlt_P0, dlt_P1], root_pos=seed,
+                            render_fn=render_fn)
+```
+
+On real frame_002716 the mesh's root+scale fit reaches IoU ≈ 0.65 versus the
+capsule model's 0.46 — the rounded body matches a curled rat far better than a
+splayed capsule union.
+
 ## Fitting a pose
 
 ```python

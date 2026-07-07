@@ -264,6 +264,30 @@ def _bone_vectors(scale: float) -> dict:
             for b, v in _REST_BONES_MM.items()}
 
 
+def forward_kinematics_transforms(pose: RatPose):
+    """World transform at every joint for a pose.
+
+    Walks the kinematic tree from the root, composing each joint's relative
+    rotation with the scaled rest bone vector. Returns two dicts keyed by
+    joint name: ``world_rot[joint]`` (3x3) is the frame the joint's CHILD
+    bones are expressed in, and ``world_pos[joint]`` (3,) is the joint's
+    world position (mm). Used both for keypoints and for mesh skinning.
+    """
+    bones = _bone_vectors(pose.scale)
+    R_root = euler_to_R(*pose.root_rot)
+    world_pos = {"SpineM": np.asarray(pose.root_pos, np.float64)}
+    world_rot = {"SpineM": R_root}
+    for child in _topo_order():
+        parent = RAT23_PARENT[child]
+        if parent is None:
+            continue
+        Rp = world_rot[parent]
+        rx, ry, rz = pose.joint_angles.get(child, (0.0, 0.0, 0.0))
+        world_pos[child] = world_pos[parent] + Rp @ bones[(parent, child)]
+        world_rot[child] = Rp @ euler_to_R(rx, ry, rz)
+    return world_rot, world_pos
+
+
 def forward_kinematics(pose: RatPose) -> np.ndarray:
     """Compute all 23 keypoint world positions (mm).
 
@@ -274,28 +298,7 @@ def forward_kinematics(pose: RatPose) -> np.ndarray:
     -------
     (23, 3) array of keypoint positions, indexed by RAT23_JOINTS order.
     """
-    bones = _bone_vectors(pose.scale)
-    R_root = euler_to_R(*pose.root_rot)
-    # world rotation accumulated at each joint (the frame its CHILD
-    # bones are expressed in) and the joint's world position.
-    world_pos = {"SpineM": np.asarray(pose.root_pos, np.float64)}
-    world_rot = {"SpineM": R_root}
-
-    # Process in an order where parents come before children.
-    order = _topo_order()
-    for child in order:
-        parent = RAT23_PARENT[child]
-        if parent is None:
-            continue
-        bone = bones[(parent, child)]
-        Rp = world_rot[parent]
-        # relative joint rotation (default zero = rest direction)
-        rx, ry, rz = pose.joint_angles.get(child, (0.0, 0.0, 0.0))
-        Rj = euler_to_R(rx, ry, rz)
-        Rc = Rp @ Rj
-        world_pos[child] = world_pos[parent] + Rp @ bone
-        world_rot[child] = Rc
-
+    _, world_pos = forward_kinematics_transforms(pose)
     out = np.zeros((len(RAT23_JOINTS), 3), dtype=np.float64)
     for name, i in RAT23_INDEX.items():
         out[i] = world_pos[name]

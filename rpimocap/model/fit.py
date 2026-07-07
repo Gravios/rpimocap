@@ -63,17 +63,27 @@ def _scale_P(P: np.ndarray, s: float) -> np.ndarray:
     return Q
 
 
-def multiview_iou(pose: RatPose, Ps, masks, radii: dict = DEFAULT_RADII) -> float:
-    """Mean silhouette IoU of ``pose`` against ``masks`` across cameras."""
-    kp = forward_kinematics(pose)
-    ious = [silhouette_iou(render_silhouette(kp, P, radii, m.shape), m)
-            for P, m in zip(Ps, masks)]
+def multiview_iou(pose: RatPose, Ps, masks, radii: dict = DEFAULT_RADII,
+                  render_fn=None) -> float:
+    """Mean silhouette IoU of ``pose`` against ``masks`` across cameras.
+
+    ``render_fn(pose, P, image_shape) -> mask`` overrides the default capsule
+    renderer — e.g. a skinned-mesh renderer from :mod:`rpimocap.model.mesh_model`.
+    """
+    if render_fn is None:
+        kp = forward_kinematics(pose)
+        ious = [silhouette_iou(render_silhouette(kp, P, radii, m.shape), m)
+                for P, m in zip(Ps, masks)]
+    else:
+        ious = [silhouette_iou(render_fn(pose, P, m.shape), m)
+                for P, m in zip(Ps, masks)]
     return float(np.mean(ious)) if ious else 0.0
 
 
 def fit_pose(observed_masks, Ps, init_pose: RatPose,
              radii: dict = DEFAULT_RADII, joints=None,
-             downscale: int = 4, maxiter: int = 300, clamp: bool = True):
+             downscale: int = 4, maxiter: int = 300, clamp: bool = True,
+             render_fn=None):
     """Optimize a ``RatPose`` to match observed silhouettes across cameras.
 
     Parameters
@@ -117,7 +127,7 @@ def fit_pose(observed_masks, Ps, init_pose: RatPose,
         return p
 
     def loss(x):
-        return 1.0 - multiview_iou(unpack(x), Qs, small, radii)
+        return 1.0 - multiview_iou(unpack(x), Qs, small, radii, render_fn)
 
     res = minimize(loss, pack(init_pose), method="Powell",
                    options={"maxiter": maxiter, "xtol": 1e-2, "ftol": 1e-3})
@@ -148,7 +158,7 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
                     stages=(("SpineF", "SpineL"),
                             ("ElbowL", "ElbowR", "KneeL", "KneeR")),
                     radii: dict = DEFAULT_RADII, downscale: int = 4,
-                    maxiter: int = 200):
+                    maxiter: int = 200, render_fn=None):
     """Coarse-to-fine articulated fit.
 
     1. Root + scale, sweeping initial headings (:func:`fit_pose_multistart`).
@@ -165,7 +175,8 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
     """
     pose, iou = fit_pose_multistart(observed_masks, Ps, root_pos,
                                     headings=headings, radii=radii,
-                                    downscale=downscale, maxiter=maxiter)
+                                    downscale=downscale, maxiter=maxiter,
+                                    render_fn=render_fn)
     if tucked:
         pose = RatPose(root_pos=pose.root_pos, root_rot=pose.root_rot,
                        scale=pose.scale,
@@ -178,5 +189,5 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
                 joints.append(j)
         pose, iou = fit_pose(observed_masks, Ps, pose, radii=radii,
                              joints=joints, downscale=downscale,
-                             maxiter=maxiter)
+                             maxiter=maxiter, render_fn=render_fn)
     return pose, iou
