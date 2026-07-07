@@ -138,12 +138,11 @@ def render_mesh_silhouette(verts_posed: np.ndarray, faces: np.ndarray,
     px = project_pose(verts_posed, P)
     H, W = int(image_shape[0]), int(image_shape[1])
     mask = np.zeros((H, W), np.uint8)
-    valid = px[:, 0] > -1e8
-    tris = px[faces]                                  # (F, 3, 2)
-    ok = valid[faces].all(axis=1)
-    polys = [t.astype(np.int32) for t in tris[ok]]
-    if polys:
-        cv2.fillPoly(mask, polys, 255)
+    ok = (px[:, 0] > -1e8)[faces].all(axis=1)
+    if not ok.any():
+        return mask
+    tris = np.round(px[faces[ok]]).astype(np.int32)   # (F', 3, 2), vectorized
+    cv2.fillPoly(mask, tris, 255)
     return mask
 
 
@@ -152,3 +151,85 @@ def render_mesh_pose_silhouette(mesh: RatMesh, pose: RatPose, P: np.ndarray,
     """Convenience: skin ``mesh`` to ``pose`` then render its silhouette."""
     return render_mesh_silhouette(skin_mesh(mesh, pose), mesh.faces, P,
                                   image_shape)
+
+
+def _parse_obj(path):
+    """Minimal OBJ reader → (verts (V,3), tri faces (F,3)). Triangulates
+    polygons by fanning; handles 1-based and negative face indices."""
+    verts, faces = [], []
+    with open(path, "r", errors="ignore") as fh:
+        for line in fh:
+            if line.startswith("v "):
+                verts.append([float(x) for x in line.split()[1:4]])
+            elif line.startswith("f "):
+                idx = [int(p.split("/")[0]) for p in line.split()[1:]]
+                idx = [i - 1 if i > 0 else len(verts) + i for i in idx]
+                for k in range(1, len(idx) - 1):
+                    faces.append([idx[0], idx[k], idx[k + 1]])
+    return np.asarray(verts, np.float64), np.asarray(faces, np.int32)
+
+
+def load_obj_mesh(obj_path: str, radii: dict = DEFAULT_RADII,
+                  weight_bones: int = 4, forward_axis: int = 2,
+                  up_axis: int = 1, forward_sign: float = 1.0,
+                  scale_mult: float = 1.2, nose_dx: float = 5.0,
+                  feet_dz: float = 5.0, trim_tail: bool = True,
+                  tail_margin: float = 5.0, decimate=None) -> RatMesh:
+    """Load an external artist OBJ rat mesh, align it to the rat23 rest
+    skeleton, and bind it (linear-blend skinning) for the pipeline.
+
+    The mesh is rotated into the rat convention (+x forward, +y left, +z up),
+    scaled so its height matches the skeleton (times ``scale_mult``), and
+    translated so the nose aligns with the snout and the feet with the floor.
+    Vertices are then bound to the nearest bones (inverse-square falloff), so
+    the returned :class:`RatMesh` skins and renders exactly like the built-in
+    one — pass it to the fitter via ``render_mesh_pose_silhouette``.
+
+    Defaults suit a Y-up, +Z-forward model (head at +Z), such as the sample
+    artist asset. ``forward_axis``/``up_axis``/``forward_sign`` and the
+    alignment offsets can be adjusted for a differently-oriented model.
+    ``trim_tail`` drops the thin tail behind the tail base (the detector masks
+    exclude it); ``decimate`` (fraction of faces to remove, e.g. 0.85; needs
+    ``fast-simplification``) reduces a heavy mesh so fitting stays fast.
+
+    Note: the trunk and hindquarters bind well; a sculpted forelimb pose that
+    differs from the skeleton's straight-down rest binds only approximately,
+    so use root/scale (+ spine) fitting rather than relying on forelimb
+    articulation.
+    """
+    V, F = _parse_obj(obj_path)
+    if decimate is not None:                          # optional face reduction
+        import fast_simplification              # (needs `pip install fast-simplification`)
+        V, F = fast_simplification.simplify(
+            V.astype(np.float32), F.astype(np.int32), target_reduction=float(decimate))
+        V = V.astype(np.float64)
+        F = F.astype(np.int32)
+    kp = forward_kinematics(RatPose())
+    side_axis = 3 - forward_axis - up_axis
+    Vr = np.empty_like(V)
+    Vr[:, 0] = forward_sign * V[:, forward_axis]     # +x forward
+    Vr[:, 1] = V[:, side_axis]                        # +y left
+    Vr[:, 2] = V[:, up_axis]                          # +z up
+    scale = (np.ptp(kp[:, 2]) / np.ptp(Vr[:, 2])) * scale_mult
+    Vr *= scale
+    Vr[:, 2] += kp[:, 2].min() - Vr[:, 2].min() + feet_dz          # feet to floor
+    Vr[:, 1] += kp[:, 1].mean() - Vr[:, 1].mean()                  # centre width
+    Vr[:, 0] += kp[:, 0].max() - np.percentile(Vr[:, 0], 98) + nose_dx  # nose→snout
+
+    if trim_tail:                                     # drop the thin tail behind
+        tb_x = kp[RAT23_INDEX["TailBase"], 0]         # the tail base — the
+        fc = Vr[F].mean(axis=1)[:, 0]                 # detector masks exclude it
+        F = F[fc >= tb_x - tail_margin]
+
+    segs = [(kp[RAT23_INDEX[p]], kp[RAT23_INDEX[c]]) for (p, c) in RAT23_BONES]
+    D = np.stack([_seg_dist(Vr, p0, p1) for (p0, p1) in segs], axis=1)
+    k = min(int(weight_bones), D.shape[1])
+    order = np.argsort(D, axis=1)[:, :k]
+    dk = np.take_along_axis(D, order, axis=1)
+    wk = 1.0 / (dk ** 2 + 1.0)
+    wk /= wk.sum(1, keepdims=True)
+    W = np.zeros_like(D)
+    np.put_along_axis(W, order, wk, axis=1)
+    rest_R, rest_t = forward_kinematics_transforms(RatPose())
+    return RatMesh(Vr, F.astype(np.int32), W.astype(np.float64),
+                   [p for (p, c) in RAT23_BONES], rest_R, rest_t)

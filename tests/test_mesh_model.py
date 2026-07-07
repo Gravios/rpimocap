@@ -45,3 +45,41 @@ class TestMeshModel:
             self.mesh, RatPose(root_pos=np.array([0.0, 0.0, 60.0])),
             _P(), image_shape=(500, 600))
         assert sil.dtype == np.uint8 and int((sil > 0).sum()) > 500
+
+
+def _write_box_obj(path):
+    """A small elongated box OBJ (stand-in artist asset for tests)."""
+    verts = [(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0),
+             (0, 0, 1), (4, 0, 1), (4, 1, 1), (0, 1, 1)]
+    faces = [(1, 2, 3), (1, 3, 4), (5, 6, 7), (5, 7, 8), (1, 2, 6), (1, 6, 5),
+             (2, 3, 7), (2, 7, 6), (3, 4, 8), (3, 8, 7), (4, 1, 5), (4, 5, 8)]
+    with open(path, "w") as f:
+        for v in verts:
+            f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+        for fa in faces:
+            f.write(f"f {fa[0]} {fa[1]} {fa[2]}\n")
+
+
+class TestObjLoader:
+
+    def test_parse_obj(self, tmp_path):
+        from rpimocap.model.mesh_model import _parse_obj
+        p = tmp_path / "box.obj"; _write_box_obj(p)
+        V, F = _parse_obj(str(p))
+        assert V.shape == (8, 3)
+        assert F.shape[1] == 3 and len(F) >= 12
+
+    def test_load_obj_mesh_binds_and_skins(self, tmp_path):
+        from rpimocap.model.mesh_model import (RatMesh, load_obj_mesh,
+                                               render_mesh_pose_silhouette,
+                                               skin_mesh)
+        p = tmp_path / "box.obj"; _write_box_obj(p)
+        m = load_obj_mesh(str(p), trim_tail=False)     # aligned + bound
+        assert isinstance(m, RatMesh)
+        assert np.allclose(m.weights.sum(1), 1.0, atol=1e-6)
+        v = skin_mesh(m, RatPose(root_pos=np.array([0.0, 0.0, 60.0])))
+        assert v.shape == m.verts_rest.shape
+        sil = render_mesh_pose_silhouette(
+            m, RatPose(root_pos=np.array([0.0, 0.0, 60.0])), _P(),
+            image_shape=(400, 480))
+        assert int((sil > 0).sum()) > 0

@@ -85,6 +85,39 @@ On real frame_002716 the mesh's root+scale fit reaches IoU ≈ 0.65 versus the
 capsule model's 0.46 — the rounded body matches a curled rat far better than a
 splayed capsule union.
 
+### Loading an external artist mesh
+
+`load_obj_mesh(obj_path)` adapts a real artist OBJ rat model for the pipeline:
+it parses the mesh, rotates it into the rat convention (+x forward, +y left,
++z up), scales it to the skeleton, aligns the nose to the snout and the feet
+to the floor, and binds every vertex to the nearest bones — returning a
+`RatMesh` that skins, renders, and fits exactly like the built-in one.
+
+```python
+from rpimocap.model.mesh_model import load_obj_mesh, render_mesh_pose_silhouette
+mesh = load_obj_mesh("RAT MODEL.obj", trim_tail=True, decimate=0.85)
+render_fn = lambda pose, P, shape: render_mesh_pose_silhouette(mesh, pose, P, shape)
+pose, iou = fit_pose_staged(masks, [dlt_P0, dlt_P1], root_pos=seed,
+                            render_fn=render_fn, physics_weight=2.0)
+```
+
+- **`decimate`** (fraction of faces to remove, e.g. `0.85`) needs
+  `fast-simplification`; a 50 k-face model renders in ~110 ms, a decimated
+  ~7 k-face one in ~16 ms, which is what makes fitting practical.
+- **`trim_tail`** drops the thin tail behind the tail base (the detector masks
+  don't include it), which lifts silhouette IoU.
+- **Orientation** defaults suit a Y-up, +Z-forward model (head at +Z); adjust
+  `forward_axis` / `up_axis` / `forward_sign` and the alignment offsets
+  (`scale_mult`, `nose_dx`, `feet_dz`) for a differently-posed model.
+
+Caveats: the trunk and hindquarters bind well, but a **sculpted forelimb pose**
+that differs from the skeleton's straight-down rest binds only approximately —
+use root/scale (+ spine) fitting rather than relying on forelimb articulation.
+And an artist model is typically a **standing** rat: on a curled grooming frame
+its detailed legs and raised head fit a tucked ball slightly worse than the
+smooth procedural blob (IoU ~0.47 vs ~0.56 with physics), but it is the more
+faithful surface for a standing or moving animal.
+
 ## Fitting a pose
 
 ```python
