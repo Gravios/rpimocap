@@ -155,6 +155,39 @@ sil0 = render_pose_silhouette(pose, P0, image_shape=g0.shape)   # overlay on cam
 
 ---
 
+## Physical plausibility (gravity + ground contact)
+
+The silhouette objective is orientation-ambiguous — a sideways or floating rat
+can project to a similar blob — so the fit can return physically impossible
+poses. `rpimocap.model.physics` adds the consequences of gravity as a
+lightweight pose prior (not a rigid-body dynamics engine):
+
+- **uprightness** — the body's up-axis should point to world +z,
+- **ground contact** — the lowest hind foot should touch the floor (z = 0),
+- **non-penetration** — nothing below the floor,
+- **support** — the trunk's centre of mass over the grounded feet (static
+  stability under gravity).
+
+Add it to any fit via `physics_weight`:
+
+```python
+pose, iou = fit_pose_staged(masks, [dlt_P0, dlt_P1], root_pos=seed,
+                            render_fn=render_fn, physics_weight=2.0)
+```
+
+Or project a finished pose to a resting one — righting the body and dropping it
+until the hind feet contact the floor, as if it had fallen under gravity:
+
+```python
+from rpimocap.model.physics import settle_pose
+resting = settle_pose(pose)          # upright, hind feet at z = 0, heading kept
+```
+
+On real frame_002716 the plain mesh fit returns the body tilted ~44° off
+vertical and sunk 15 mm into the floor; with `physics_weight=2.0` it is upright
+with the hind feet on the ground, at a small IoU cost (0.65 → 0.56) — the
+physically correct pose rather than the silhouette-optimal-but-impossible one.
+
 ## Validation & known limitations
 
 - **Synthetic recovery:** rendering a known pose and fitting it back recovers

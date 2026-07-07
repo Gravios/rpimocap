@@ -23,6 +23,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from .body_model import DEFAULT_RADII, render_silhouette, silhouette_iou
+from .physics import physical_penalty
 from .rat_skeleton import JOINT_LIMITS, RatPose, forward_kinematics
 
 
@@ -83,7 +84,7 @@ def multiview_iou(pose: RatPose, Ps, masks, radii: dict = DEFAULT_RADII,
 def fit_pose(observed_masks, Ps, init_pose: RatPose,
              radii: dict = DEFAULT_RADII, joints=None,
              downscale: int = 4, maxiter: int = 300, clamp: bool = True,
-             render_fn=None):
+             render_fn=None, physics_weight: float = 0.0):
     """Optimize a ``RatPose`` to match observed silhouettes across cameras.
 
     Parameters
@@ -127,7 +128,11 @@ def fit_pose(observed_masks, Ps, init_pose: RatPose,
         return p
 
     def loss(x):
-        return 1.0 - multiview_iou(unpack(x), Qs, small, radii, render_fn)
+        pose = unpack(x)
+        val = 1.0 - multiview_iou(pose, Qs, small, radii, render_fn)
+        if physics_weight:
+            val += physics_weight * physical_penalty(pose)
+        return val
 
     res = minimize(loss, pack(init_pose), method="Powell",
                    options={"maxiter": maxiter, "xtol": 1e-2, "ftol": 1e-3})
@@ -158,7 +163,8 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
                     stages=(("SpineF", "SpineL"),
                             ("ElbowL", "ElbowR", "KneeL", "KneeR")),
                     radii: dict = DEFAULT_RADII, downscale: int = 4,
-                    maxiter: int = 200, render_fn=None):
+                    maxiter: int = 200, render_fn=None,
+                    physics_weight: float = 0.0):
     """Coarse-to-fine articulated fit.
 
     1. Root + scale, sweeping initial headings (:func:`fit_pose_multistart`).
@@ -176,7 +182,8 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
     pose, iou = fit_pose_multistart(observed_masks, Ps, root_pos,
                                     headings=headings, radii=radii,
                                     downscale=downscale, maxiter=maxiter,
-                                    render_fn=render_fn)
+                                    render_fn=render_fn,
+                                    physics_weight=physics_weight)
     if tucked:
         pose = RatPose(root_pos=pose.root_pos, root_rot=pose.root_rot,
                        scale=pose.scale,
@@ -189,5 +196,6 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
                 joints.append(j)
         pose, iou = fit_pose(observed_masks, Ps, pose, radii=radii,
                              joints=joints, downscale=downscale,
-                             maxiter=maxiter, render_fn=render_fn)
+                             maxiter=maxiter, render_fn=render_fn,
+                             physics_weight=physics_weight)
     return pose, iou
