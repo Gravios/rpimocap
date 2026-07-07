@@ -25,6 +25,9 @@ cam1.mp4 ─┘                        └─ detection_stats.csv
 - **Topological rat detector**: texture-topology body localization, cable
   suppression, and epipolar-consistent stereo for a smooth-furred rat on
   grainy bedding — no training data ([docs](docs/topological_detection.md))
+- **Body model & pose fitting**: a capsule body surface on the rat23 skeleton,
+  fit to multi-view silhouettes by analysis-by-synthesis
+  ([docs](docs/body_model.md))
 - **DLT triangulation** with reprojection-error filtering, Gaussian
   trajectory smoothing, and gap interpolation
 - **Voxel carving** from silhouette masks into a 3D occupancy grid,
@@ -236,6 +239,7 @@ deploy_viewer("output/viewer", "output/viewer_data.json")
 | [docs/reconstruction.md](docs/reconstruction.md) | DLT triangulation, voxel carving internals |
 | [docs/detectors.md](docs/detectors.md) | All four detector backends, custom detector guide |
 | [docs/topological_detection.md](docs/topological_detection.md) | Grain-density rat detector, cable suppression, epipolar stereo, `topo_track` CLI |
+| [docs/body_model.md](docs/body_model.md) | Capsule body surface on the rat23 skeleton + multi-view silhouette pose fitting |
 | [docs/export.md](docs/export.md) | HDF5 schema, PLY variants, viewer JSON format |
 | [docs/api.md](docs/api.md) | Complete public API reference |
 
