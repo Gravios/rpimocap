@@ -22,6 +22,9 @@ cam1.mp4 ─┘                        └─ detection_stats.csv
   metric refinement (no checkerboard needed)
 - **Pluggable 2D detection**: MediaPipe (human), background-subtraction
   centroid (rodent), DLC/SLEAP CSV import, or custom backend
+- **Topological rat detector**: texture-topology body localization, cable
+  suppression, and epipolar-consistent stereo for a smooth-furred rat on
+  grainy bedding — no training data ([docs](docs/topological_detection.md))
 - **DLT triangulation** with reprojection-error filtering, Gaussian
   trajectory smoothing, and gap interpolation
 - **Voxel carving** from silhouette masks into a 3D occupancy grid,
@@ -154,6 +157,30 @@ rpimocap/
 --out              PATH    Output directory (default: output/)
 ```
 
+### `tools/topo_track.py` — topological rat detector
+
+Runs the grain-density rat detector + epipolar stereo over a session (see
+[docs/topological_detection.md](docs/topological_detection.md)). The wrapper
+takes the TIFFs, calibration, and output path positionally:
+
+```
+tools/topo_track.sh CAM0.tif CAM1.tif CALIB.npz [OUT.csv] [flags...]
+```
+
+```
+--roi-mode            STR   box | floor | volume (default: volume)
+--seg-barrier         STR   grain | laplacian | both | fur | grain+fur (default: grain)
+--barrier-pct         FLOAT Segmentation barrier percentile (default: 55)
+--cable-suppress            Cable-suppressed centroid (invert-mix)
+--max-epipolar-px     FLOAT Max epipolar distance for a stereo match (default: 60)
+--max-reproj-px       FLOAT Max reprojection error for a match (default: 60)
+--overlay-dir         PATH  Write per-frame detection overlay PNGs here
+--stride/--max-frames INT   Frame subsampling / limit
+```
+
+Requires the arena-registered DLT calibration (`calib_from_corners.npz` with
+`dlt_P0`/`dlt_P1`), **not** `autocalib.npz`.
+
 ---
 
 ## Python API
@@ -208,6 +235,7 @@ deploy_viewer("output/viewer", "output/viewer_data.json")
 | [docs/autocalib.md](docs/autocalib.md) | Kruppa self-calibration theory, API, troubleshooting |
 | [docs/reconstruction.md](docs/reconstruction.md) | DLT triangulation, voxel carving internals |
 | [docs/detectors.md](docs/detectors.md) | All four detector backends, custom detector guide |
+| [docs/topological_detection.md](docs/topological_detection.md) | Grain-density rat detector, cable suppression, epipolar stereo, `topo_track` CLI |
 | [docs/export.md](docs/export.md) | HDF5 schema, PLY variants, viewer JSON format |
 | [docs/api.md](docs/api.md) | Complete public API reference |
 

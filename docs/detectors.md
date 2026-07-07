@@ -296,3 +296,24 @@ supported by the CLI — instantiate programmatically via `pipeline.run()`).
 | Robustness to occlusion | High | Medium | Model-dependent |
 | Setup time | Minutes | Seconds | Hours–days (training) |
 | Reconstruction accuracy | High | Low | High |
+
+---
+
+## Topological rat detector (specialized)
+
+The four backends above return a keypoint skeleton via the `PoseDetector2D`
+interface. For a **white-furred rat on granular bedding under IR** — a subject
+that background subtraction (`CentroidPoseDetector`) and intensity features
+handle poorly — `rpimocap.detection.topo_detect` provides a separate
+texture-topology **body** detector with epipolar-consistent stereo.
+
+It localizes by **grain density** in a median-bandpass space (the rat is
+smooth, the bedding is a field of countable grains), suppresses the tether
+cable, matches the correct rat across the two views before triangulating, and
+returns a body centroid, silhouette mask, and gated 3D point rather than a
+keypoint skeleton. A command-line driver (`tools/topo_track.py`, wrapper
+`tools/topo_track.sh`) runs it over a stereo session and can dump per-frame
+detection overlays for inspection.
+
+See **[topological_detection.md](topological_detection.md)** for the full
+approach, API, parameters, and validation.
