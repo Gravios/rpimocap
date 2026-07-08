@@ -31,6 +31,10 @@ cam1.mp4 ─┘                        └─ detection_stats.csv
 - **Manual pose GUI**: `tools/pose_gui.py`, a Qt tool to set a rat pose by hand
   against both camera views, then fit neighbouring frames within a bounded
   neighbourhood of that keyframe ([docs](docs/body_model.md))
+- **Blender manual fitting**: build a Blender scene where the two calibrated
+  camera views are camera backgrounds aligned with the 3D world, with an arena
+  wireframe and a rat armature with IK, to pose the rat by hand and export 3D
+  keypoints ([docs](docs/blender.md))
 - **DLT triangulation** with reprojection-error filtering, Gaussian
   trajectory smoothing, and gap interpolation
 - **Voxel carving** from silhouette masks into a 3D occupancy grid,
@@ -243,6 +247,7 @@ deploy_viewer("output/viewer", "output/viewer_data.json")
 | [docs/detectors.md](docs/detectors.md) | All four detector backends, custom detector guide |
 | [docs/topological_detection.md](docs/topological_detection.md) | Grain-density rat detector, cable suppression, epipolar stereo, `topo_track` CLI |
 | [docs/body_model.md](docs/body_model.md) | Capsule body surface on the rat23 skeleton + multi-view silhouette pose fitting |
+| [docs/blender.md](docs/blender.md) | Manual pose fitting in Blender: DLT→camera decomposition, camera-background alignment, arena wireframe, armature + IK, pose export |
 | [docs/export.md](docs/export.md) | HDF5 schema, PLY variants, viewer JSON format |
 | [docs/api.md](docs/api.md) | Complete public API reference |
 
