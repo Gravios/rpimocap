@@ -39,9 +39,25 @@ maze rail from a soft rat outline.
 Output
 ------
   <out>/samples.csv            one row per saved click (appends across
-                               sessions)
-  <out>/patches/<class>_<n>.png  the patch with the click marked
-                               (provenance)
+                               sessions). Provenance columns:
+                                 session   — session id (--session, else the
+                                             cam0 filename stem)
+                                 src_file  — source capture file name
+                                 cam,frame — camera and frame index
+                                 patch_x0,patch_y0,patch_w,patch_h
+                                           — the shown patch's origin + size
+                                             in the full frame
+                                 x,y       — sample (click) coords in the
+                                             FULL frame
+                                 x_in_patch,y_in_patch
+                                           — click coords within the patch
+                                 win       — stats-window side length
+                               So (session,cam,frame,x,y) uniquely locate a
+                               sample and (patch_x0,y0,w,h) reproduce the view.
+  <out>/patches/<class>_<n>_cam<c>_f<frame>_<x>_<y>.png
+                               the patch with the click marked (provenance);
+                               the filename encodes cam, frame, and absolute
+                               coordinates.
 
 Requires a GUI build of OpenCV (opencv-python, NOT -headless) and a
 display (works over X-forwarding).
@@ -50,6 +66,7 @@ Example
 -------
   python tools/texture_edge_sampler.py \
       --cam0 "$cam0_tif" --cam1 "$cam1_tif" \
+      --session 20260214_021722 \
       --bayer-pattern RGGB --green-channel \
       --texture-classes bedding fur wall \
       --edge-classes maze_edge rat_edge \
@@ -79,7 +96,11 @@ except ImportError:                    # pragma: no cover
 # Field order for the CSV / record dicts. Kept fixed so sessions append
 # cleanly. n_desc Gabor channels are written as desc0..desc{n-1}.
 _BASE_FIELDS = [
-    "cam", "frame", "x", "y", "klass", "kind", "win",
+    # provenance — enough to re-locate and re-sample every click
+    "session", "src_file", "cam", "frame",
+    "patch_x0", "patch_y0", "patch_w", "patch_h",
+    "x", "y", "x_in_patch", "y_in_patch",
+    "klass", "kind", "win",
     # intensity stats over the window
     "int_mean", "int_std", "int_min", "int_max",
     "int_p10", "int_p50", "int_p90",
@@ -389,6 +410,15 @@ def write_csv(path: str, records: Sequence[dict], n_desc: int) -> None:
     + desc0..desc{n_desc-1})."""
     fields = list(_BASE_FIELDS) + [f"desc{i}" for i in range(n_desc)]
     exists = os.path.exists(path)
+    if exists:
+        with open(path, newline="") as fh:
+            header = fh.readline().strip().split(",")
+        if header and header != fields:
+            raise SystemExit(
+                f"{path} was written by a different sampler version "
+                f"(its columns don't match the current provenance schema). "
+                f"Move it aside or point --out at a fresh directory so the "
+                f"session/patch/coordinate columns can be written cleanly.")
     with open(path, "a", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         if not exists:
@@ -430,8 +460,15 @@ class _Session:
         self.cam = 0
         self.frame_idx = 0
         self.px0 = self.py0 = 0          # patch origin in the frame
+        self.pw = self.ph = 0            # patch size in the frame
         self.disp = None                 # BGR display image
         self.saved_count = {c: 0 for c in classes}
+        # provenance: session id + per-cam source file paths
+        self.session = (args.session or
+                        os.path.splitext(os.path.basename(args.cam0))[0])
+        self.src_files = {0: args.cam0}
+        if getattr(args, "cam1", None):
+            self.src_files[1] = args.cam1
         os.makedirs(os.path.join(args.out, "patches"), exist_ok=True)
         self.csv_path = os.path.join(args.out, "samples.csv")
 
@@ -448,6 +485,7 @@ class _Session:
         gray = _to_gray(frame, self.args.green_channel)
         self.patch, self.px0, self.py0 = sample_patch(
             gray, self.args.patch_size, self.rng)
+        self.ph, self.pw = self.patch.shape[:2]
         self._render()
 
     # ── rendering ──────────────────────────────────────────────────
@@ -495,18 +533,26 @@ class _Session:
             self.kernels, self.n_orient, self.n_scales,
             cam=self.cam, frame_idx=self.frame_idx,
             smooth_k=self.args.smooth_k)
-        # record absolute frame coordinates too
-        rec["x"] = int(self.px0 + x)
+        # provenance: session, source file, patch origin/size in the frame,
+        # click coords both within the patch and in the FULL frame.
+        rec["session"] = self.session
+        rec["src_file"] = os.path.basename(self.src_files.get(self.cam, ""))
+        rec["patch_x0"], rec["patch_y0"] = int(self.px0), int(self.py0)
+        rec["patch_w"], rec["patch_h"] = int(self.pw), int(self.ph)
+        rec["x_in_patch"], rec["y_in_patch"] = int(x), int(y)
+        rec["x"] = int(self.px0 + x)     # absolute frame coordinates
         rec["y"] = int(self.py0 + y)
         if self.n_desc is None:
             self.n_desc = rec["_n_desc"]
         self.records.append(rec)
         self.saved_count[klass] += 1
-        # provenance patch png with the click marked
+        # provenance patch png with the click marked; filename encodes the
+        # exact location so it can be traced without opening the CSV.
         self._render(marker=(x, y))
         n = self.saved_count[klass]
         pth = os.path.join(self.args.out, "patches",
-                           f"{klass}_{n:04d}.png")
+                           f"{klass}_{n:04d}_cam{self.cam}_f{self.frame_idx}"
+                           f"_{rec['x']}_{rec['y']}.png")
         cv2.imwrite(pth, self.disp)
         cv2.waitKey(120)                 # brief flash of the marker
         # Stay on the SAME patch so multiple samples can be taken from
@@ -605,6 +651,11 @@ def main(argv=None):
                     help="Output directory for samples.csv + provenance "
                          "patches (required for sampling; not used by "
                          "--seed-thresholds).")
+    ap.add_argument("--session", default=None,
+                    help="Session id recorded with every sample (e.g. the "
+                         "capture timestamp 20260214_021722). Defaults to the "
+                         "cam0 filename stem; set it so frame indices are "
+                         "unambiguous across sessions.")
     args = ap.parse_args(argv)
 
     # Aggregation mode: derive shape thresholds from a labeled CSV, no GUI.

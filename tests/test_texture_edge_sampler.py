@@ -171,6 +171,45 @@ class TestWriteCsv:
         assert rows[0]["klass"] == "fur"
 
 
+class TestProvenance:
+
+    def _full_record(self, cam=0, frame=7, px0=100, py0=50, x=40, y=30):
+        rng = np.random.RandomState(3)
+        g = rng.randint(40, 200, (80, 80)).astype(np.uint8)
+        rec = tes.extract_record(g, x, y, "fur", "texture", 48,
+                                 KERNELS, N_ORIENT, 3, cam=cam, frame_idx=frame)
+        # mirror the provenance fields _save_click attaches
+        rec["session"] = "20260214_021722"
+        rec["src_file"] = "cam0.tif"
+        rec["patch_x0"], rec["patch_y0"] = px0, py0
+        rec["patch_w"], rec["patch_h"] = 80, 80
+        rec["x_in_patch"], rec["y_in_patch"] = x, y
+        rec["x"], rec["y"] = px0 + x, py0 + y     # absolute frame coords
+        return rec
+
+    def test_provenance_columns_round_trip(self, tmp_path):
+        rec = self._full_record()
+        path = str(tmp_path / "samples.csv")
+        tes.write_csv(path, [rec], 9)
+        row = list(csv.DictReader(open(path)))[0]
+        for f in tes._BASE_FIELDS:                 # every column present
+            assert f in row, f"missing column {f}"
+        assert row["session"] == "20260214_021722"
+        assert row["src_file"] == "cam0.tif"
+        assert row["cam"] == "0" and row["frame"] == "7"
+        assert row["patch_x0"] == "100" and row["patch_y0"] == "50"
+        assert row["patch_w"] == "80" and row["patch_h"] == "80"
+        assert row["x_in_patch"] == "40" and row["y_in_patch"] == "30"
+        assert row["x"] == "140" and row["y"] == "80"   # origin + in-patch
+
+    def test_schema_guard_rejects_old_header(self, tmp_path):
+        path = str(tmp_path / "old.csv")
+        with open(path, "w") as fh:                # a pre-provenance header
+            fh.write("cam,frame,x,y\n0,1,2,3\n")
+        with pytest.raises(SystemExit):
+            tes.write_csv(path, [self._full_record()], 9)
+
+
 class TestBlobGeometry:
 
     def _rat_cable_frame(self):
