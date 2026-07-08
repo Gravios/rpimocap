@@ -7,7 +7,7 @@ import numpy as np
 
 from rpimocap.model.body_model import render_silhouette
 from rpimocap.model.fit import (TUCKED_ANGLES, _clamp_joint, curled_pose,
-                                fit_pose, fit_pose_multistart,
+                                fit_pose, fit_pose_local, fit_pose_multistart,
                                 fit_pose_staged, multiview_iou)
 from rpimocap.model.rat_skeleton import (JOINT_LIMITS, RatPose,
                                          check_joint_angles,
@@ -79,3 +79,22 @@ class TestStagedFit:
                                     downscale=3, maxiter=25)
         assert 0.0 <= iou <= 1.0
         assert check_joint_angles(pose.joint_angles)   # clamping kept it valid
+
+    def test_local_fit_stays_in_neighbourhood(self):
+        P0 = _P((-400.0, -600.0, 500.0))
+        P1 = _P((400.0, -600.0, 500.0))
+        target = RatPose(root_pos=np.array([12.0, 0.0, 60.0]),
+                         root_rot=np.array([0.0, 0.0, 0.6]), scale=1.05)
+        kp = forward_kinematics(target)
+        masks = [render_silhouette(kp, P0, image_shape=(400, 480)),
+                 render_silhouette(kp, P1, image_shape=(400, 480))]
+        init = RatPose(root_pos=np.array([0.0, 0.0, 60.0]),
+                       root_rot=np.array([0.0, 0.0, 0.4]), scale=1.0)
+        pose, iou = fit_pose_local(masks, [P0, P1], init, pos_tol=25.0,
+                                   ang_tol=0.35, scale_tol=0.15, downscale=2,
+                                   maxiter=50)
+        # bounds respected
+        assert np.all(np.abs(pose.root_pos - init.root_pos) <= 25.001)
+        assert abs(pose.root_rot[2] - init.root_rot[2]) <= 0.3501
+        assert 0.85 <= pose.scale <= 1.15 + 1e-3
+        assert iou > multiview_iou(init, [P0, P1], masks)   # and it improved

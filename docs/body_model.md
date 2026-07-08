@@ -221,6 +221,44 @@ vertical and sunk 15 mm into the floor; with `physics_weight=2.0` it is upright
 with the hind feet on the ground, at a small IoU cost (0.65 → 0.56) — the
 physically correct pose rather than the silhouette-optimal-but-impossible one.
 
+## Manual fitting & frame-to-frame tracking
+
+For frames the automatic fit struggles with (ambiguous silhouettes, unusual
+poses), `tools/pose_gui.py` is a Qt GUI to set the pose by hand and drive the
+fitter. Sliders control position, orientation, scale, spine bend, and limb
+tuck; the model (green) overlays both camera views alongside the detector mask
+(orange), with the live IoU shown.
+
+```
+python tools/pose_gui.py --frames-dir SESSION/raw --calib calib_from_corners.npz \
+    --model procedural --poses keyframes.json
+```
+
+`--model` is `procedural` (built-in mesh), `capsule` (fastest), or an artist
+OBJ path. **Save keyframe** stores the current pose for the frame into the
+`--poses` JSON; **Fit (detect)** fits freely from the detection; **Fit (local)**
+refines within a neighbourhood of the current pose; **Prev/Next** carry the
+pose forward as a warm start. The GUI logic lives in Qt-free
+`rpimocap.gui.pose_state.PoseFitterState` (scriptable, unit-tested).
+
+### Restricting the search on neighbouring frames
+
+Once a frame is posed well — by hand or a good auto-fit — `fit_pose_local`
+restricts the optimizer to nearby poses, so a moving rat can be tracked
+frame-to-frame without the fit jumping to a distant pose:
+
+```python
+from rpimocap.model.fit import fit_pose_local
+pose, iou = fit_pose_local(masks, [P0, P1], prev_pose,
+                           pos_tol=25, ang_tol=0.35, scale_tol=0.15,
+                           render_fn=render_fn, physics_weight=2.0)
+```
+
+It bounds root position to ±`pos_tol` mm, every angle to ±`ang_tol` rad, and
+scale to ±`scale_tol` (fractional), warm-started from `prev_pose`. Carry each
+frame's result to the next as the seed and set a fresh keyframe by hand
+whenever the pose drifts enough to need it.
+
 ## Validation & known limitations
 
 - **Synthetic recovery:** rendering a known pose and fitting it back recovers

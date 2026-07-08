@@ -84,7 +84,7 @@ def multiview_iou(pose: RatPose, Ps, masks, radii: dict = DEFAULT_RADII,
 def fit_pose(observed_masks, Ps, init_pose: RatPose,
              radii: dict = DEFAULT_RADII, joints=None,
              downscale: int = 4, maxiter: int = 300, clamp: bool = True,
-             render_fn=None, physics_weight: float = 0.0):
+             render_fn=None, physics_weight: float = 0.0, bounds=None):
     """Optimize a ``RatPose`` to match observed silhouettes across cameras.
 
     Parameters
@@ -134,7 +134,7 @@ def fit_pose(observed_masks, Ps, init_pose: RatPose,
             val += physics_weight * physical_penalty(pose)
         return val
 
-    res = minimize(loss, pack(init_pose), method="Powell",
+    res = minimize(loss, pack(init_pose), method="Powell", bounds=bounds,
                    options={"maxiter": maxiter, "xtol": 1e-2, "ftol": 1e-3})
     return unpack(res.x), 1.0 - float(res.fun)
 
@@ -199,3 +199,35 @@ def fit_pose_staged(observed_masks, Ps, root_pos, headings: int = 6,
                              maxiter=maxiter, render_fn=render_fn,
                              physics_weight=physics_weight)
     return pose, iou
+
+
+def fit_pose_local(observed_masks, Ps, init_pose: RatPose,
+                   pos_tol: float = 25.0, ang_tol: float = 0.35,
+                   scale_tol: float = 0.15, joints=None, **fit_kwargs):
+    """Fit within a **neighbourhood** of ``init_pose`` — a warm-started,
+    bounds-constrained search.
+
+    Given a good pose for one frame (e.g. set by hand in the pose GUI, or the
+    previous frame's result), this restricts the optimizer to nearby poses:
+    root position within ``±pos_tol`` mm, every angle within ``±ang_tol`` rad,
+    and scale within ``±scale_tol`` (fractional). Ideal for tracking a moving
+    rat frame-to-frame without the search wandering off to a distant pose.
+
+    ``joints`` lists joint angles to also refine (bounded and clamped to
+    ``JOINT_LIMITS``). Extra keyword arguments pass through to :func:`fit_pose`
+    (``radii``, ``downscale``, ``maxiter``, ``render_fn``, ``physics_weight``).
+
+    Returns ``(fitted_pose, iou)``.
+    """
+    joints = list(joints or [])
+    b = [(float(p) - pos_tol, float(p) + pos_tol) for p in init_pose.root_pos]
+    b += [(float(r) - ang_tol, float(r) + ang_tol) for r in init_pose.root_rot]
+    ls = np.log(max(float(init_pose.scale), 1e-3))
+    b += [(ls - np.log(1.0 + scale_tol), ls + np.log(1.0 + scale_tol))]
+    for jn in joints:
+        ang = init_pose.joint_angles.get(jn, (0.0, 0.0, 0.0))
+        lims = JOINT_LIMITS.get(jn, ((-np.pi, np.pi),) * 3)
+        for a, (lo, hi) in zip(ang, lims):
+            b.append((max(lo, a - ang_tol), min(hi, a + ang_tol)))
+    return fit_pose(observed_masks, Ps, init_pose, joints=joints, bounds=b,
+                    **fit_kwargs)

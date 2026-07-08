@@ -28,6 +28,9 @@ cam1.mp4 ─┘                        └─ detection_stats.csv
 - **Body model & pose fitting**: a capsule body surface on the rat23 skeleton,
   fit to multi-view silhouettes by analysis-by-synthesis
   ([docs](docs/body_model.md))
+- **Manual pose GUI**: `tools/pose_gui.py`, a Qt tool to set a rat pose by hand
+  against both camera views, then fit neighbouring frames within a bounded
+  neighbourhood of that keyframe ([docs](docs/body_model.md))
 - **DLT triangulation** with reprojection-error filtering, Gaussian
   trajectory smoothing, and gap interpolation
 - **Voxel carving** from silhouette masks into a 3D occupancy grid,
