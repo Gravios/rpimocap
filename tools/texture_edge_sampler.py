@@ -54,6 +54,14 @@ Output
                                  win       — stats-window side length
                                So (session,cam,frame,x,y) uniquely locate a
                                sample and (patch_x0,y0,w,h) reproduce the view.
+                               Colour columns (BGR frames): col_{r,g,b}_win
+                               (+ _std) and col_rb_win / col_rmb_win are the
+                               per-channel mean/std and R/B, (R-B)/(R+B) over
+                               the window; col_{r,g,b}_loc and col_rb_loc /
+                               col_rmb_loc are the same from a small local
+                               average at the click (--color-local, default
+                               3px) — use the window colour for broad textures
+                               and the local colour for thin ones (cable).
   <out>/patches/<class>_<n>_cam<c>_f<frame>_<x>_<y>.png
                                the patch with the click marked (provenance);
                                the filename encodes cam, frame, and absolute
@@ -104,6 +112,13 @@ _BASE_FIELDS = [
     # intensity stats over the window
     "int_mean", "int_std", "int_min", "int_max",
     "int_p10", "int_p50", "int_p90",
+    # colour: per-channel mean+std over the window (broad textures) and a
+    # small local average at the click (thin structures like the cable)
+    "col_r_win", "col_g_win", "col_b_win",
+    "col_r_win_std", "col_g_win_std", "col_b_win_std",
+    "col_rb_win", "col_rmb_win",
+    "col_r_loc", "col_g_loc", "col_b_loc",
+    "col_rb_loc", "col_rmb_loc",
     # gradient / structure-tensor stats over the window
     "grad_mag_mean", "grad_mag_max", "orient_deg", "coherence",
     # cross-edge profile (meaningful for edges; computed for all)
@@ -348,15 +363,61 @@ def seed_thresholds_from_csv(csv_path: str,
     return result
 
 
+def color_stats(color_patch, x0: int, y0: int, win: int,
+                cx: int, cy: int, local: int = 3) -> dict:
+    """Color statistics for a click, in two complementary supports.
+
+    Frames are BGR (the capture demosaics to BGR). Two representations are
+    captured because which one is informative depends on whether the target
+    fills the window:
+
+    * **window** (the same ``win``x``win`` box the texture/intensity stats use):
+      per-channel mean + std, and R/B and (R-B)/(R+B) from the means. Best for
+      broad textures (fur, bedding) that fill the window; DILUTED toward the
+      background for thin structures.
+    * **local** (a small ``local``x``local`` average at the click, default 3):
+      per-channel mean and the two ratios. Preserves the colour of thin
+      structures (e.g. a cable) that a large window averages away.
+
+    Returns ``{}`` if ``color_patch`` is not a 3-channel image.
+    """
+    if (color_patch is None or color_patch.ndim != 3
+            or color_patch.shape[2] < 3):
+        return {}
+    cp = color_patch.astype(np.float32)
+    w = cp[y0:y0 + win, x0:x0 + win]
+    b, g, r = w[..., 0], w[..., 1], w[..., 2]
+    rw, gw, bw = float(r.mean()), float(g.mean()), float(b.mean())
+    h = local // 2
+    ly0, ly1 = max(0, cy - h), min(cp.shape[0], cy + h + 1)
+    lx0, lx1 = max(0, cx - h), min(cp.shape[1], cx + h + 1)
+    lo = cp[ly0:ly1, lx0:lx1]
+    lr, lg, lb = float(lo[..., 2].mean()), float(lo[..., 1].mean()), \
+        float(lo[..., 0].mean())
+    return {
+        "col_r_win": rw, "col_g_win": gw, "col_b_win": bw,
+        "col_r_win_std": float(r.std()), "col_g_win_std": float(g.std()),
+        "col_b_win_std": float(b.std()),
+        "col_rb_win": rw / (bw + 1e-6),
+        "col_rmb_win": (rw - bw) / (rw + bw + 1e-6),
+        "col_r_loc": lr, "col_g_loc": lg, "col_b_loc": lb,
+        "col_rb_loc": lr / (lb + 1e-6),
+        "col_rmb_loc": (lr - lb) / (lr + lb + 1e-6),
+    }
+
+
 def extract_record(gray: np.ndarray, cx: int, cy: int,
                    klass: str, kind: str, win: int,
                    kernels, n_orient: int, n_scales: int,
                    cam: int, frame_idx: int,
-                   smooth_k: int = 7) -> dict:
+                   smooth_k: int = 7,
+                   color_patch=None, color_local: int = 3) -> dict:
     """Build one labeled record for a click at (cx, cy) on `gray`.
 
     `gray` here is the full patch (already cropped). (cx, cy) are in
-    patch coordinates. `kind` is 'texture' or 'edge'.
+    patch coordinates. `kind` is 'texture' or 'edge'. `color_patch`, if given,
+    is the same patch in BGR — colour stats are added over the identical
+    window plus a `color_local`x`color_local` average at the click.
     """
     H, W = gray.shape
     half = win // 2
@@ -369,6 +430,7 @@ def extract_record(gray: np.ndarray, cx: int, cy: int,
         "klass": klass, "kind": kind, "win": win,
     }
     rec.update(intensity_stats(window))
+    rec.update(color_stats(color_patch, x0, y0, win, cx, cy, local=color_local))
     st = structure_tensor_stats(window)
     rec.update(st)
     rec.update(cross_edge_profile(gray, cx, cy, st["orient_deg"]))
@@ -457,6 +519,7 @@ class _Session:
         self.records: list[dict] = []
         self.n_desc = None
         self.patch = None                # current patch gray
+        self.color_patch = None          # current patch BGR (for colour stats)
         self.cam = 0
         self.frame_idx = 0
         self.px0 = self.py0 = 0          # patch origin in the frame
@@ -486,6 +549,13 @@ class _Session:
         self.patch, self.px0, self.py0 = sample_patch(
             gray, self.args.patch_size, self.rng)
         self.ph, self.pw = self.patch.shape[:2]
+        # keep the same crop in colour (BGR) for the colour stats; None if the
+        # source is single-channel
+        if frame.ndim == 3 and frame.shape[2] >= 3:
+            self.color_patch = frame[self.py0:self.py0 + self.ph,
+                                     self.px0:self.px0 + self.pw]
+        else:
+            self.color_patch = None
         self._render()
 
     # ── rendering ──────────────────────────────────────────────────
@@ -532,7 +602,8 @@ class _Session:
             self.patch, x, y, klass, kind, self.args.win,
             self.kernels, self.n_orient, self.n_scales,
             cam=self.cam, frame_idx=self.frame_idx,
-            smooth_k=self.args.smooth_k)
+            smooth_k=self.args.smooth_k,
+            color_patch=self.color_patch, color_local=self.args.color_local)
         # provenance: session, source file, patch origin/size in the frame,
         # click coords both within the patch and in the FULL frame.
         rec["session"] = self.session
@@ -644,6 +715,10 @@ def main(argv=None):
                     help="Gabor scales (must match what you intend to "
                          "use in the detector for comparable stats).")
     ap.add_argument("--n-orientations", type=int, default=8)
+    ap.add_argument("--color-local", type=int, default=3,
+                    help="Side length (px) of the small local colour average "
+                         "at the click; keep small (3-5) so thin structures "
+                         "like the cable aren't averaged into the background.")
     ap.add_argument("--smooth-k", type=int, default=7)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--window", default="texture_edge_sampler")

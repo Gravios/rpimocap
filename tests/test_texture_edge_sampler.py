@@ -210,6 +210,43 @@ class TestProvenance:
             tes.write_csv(path, [self._full_record()], 9)
 
 
+class TestColor:
+
+    def _rec(self, color, cx=40, cy=40, local=3):
+        g = np.full((80, 80), 100, np.uint8)
+        return tes.extract_record(g, cx, cy, "fur", "texture", 48,
+                                  KERNELS, N_ORIENT, 3, cam=0, frame_idx=0,
+                                  color_patch=color, color_local=local)
+
+    def test_color_columns_correct(self):
+        color = np.zeros((80, 80, 3), np.uint8)
+        color[..., 0], color[..., 1], color[..., 2] = 100, 150, 200  # B,G,R
+        rec = self._rec(color)
+        assert abs(rec["col_r_win"] - 200) < 1e-3
+        assert abs(rec["col_g_win"] - 150) < 1e-3
+        assert abs(rec["col_b_win"] - 100) < 1e-3
+        assert abs(rec["col_rb_win"] - 2.0) < 1e-3            # R/B = 200/100
+        assert abs(rec["col_rmb_win"] - (100 / 300)) < 1e-3  # (R-B)/(R+B)
+        assert abs(rec["col_r_loc"] - 200) < 1e-3
+        assert abs(rec["col_rb_loc"] - 2.0) < 1e-3
+
+    def test_local_preserves_thin_structure_window_dilutes(self):
+        color = np.zeros((80, 80, 3), np.uint8)
+        color[..., 0], color[..., 2] = 80, 80        # background R=B=80 (R/B=1)
+        color[:, 39:42, 0], color[:, 39:42, 2] = 40, 200   # 3px line R/B=5
+        rec = self._rec(color)
+        assert rec["col_rb_loc"] > 3.0               # local sees the line
+        assert rec["col_rb_win"] < 1.5               # window diluted to bg
+
+    def test_no_color_patch_yields_no_color_keys(self):
+        g = np.full((80, 80), 100, np.uint8)
+        rec = tes.extract_record(g, 40, 40, "fur", "texture", 48,
+                                 KERNELS, N_ORIENT, 3, cam=0, frame_idx=0)
+        assert "col_rb_win" not in rec               # color_stats -> {} w/o patch
+        # but the CSV still carries the columns (empty) so the schema is stable
+        assert "col_rb_win" in tes._BASE_FIELDS
+
+
 class TestBlobGeometry:
 
     def _rat_cable_frame(self):
