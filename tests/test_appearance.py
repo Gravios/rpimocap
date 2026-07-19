@@ -275,3 +275,24 @@ class TestRoi:
     def test_empty_mask_gives_full_roi(self):
         roi = roi_from_mask(np.zeros((20, 20), bool))
         assert roi.all()
+
+
+# --- tools/appearance_report.py helpers (pure functions) ---
+class TestReportHelpers:
+
+    def test_auc_perfect_and_chance(self):
+        from tools.appearance_report import _auc
+        assert _auc(np.array([3., 4., 5.]), np.array([0., 1., 2.])) == 1.0
+        # identical distributions -> ~0.5
+        rng = np.random.default_rng(0)
+        a = rng.normal(0, 1, 500); b = rng.normal(0, 1, 500)
+        assert abs(_auc(a, b) - 0.5) < 0.1
+
+    def test_bright_reference_picks_the_blob(self):
+        from tools.appearance_report import _bright_reference
+        g = np.full((80, 80), 50, np.uint8)
+        g[30:50, 30:50] = 200                       # one bright square
+        floor = np.ones((80, 80), bool)
+        ref = _bright_reference(g, floor, pct=90.0)
+        assert ref[35:45, 35:45].all()              # blob found
+        assert not ref[:10, :10].any()              # dark corner excluded
