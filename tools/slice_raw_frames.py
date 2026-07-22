@@ -48,19 +48,22 @@ def _bayer_to_preview_bgr(raw: np.ndarray,
                             bayer: str = "RGGB") -> np.ndarray:
     """Convert raw Bayer frame to a viewable BGR for PNG preview
     snapshots. Does NOT modify the saved raw TIFF — only for
-    human preview."""
-    pattern = {
-        "RGGB": cv2.COLOR_BayerRG2BGR,
-        "BGGR": cv2.COLOR_BayerBG2BGR,
-        "GRBG": cv2.COLOR_BayerGR2BGR,
-        "GBRG": cv2.COLOR_BayerGB2BGR,
-    }.get(bayer.upper(), cv2.COLOR_BayerRG2BGR)
-    if raw.dtype != np.uint8:
-        if raw.dtype == np.uint16:
-            raw = (raw >> 2).astype(np.uint8)   # 10-bit Pi sensor → 8-bit
-        else:
-            raw = np.clip(raw, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(raw, pattern)
+    human preview.
+
+    Delegates to :func:`rpimocap.io.export.bayer_to_bgr` so previews use the
+    SAME demosaic as TiffCapture. Two bugs are fixed by doing so:
+
+    * the local pattern map was the INVERSE of TiffCapture's (it mapped
+      ``RGGB -> COLOR_BayerRG2BGR``), so the same ``--bayer`` name produced
+      R/B-swapped output depending on which module you went through. OpenCV
+      names its constants from the second row/second-and-third columns, so
+      RGGB genuinely needs ``COLOR_BayerBG2BGR``;
+    * ``(raw >> 2).astype(np.uint8)`` assumed 10-bit-in-uint16 and WRAPPED for
+      wider data — on these sessions (raw range ~4k-65k) it corrupted 100% of
+      pixels, giving previews that correlate 0.03 with a correct demosaic.
+    """
+    from rpimocap.io.export import bayer_to_bgr
+    return bayer_to_bgr(raw, bayer)
 
 
 def main():

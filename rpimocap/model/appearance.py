@@ -17,8 +17,12 @@ two classes. No thresholding, so no mask inconsistency.
 
 Features (the measured cues)
 ----------------------------
-* ``rb``    — R/B colour ratio. Bedding is reddish (~1.13), fur neutral/bluish
-  (~0.81): d' ~ 4, and camera-consistent (both cameras agree on the ratios).
+* ``chroma`` — bounded chromaticity ``(R-B)/(R+B)``. Fur and bedding separate
+  at |d'| ~ 4, camera-consistent (both cameras agree). The SIGN depends on the
+  Bayer convention the frames were demosaiced with, which has been inconsistent
+  across this project's own tools; the magnitude does not. Use this rather than
+  the raw ratio ``R/B``, which is unbounded and degenerates when the denominator
+  channel is dim (measured: bedding std 3282, d' -> 0.00).
 * ``coh``   — structure-tensor coherence of the median-bandpassed image, on
   **whitened** gradients (below): rat ~0.44 vs bedding ~0.11, d' ~ 3.5.
 * ``grain`` — median-bandpass energy (grain density), the original cue: d' ~ 1.2.
@@ -98,7 +102,7 @@ from .fit import _scale_P
 from .mesh_model import render_mesh_pose_silhouette
 from .rat_skeleton import RatPose
 
-FEATURES = ("rb", "coh", "grain")
+FEATURES = ("chroma", "coh", "grain")
 _EPS = 1e-6
 
 
@@ -141,17 +145,18 @@ def whitening_report(gray: np.ndarray, bedding_mask: np.ndarray) -> dict:
 @dataclass
 class FeatureMaps:
     """Per-pixel feature maps for one frame (computed ONCE per frame)."""
-    rb: np.ndarray
+    chroma: np.ndarray                # (R-B)/(R+B), bounded in [-1, 1]
     coh: np.ndarray
     grain: np.ndarray
     theta: np.ndarray = None          # whitened structure orientation (deg)
+    rb: np.ndarray = None             # R/B — diagnostic only, see image_features
 
     def get(self, name: str) -> np.ndarray:
         return getattr(self, name)
 
     @property
     def shape(self):
-        return self.rb.shape
+        return self.chroma.shape
 
 
 def image_features(bgr: np.ndarray, W: np.ndarray = None,
@@ -173,7 +178,19 @@ def image_features(bgr: np.ndarray, W: np.ndarray = None,
         B = G = R = img
     else:
         B, G, R = img[..., 0], img[..., 1], img[..., 2]
-    rb = R / (B + _EPS)
+    # Colour cue: bounded chromaticity, NOT the raw ratio R/B.
+    #
+    # R/B is unbounded and its denominator is whichever channel happens to be
+    # dim, so pixels with B ~ 0 blow the ratio up: measured on frame 2716 cam0
+    # the bedding std reached 3282 and d' collapsed to +0.00, i.e. the feature
+    # became meaningless. (R-B)/(R+B) carries the same information confined to
+    # [-1, 1] and is antisymmetric under an R/B channel swap, so it gives a
+    # STABLE |d'| = 4.16 (cam0) / 3.56 (cam1) whichever Bayer convention the
+    # frames were demosaiced with — which matters, because that convention has
+    # been inconsistent across the project's own tools (see io.export.
+    # BAYER_CODES). The sign tracks the convention; the separation does not.
+    chroma = (R - B) / (R + B + _EPS)
+    rb = R / (B + _EPS)               # kept for diagnostics/back-compat only
 
     # Grain is RMS bandpass energy normalised by local mean intensity, i.e. a
     # local CONTRAST. The raw energy cv2.boxFilter(mbp**2) is intensity-
@@ -197,7 +214,7 @@ def image_features(bgr: np.ndarray, W: np.ndarray = None,
     jxy = cv2.boxFilter(gx * gy, -1, (coh_k, coh_k))
     coh = np.sqrt((jxx - jyy) ** 2 + 4 * jxy ** 2) / (jxx + jyy + _EPS)
     theta = (np.degrees(0.5 * np.arctan2(2 * jxy, jxx - jyy)) + 90.0) % 180.0
-    return FeatureMaps(rb=rb, coh=coh, grain=grain, theta=theta)
+    return FeatureMaps(chroma=chroma, coh=coh, grain=grain, theta=theta, rb=rb)
 
 
 # --------------------------------------------------------------------------

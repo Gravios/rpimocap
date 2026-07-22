@@ -1,3 +1,4 @@
+import inspect
 """Tests for the textured appearance model (rpimocap.model.appearance)."""
 import numpy as np
 import pytest
@@ -54,9 +55,9 @@ class TestFeatures:
         rng = np.random.default_rng(1)
         bgr = rng.integers(30, 200, (120, 160, 3), dtype=np.uint8)
         f = image_features(bgr)
-        assert f.rb.shape == (120, 160) and f.coh.shape == (120, 160)
+        assert f.chroma.shape == (120, 160) and f.coh.shape == (120, 160)
         assert f.grain.shape == (120, 160)
-        for m in (f.rb, f.coh, f.grain, f.theta):
+        for m in (f.chroma, f.coh, f.grain, f.theta, f.rb):
             assert np.isfinite(m).all()
 
     def test_coherence_in_unit_range(self):
@@ -109,11 +110,11 @@ class TestAppearanceModel:
     def test_posterior_separates_classes(self):
         bgr, fg, bg = self._two_class()
         f = image_features(bgr, coh_k=16, grain_k=16)
-        m = AppearanceModel.from_masks(f, fg, bg, features=("rb",))
+        m = AppearanceModel.from_masks(f, fg, bg, features=("chroma",))
         post = m.posterior_fg(f)
         assert np.median(post[fg]) > 0.8
         assert np.median(post[bg]) < 0.2
-        assert abs(m.dprime["rb"]) > 2.0
+        assert abs(m.dprime["chroma"]) > 2.0
 
     def test_priors_and_hists_normalised(self):
         bgr, fg, bg = self._two_class()
@@ -296,3 +297,85 @@ class TestReportHelpers:
         ref = _bright_reference(g, floor, pct=90.0)
         assert ref[35:45, 35:45].all()              # blob found
         assert not ref[:10, :10].any()              # dark corner excluded
+
+
+class TestChromaRobustness:
+    """chroma must carry the colour cue without the raw ratio's failure mode."""
+
+    def _frame(self, seed=7):
+        rng = np.random.default_rng(seed)
+        bgr = np.zeros((120, 120, 3), np.uint8)
+        bgr[..., 0] = rng.normal(90, 6, (120, 120))     # B
+        bgr[..., 1] = rng.normal(100, 6, (120, 120))    # G
+        bgr[..., 2] = rng.normal(130, 6, (120, 120))    # R
+        fg = np.zeros((120, 120), bool); fg[40:80, 40:80] = True
+        bgr[..., 2][fg] = rng.normal(70, 6, fg.sum())
+        return bgr, fg
+
+    def test_chroma_is_bounded(self):
+        bgr, _ = self._frame()
+        f = image_features(bgr, coh_k=16, grain_k=16)
+        assert f.chroma.min() >= -1.0 - 1e-6
+        assert f.chroma.max() <= 1.0 + 1e-6
+
+    def test_chroma_antisymmetric_under_channel_swap(self):
+        """Swapping R and B (i.e. the wrong Bayer convention) must flip the
+        SIGN of chroma and leave |d'| intact — the property that makes the
+        model immune to the demosaic convention."""
+        bgr, fg = self._frame()
+        swapped = bgr[..., ::-1].copy()          # B <-> R
+        f0 = image_features(bgr, coh_k=16, grain_k=16)
+        f1 = image_features(swapped, coh_k=16, grain_k=16)
+        assert np.allclose(f0.chroma, -f1.chroma, atol=1e-5)
+        bg = ~fg
+        d0 = AppearanceModel.from_masks(f0, fg, bg,
+                                        features=("chroma",)).dprime["chroma"]
+        d1 = AppearanceModel.from_masks(f1, fg, bg,
+                                        features=("chroma",)).dprime["chroma"]
+        assert d0 == pytest.approx(-d1, rel=1e-3)
+
+    def test_chroma_survives_a_dim_denominator(self):
+        """With B near zero the raw ratio R/B explodes; chroma stays finite."""
+        rng = np.random.default_rng(3)
+        bgr = np.zeros((80, 80, 3), np.uint8)
+        bgr[..., 0] = rng.integers(0, 3, (80, 80))       # B ~ 0  (dim channel)
+        bgr[..., 1] = 100
+        bgr[..., 2] = rng.integers(90, 140, (80, 80))    # R
+        f = image_features(bgr, coh_k=16, grain_k=16)
+        assert np.isfinite(f.chroma).all()
+        assert f.chroma.std() < 0.5              # well-behaved
+        assert f.rb.std() > f.chroma.std() * 10  # the ratio is not
+
+
+class TestBayerConvention:
+    """The demosaic map must be shared, and must follow OpenCV's naming."""
+
+    def test_single_source_of_truth(self):
+        from rpimocap.io.export import BAYER_CODES, TiffCapture
+        import tools.slice_raw_frames as srf
+        assert TiffCapture._BAYER_CODES is BAYER_CODES
+        # slice_raw_frames must delegate, not keep its own inverse map
+        assert "COLOR_BayerRG2BGR" not in inspect.getsource(
+            srf._bayer_to_preview_bgr).replace("COLOR_BayerRG2BGR``", "")
+
+    def test_opencv_naming_is_opposite_corner(self):
+        """RGGB sensors need COLOR_BayerBG2BGR (OpenCV names from the second
+        row, second/third columns). Regression guard: the inverse mapping
+        silently swaps R and B."""
+        from rpimocap.io.export import BAYER_CODES
+        assert BAYER_CODES["RGGB"] == "COLOR_BayerBG2BGR"
+        assert BAYER_CODES["BGGR"] == "COLOR_BayerRG2BGR"
+
+    def test_preview_demosaic_does_not_wrap_on_wide_data(self):
+        """`raw >> 2` wrapped 100% of pixels on 12-bit-in-uint16 data."""
+        import tools.slice_raw_frames as srf
+        rng = np.random.default_rng(0)
+        raw = rng.integers(4032, 65472, (64, 64)).astype(np.uint16)
+        out = srf._bayer_to_preview_bgr(raw, "RGGB")
+        assert out.dtype == np.uint8 and out.shape == (64, 64, 3)
+        # a correct normalisation preserves rank order of brightness
+        lin = srf._bayer_to_preview_bgr(
+            np.linspace(4032, 65472, 64 * 64).reshape(64, 64).astype(np.uint16),
+            "RGGB")
+        g = lin[:, :, 1].astype(float).ravel()
+        assert g[-1] > g[0]                      # monotone, i.e. no wraparound

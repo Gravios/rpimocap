@@ -271,8 +271,14 @@ def main(argv=None):
               f"expect ~90 vertical)")
         print(f"  seed      : best-yaw render {int(seed_mask.sum())}px  ->  "
               f"fg {int(fg.sum())}px, bg {int(bg.sum())}px")
+        a = feats.rb[ref]; b = feats.rb[bed]
+        d_rb = (np.median(a) - np.median(b)) / (0.5 * (a.std() + b.std()) + 1e-9)
         print(f"  d' vs independent bright-rat: " +
-              "  ".join(f"{k}={v:+.2f}" for k, v in dprime.items()))
+              "  ".join(f"{k}={v:+.2f}" for k, v in dprime.items()) +
+              f"   [rb={d_rb:+.2f} diagnostic]")
+        if abs(d_rb) < 0.5 <= abs(dprime.get("chroma", 0.0)):
+            print(f"    note: raw R/B degenerated (unbounded ratio, dim "
+                  f"denominator); chroma is the reliable colour cue.")
         print(f"  posterior : AUC {auc:.3f}   median on rat "
               f"{np.median(post[ref]):.3f}  on bedding {np.median(post[bed]):.3f}")
 

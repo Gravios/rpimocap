@@ -380,6 +380,52 @@ def write_stats_csv(
 #  TIFF stack reader — streaming, memory-friendly for 50 GB+ files            #
 # =========================================================================== #
 
+# Sensor Bayer pattern -> OpenCV conversion code. SINGLE SOURCE OF TRUTH:
+# every demosaic in the project must go through this map.
+#
+# OpenCV's Bayer constants are named for the components in the SECOND row,
+# second and third columns — not the top-left 2x2 — so the code letters look
+# "opposite" to the sensor pattern. For a sensor laid out
+#
+#     R G R G
+#     G B G B      <- second row is G B G B; cols 1,2 are B,G
+#     R G R G
+#
+# the correct call is COLOR_BayerBG2BGR. Getting this backwards silently swaps
+# the R and B channels: luminance and every green-channel feature are unchanged
+# (so the detector never notices), but any colour ratio inverts.
+BAYER_CODES = {
+    "RGGB": "COLOR_BayerBG2BGR",
+    "BGGR": "COLOR_BayerRG2BGR",
+    "GRBG": "COLOR_BayerGB2BGR",
+    "GBRG": "COLOR_BayerGR2BGR",
+}
+
+
+def bayer_to_bgr(raw, bayer_pattern: str = "RGGB", lo: float = None,
+                 hi: float = None):
+    """Demosaic a raw Bayer frame to BGR uint8 using :data:`BAYER_CODES`.
+
+    Non-uint8 input is percentile-normalised (0.1 / 99.9 by default) rather
+    than bit-shifted. A fixed shift such as ``raw >> 2`` assumes 10-bit data in
+    a uint16 container and silently WRAPS for anything wider — on 12-bit-in-16
+    data (range ~4k-65k) it corrupts every pixel.
+    """
+    import cv2
+    import numpy as _np
+    raw = _np.asarray(raw)
+    if raw.dtype != _np.uint8:
+        if lo is None:
+            lo = float(_np.percentile(raw, 0.1))
+        if hi is None:
+            hi = float(_np.percentile(raw, 99.9))
+        raw = _np.clip((raw.astype(_np.float32) - lo) / max(hi - lo, 1.0)
+                       * 255.0, 0, 255).astype(_np.uint8)
+    code = getattr(cv2, BAYER_CODES.get(bayer_pattern.upper(),
+                                        "COLOR_BayerBG2BGR"))
+    return cv2.cvtColor(raw, code)
+
+
 class TiffCapture:
     """Stream a multi-frame TIFF stack one frame at a time (cv2.VideoCapture-compatible).
 
@@ -458,13 +504,9 @@ class TiffCapture:
                                            len(self._pages)))]
         return pages[0] if len(pages) == 1 else np.stack(pages, axis=-1)
 
-    # Bayer pattern → OpenCV conversion code
-    _BAYER_CODES = {
-        "RGGB": "COLOR_BayerBG2BGR",   # OpenCV uses opposite-corner naming
-        "BGGR": "COLOR_BayerRG2BGR",
-        "GRBG": "COLOR_BayerGB2BGR",
-        "GBRG": "COLOR_BayerGR2BGR",
-    }
+    # Bayer pattern → OpenCV conversion code. Module-level BAYER_CODES is the
+    # single source of truth; this alias keeps the historical attribute name.
+    _BAYER_CODES = BAYER_CODES
 
     def _to_bgr(self, raw: np.ndarray) -> np.ndarray:
         """Convert a raw frame array to BGR uint8, demosaicing if single-channel."""
