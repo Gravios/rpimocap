@@ -133,8 +133,35 @@ def skin_mesh(mesh: RatMesh, pose: RatPose) -> np.ndarray:
 
 
 def render_mesh_silhouette(verts_posed: np.ndarray, faces: np.ndarray,
-                           P: np.ndarray, image_shape=(1080, 2028)) -> np.ndarray:
-    """Project posed vertices and rasterize all triangles → silhouette mask."""
+                           P: np.ndarray, image_shape=(1080, 2028),
+                           close_pinholes: bool = True) -> np.ndarray:
+    """Project posed vertices and rasterize all triangles → silhouette mask.
+
+    ``close_pinholes`` repairs sub-pixel rasterisation speckle. The mesh is
+    finely tessellated relative to its projected footprint (median projected
+    triangle area ~2.5 px^2 for a body covering ~20k px), so **18% of triangles
+    collapse to zero area when their vertices are rounded to integer pixel
+    coordinates** and fill nothing. That punches ~1200 pinholes totalling ~8% of
+    the body area.
+
+    The consequences were severe and not obvious:
+
+    * eroding such a mask is catastrophic — every pinhole seeds its own erosion,
+      so a 9x9 erode left 378 px of a 20584 px body (1.6%) instead of ~19000
+      (a 50x difference), which is what starved the appearance model's
+      foreground sample;
+    * silhouette IoU is depressed, because the holes remove intersection and
+      add union;
+    * motion-blur coverage scores ~8% of the body as background.
+
+    Supersampling is not the fix: 2x/3x only reduces the holes (1866 -> 1140 ->
+    965 px) at 4-9x the rasterisation cost, because sub-pixel triangles remain
+    sub-pixel. A 3x3 morphological close removes them completely. It is safe
+    because every pinhole is speckle (largest 8 px) while genuine background
+    gaps -- between splayed limbs, say -- are orders of magnitude larger, so
+    the close cannot bridge real structure. It runs on the silhouette's
+    bounding box only, so it costs ~0.1 ms rather than ~3 ms.
+    """
     px = project_pose(verts_posed, P)
     H, W = int(image_shape[0]), int(image_shape[1])
     mask = np.zeros((H, W), np.uint8)
@@ -143,6 +170,15 @@ def render_mesh_silhouette(verts_posed: np.ndarray, faces: np.ndarray,
         return mask
     tris = np.round(px[faces[ok]]).astype(np.int32)   # (F', 3, 2), vectorized
     cv2.fillPoly(mask, tris, 255)
+    if close_pinholes:
+        x0 = max(0, int(tris[..., 0].min()) - 2)
+        x1 = min(W, int(tris[..., 0].max()) + 3)
+        y0 = max(0, int(tris[..., 1].min()) - 2)
+        y1 = min(H, int(tris[..., 1].max()) + 3)
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = cv2.morphologyEx(
+                mask[y0:y1, x0:x1], cv2.MORPH_CLOSE,
+                np.ones((3, 3), np.uint8))
     return mask
 
 

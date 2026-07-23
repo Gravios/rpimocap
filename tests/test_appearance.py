@@ -1,5 +1,7 @@
-import inspect
 """Tests for the textured appearance model (rpimocap.model.appearance)."""
+import inspect
+
+import cv2
 import numpy as np
 import pytest
 
@@ -379,3 +381,58 @@ class TestBayerConvention:
             "RGGB")
         g = lin[:, :, 1].astype(float).ravel()
         assert g[-1] > g[0]                      # monotone, i.e. no wraparound
+
+
+class TestRenderPinholes:
+    """The renderer must not leave sub-pixel rasterisation speckle.
+
+    18% of this mesh's projected triangles round to zero area and fill nothing,
+    punching ~1200 pinholes over ~8% of the body. Eroding such a mask is
+    catastrophic (a 9x9 erode left 1.6% of the body), which starved the
+    appearance model's foreground sample.
+    """
+
+    def _render(self, close):
+        from rpimocap.model.mesh_model import (build_rat_mesh,
+                                               render_mesh_silhouette,
+                                               skin_mesh)
+        mesh = build_rat_mesh()
+        pose = RatPose(root_pos=np.array([0.0, 150.0, 50.0]),
+                       root_rot=np.array([0.0, 0.0, 0.0]), scale=1.0)
+        P = np.array([[1400.0, 0.0, 1000.0, 0.0],
+                      [0.0, 1400.0, 540.0, 0.0],
+                      [0.0, 0.0, 0.0, 700.0]])
+        return render_mesh_silhouette(skin_mesh(mesh, pose), mesh.faces, P,
+                                      (1080, 2028), close_pinholes=close) > 0
+
+    @staticmethod
+    def _interior_holes(m):
+        cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        filled = np.zeros(m.shape, np.uint8)
+        cv2.drawContours(filled, cnts, -1, 1, -1)
+        return (filled.astype(bool) & ~m).sum()
+
+    def test_default_render_has_no_interior_pinholes(self):
+        assert self._interior_holes(self._render(True)) == 0
+
+    def test_pinholes_exist_without_the_repair(self):
+        """Regression guard: if the rasteriser is ever changed so this passes
+        trivially, the close can be revisited."""
+        assert self._interior_holes(self._render(False)) > 0
+
+    def test_erosion_survives_the_repair(self):
+        """The property that actually matters for bootstrap_masks: a 9x9 erode
+        must retain most of the body, not be shredded by speckle."""
+        m = self._render(True)
+        eroded = cv2.erode(m.astype(np.uint8), np.ones((9, 9), np.uint8)).sum()
+        assert eroded > 0.7 * m.sum()
+
+    def test_repair_does_not_bridge_real_gaps(self):
+        """A 3x3 close must not fill genuine background between body parts."""
+        from rpimocap.model.mesh_model import render_mesh_silhouette
+        m = np.zeros((100, 200), np.uint8)
+        m[30:70, 20:60] = 255          # two blobs separated by a 40px gap
+        m[30:70, 100:140] = 255
+        closed = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        assert closed[30:70, 60:100].sum() == 0        # gap preserved
