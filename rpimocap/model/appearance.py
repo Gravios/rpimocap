@@ -68,27 +68,50 @@ Validated (frame 2716, real frames, both cameras)
   ``grain`` -4.5/-3.9, ``coh`` +1.9/+1.4;
 * zero-motion coverage reduces exactly to the sharp binary silhouette.
 
-OPEN: bootstrapping the foreground
-----------------------------------
-The energy is only as good as the fg/bg samples it is fitted from, and on this
-data there is **no reliable silhouette ground truth to bootstrap from**:
+Status: what is established, and what is not
+--------------------------------------------
+ESTABLISHED (frame 2716 and a 10-frame dwell sequence, both cameras):
 
-* the detector's mask is not a segmentation (see :func:`bootstrap_masks`);
-* the silhouette fit *inherits* that mask's errors — fitted to cam0's 73k px
-  mask it returns scale 1.23 and a 28.7k px render hanging off the floor, so it
-  cannot seed the appearance model either;
-* a brightness threshold under-segments (top-decile gives 5.7k px, but the
-  nominal-scale render containing 76-91% of it is 20.2k px), so the truth lies
-  somewhere between and neither bound can be trusted as a target.
+* the per-pixel classification works — posterior AUC 0.98-0.99, median
+  posterior 0.99+ on the animal and ~0.01 on bedding, symmetric across cameras;
+* the bootstrap is no longer starved (fg ~18k px per camera) once the renderer's
+  pinholes are repaired (see mesh_model.render_mesh_silhouette);
+* the yaw optimum is temporally stable — over 10 consecutive dwell frames the
+  appearance minimum moved by <=10 deg per camera, where the silhouette optimum
+  jumped over a ~300 deg spread.
 
-Only the triangulated *point* is reliable (2.6 px reprojection). A nominal-scale
-render there recovers 76-91% of the bright rat but at IoU 0.20-0.26, and the
-union over yaws contains 100% of it at 12% precision. The likely resolution is
-unsupervised: the localisation blob provably contains the animal, and ``rb`` is
-strongly bimodal within it (d' ~ 4), so a two-component fit on colour inside the
-blob should separate fur from bedding with no threshold and no labels. That is
-the next step; until it lands, the energy here is validated component-wise but
-not yet driving a fit.
+NOT ESTABLISHED — and an earlier claim here was wrong:
+
+* the appearance energy does NOT resolve head-vs-tail. Rotating the body 180 deg
+  costs only **1.3% of the energy range** (median over 10 frames, both cameras),
+  i.e. the objective is essentially bimodal and the flip is free. Apparent
+  cross-camera "agreement" on full yaw (~20 deg vs the silhouette's ~170 deg) is
+  mostly the two cameras landing on the same side of that degeneracy, not
+  evidence about orientation;
+* on the body AXIS alone (mod 180, which is the part that is not degenerate),
+  the two objectives are comparable: median cross-camera disagreement 10.0 deg
+  for BOTH. The appearance objective is more consistent — no outliers, mean
+  10.0 deg vs 27.5 deg, since the silhouette occasionally misses by 60-85 deg —
+  but it is not sharper on the axis.
+
+Why, and what it implies
+------------------------
+This model is *spatially homogeneous*: one foreground histogram for the entire
+body. Nothing in it varies over the body surface, so a head-first and a
+tail-first pose predict the same statistics and the flip cannot be penalised.
+It is a region model that happens to use texture features, not a texture MAP.
+
+Breaking the degeneracy needs per-region (or per-vertex) appearance — head,
+trunk and rump carrying their own statistics, so the render predicts *where* on
+the image each looks the way it does. That is the natural next step, and it is
+also what makes the anisotropic fur-orientation cue usable, since surface
+tangent is only meaningful once appearance is attached to surface location.
+
+Still open: there is no reliable silhouette ground truth on this data. The
+detector's mask is not a segmentation (see :func:`bootstrap_masks`), the
+brightness threshold under-segments (5.7k px where the nominal render is ~21k),
+and the seed render remains over-inclusive. The bootstrap works well enough to
+calibrate a posterior, but its foreground is not verified to be the animal.
 """
 from __future__ import annotations
 

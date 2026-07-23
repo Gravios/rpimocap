@@ -182,6 +182,12 @@ def main(argv=None):
                     help="capture rate for motion blur (30 or 50); required "
                          "with --next-frame")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--yaw-sweep", action="store_true",
+                    help="sweep yaw 0-360 and compare silhouette-IoU against "
+                         "the appearance energy, reporting whether the two "
+                         "cameras AGREE (the architecture test)")
+    ap.add_argument("--yaw-step", type=float, default=5.0,
+                    help="yaw sweep step in degrees (default 5)")
     args = ap.parse_args(argv)
 
     P = list(_load_calib(args.calib))
@@ -215,20 +221,33 @@ def main(argv=None):
     seed_pos = np.array([R.point[0], R.point[1], max(float(R.point[2]), 45.0)])
 
     dets = [R.det0.mask, R.det1.mask]
+
+    # Seed yaw is chosen ONCE, jointly, and rendered into both views.
+    # Picking it per-camera (as an earlier revision did) lets each camera
+    # bootstrap its appearance model from a DIFFERENT 3D hypothesis, which
+    # reintroduces the very cross-camera inconsistency this model exists to
+    # remove — measured on frame 2716 it inflated the cameras' yaw
+    # disagreement from 20deg to 50deg.
+    refs = [_bright_reference(Gs[c], floors[c] > 0, args.bright_pct)
+            for c in (0, 1)]
+    best = None
+    for yaw in np.radians(np.arange(0, 360, 30)):
+        pose = RatPose(root_pos=seed_pos, root_rot=np.array([0, 0, yaw]),
+                       scale=1.0)
+        score = 0.0
+        rends = []
+        for c in (0, 1):
+            r = render_mesh_pose_silhouette(mesh, pose, P[c], shp) > 0
+            rends.append(r)
+            score += (r & refs[c]).sum() / max((r | refs[c]).sum(), 1)
+        if best is None or score > best[0]:
+            best = (score, yaw, rends)
+    seed_masks = best[2]
+
     posts, rois, models = [], [], []
     for c in (0, 1):
         G, floor = Gs[c], floors[c] > 0
-        # best-yaw nominal render at the point = the localisation seed
-        best = None
-        for yaw in np.radians(np.arange(0, 360, 30)):
-            r = render_mesh_pose_silhouette(
-                mesh, RatPose(root_pos=seed_pos, root_rot=np.array([0, 0, yaw]),
-                              scale=1.0), P[c], shp) > 0
-            ref = _bright_reference(G, floor, args.bright_pct)
-            iou = (r & ref).sum() / max((r | ref).sum(), 1)
-            if best is None or iou > best[0]:
-                best = (iou, yaw, r)
-        seed_mask = best[2]
+        seed_mask = seed_masks[c]
         roi = roi_from_mask(seed_mask, margin=64)
         fg, bg = bootstrap_masks(floor, seed_mask, coh_k=args.coh_k, roi=roi)
         # Whitening is a CAMERA property (the sensor's gradient anisotropy), so
@@ -325,6 +344,69 @@ def main(argv=None):
                 pct = 100.0 * partial / max(tot, 1)
                 print(f"    {lbl:14s}: coverage {int(cov.sum()):7d}  "
                       f"partial {partial:6d}px ({pct:4.1f}% of footprint)")
+    # --- optional yaw sweep: the cross-camera consistency test ---
+    if args.yaw_sweep:
+        from rpimocap.model.body_model import silhouette_iou
+        print("=" * 70)
+        yaws = np.arange(0.0, 360.0, float(args.yaw_step))
+        iou = {0: [], 1: []}
+        eng = {0: [], 1: []}
+        for y in yaws:
+            p = RatPose(root_pos=seed_pos,
+                        root_rot=np.array([0.0, 0.0, np.radians(y)]),
+                        scale=1.0)
+            for c in (0, 1):
+                sil = render_mesh_pose_silhouette(mesh, p, P[c], shp)
+                iou[c].append(silhouette_iou(sil, dets[c]))
+                eng[c].append(appearance_energy((sil > 0).astype(np.float32),
+                                                posts[c], rois[c]))
+
+        def _ang(a, b):
+            return abs((a - b + 180.0) % 360.0 - 180.0)
+
+        def _axis(a, b):
+            """Disagreement modulo 180 — the body AXIS, ignoring head/tail."""
+            dd = abs((a - b) % 180.0)
+            return min(dd, 180.0 - dd)
+
+        def _flip_penalty(E, i):
+            """Energy cost of rotating 180deg, as a fraction of the range."""
+            E = np.asarray(E)
+            j = int(np.argmin(np.abs(((yaws - (yaws[i] + 180.0)) + 180.0)
+                                     % 360.0 - 180.0)))
+            return float((E[j] - E[i]) / max(np.ptp(E), 1e-9))
+
+        y_iou = [float(yaws[int(np.argmax(iou[c]))]) for c in (0, 1)]
+        y_app = [float(yaws[int(np.argmin(eng[c]))]) for c in (0, 1)]
+        print(f"yaw sweep ({len(yaws)} poses, {args.yaw_step:.0f}deg step)")
+        flips = []
+        for c in (0, 1):
+            a = np.array(iou[c]); b = np.array(eng[c])
+            fp = _flip_penalty(b, int(np.argmin(b)))
+            flips.append(fp)
+            print(f"  cam{c}: silhouette-IoU peak @{y_iou[c]:5.0f}deg "
+                  f"(range {a.min():.3f}-{a.max():.3f})")
+            print(f"        appearance-E   min  @{y_app[c]:5.0f}deg "
+                  f"(range {b.min():.3f}-{b.max():.3f})   "
+                  f"180deg-flip penalty {fp * 100:.1f}% of range")
+        print(f"  CROSS-CAMERA AGREEMENT:")
+        print(f"    full yaw (chance 90deg):  IoU {_ang(*y_iou):5.0f}deg   "
+              f"appearance {_ang(*y_app):5.0f}deg")
+        print(f"    body AXIS, mod 180 (chance 45deg):  IoU "
+              f"{_axis(*y_iou):5.0f}deg   appearance {_axis(*y_app):5.0f}deg")
+        if max(flips) < 0.05:
+            print(f"    NOTE: the flip penalty is near zero, so head-vs-tail is "
+                  f"DEGENERATE for both\n          objectives. Only the AXIS "
+                  f"number is meaningful; the full-yaw agreement is\n"
+                  f"          which side each camera happened to land on, not "
+                  f"evidence of orientation.\n          Resolving head/tail "
+                  f"needs a spatially-varying (per-region) appearance\n"
+                  f"          model — the current one is homogeneous over the "
+                  f"whole body.")
+        comb_i = np.array(iou[0]) + np.array(iou[1])
+        comb_a = np.array(eng[0]) + np.array(eng[1])
+        print(f"    combined: IoU peak @{yaws[int(np.argmax(comb_i))]:.0f}deg   "
+              f"appearance min @{yaws[int(np.argmin(comb_a))]:.0f}deg")
     print("=" * 70)
     return 0
 
