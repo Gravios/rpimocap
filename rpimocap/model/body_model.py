@@ -56,6 +56,14 @@ DEFAULT_RADII = {
     ("HipR", "KneeR"):       (8.0, 6.0),
     ("KneeR", "AnkleR"):     (6.0, 4.0),
     ("AnkleR", "FootR"):     (4.0, 3.0),
+    # tail — tapers from a thick base to a thin tip. Only used when the mesh
+    # is built with the tail (see build_rat_mesh(with_tail=True)); harmless
+    # otherwise, since radii are looked up per bone.
+    ("TailBase", "Tail1"):   (6.0, 5.0),
+    ("Tail1", "Tail2"):      (5.0, 4.0),
+    ("Tail2", "Tail3"):      (4.0, 3.2),
+    ("Tail3", "Tail4"):      (3.2, 2.4),
+    ("Tail4", "Tail5"):      (2.4, 1.5),
 }
 
 

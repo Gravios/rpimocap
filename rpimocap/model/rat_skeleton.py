@@ -105,6 +105,45 @@ RAT23_BONES = [(p, c) for c, p in RAT23_PARENT.items() if p is not None]
 
 
 # ────────────────────────────────────────────────────────────────────
+#  Tail extension (rendering only — NOT part of the rat23 keypoint set)
+# ────────────────────────────────────────────────────────────────────
+#
+# The rat23 keypoint set stops at TailBase, so the body model is
+# front/back near-symmetric: rotating a pose 180 deg produces almost the
+# same silhouette and almost the same region statistics. Measured on the
+# appearance energy, a 180 deg flip costs only ~1.3% of the energy range,
+# i.e. head-vs-tail is effectively free and neither the silhouette nor the
+# appearance objective can orient the animal.
+#
+# A real rat's tail is about as long as its body and attaches at exactly one
+# end, which makes it the single strongest orientation cue in the image. It
+# is worth adding purely as GEOMETRY: at ~1500 projected px it moves the
+# appearance energy roughly 5x more than the entire flip penalty.
+#
+# Deliberately kept OUT of RAT23_JOINTS/RAT23_INDEX. Those define the
+# keypoint-regression contract (synthetic_dataset emits (23, n, n, n)
+# heatmap volumes), and tail segments are neither reliably labelled by
+# markerless detectors nor wanted as regression targets. The tail exists so
+# the RENDER can predict the tail pixels; adding it to the keypoint set
+# would invalidate the dataset format for no benefit.
+TAIL_JOINTS = ["Tail1", "Tail2", "Tail3", "Tail4", "Tail5"]
+
+TAIL_PARENT = {
+    "Tail1": "TailBase",
+    "Tail2": "Tail1",
+    "Tail3": "Tail2",
+    "Tail4": "Tail3",
+    "Tail5": "Tail4",
+}
+
+#: Full joint set including the tail (rendering / mesh use only).
+RAT_JOINTS_EXT = RAT23_JOINTS + TAIL_JOINTS
+RAT_PARENT_EXT = {**RAT23_PARENT, **TAIL_PARENT}
+TAIL_BONES = [(p, c) for c, p in TAIL_PARENT.items()]
+RAT_BONES_EXT = RAT23_BONES + TAIL_BONES
+
+
+# ────────────────────────────────────────────────────────────────────
 #  Canonical geometry: rest-pose bone vectors (mm) for a reference rat
 # ────────────────────────────────────────────────────────────────────
 #
@@ -147,9 +186,35 @@ _REST_BONES_MM = {
 }
 
 #: Canonical bone lengths (mm), derived from the rest vectors.
+#: rat23 bones only — the tail is excluded so that bone_lengths() and
+#: check_bone_lengths() keep operating on the 23-keypoint contract.
 CANONICAL_BONE_LENGTHS = {
     bone: float(np.linalg.norm(v)) for bone, v in _REST_BONES_MM.items()
 }
+
+
+# Tail rest geometry. Sized RELATIVE to this model's own body rather than to
+# absolute anatomy: the rest chain gives nose-to-TailBase = 38+35+38+30 =
+# 141 mm at scale 1.0, and a rat's tail is approximately equal to its body
+# length, so the tail is 5 x 28 = 140 mm. (Note the module docstring above
+# claims a ~230 mm body; the rest vectors do not deliver that. Sizing the
+# tail proportionally keeps the model internally consistent regardless of
+# how that discrepancy is eventually resolved, since `scale` multiplies
+# everything uniformly.)
+#
+# At rest the tail trails straight back (-x) and drops very slightly; real
+# resting posture lays it along the ground, which `tail_arc` produces.
+_TAIL_SEG_MM = 28.0
+_TAIL_REST_BONES_MM = {
+    ("TailBase", "Tail1"): (-_TAIL_SEG_MM, 0.0, -1.5),
+    ("Tail1", "Tail2"):    (-_TAIL_SEG_MM, 0.0, -1.5),
+    ("Tail2", "Tail3"):    (-_TAIL_SEG_MM, 0.0, -1.5),
+    ("Tail3", "Tail4"):    (-_TAIL_SEG_MM, 0.0, -1.5),
+    ("Tail4", "Tail5"):    (-_TAIL_SEG_MM, 0.0, -1.5),
+}
+
+#: Rest bone vectors including the tail (rendering / mesh use).
+_REST_BONES_EXT_MM = {**_REST_BONES_MM, **_TAIL_REST_BONES_MM}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -209,6 +274,18 @@ JOINT_LIMITS = {
     for child, ranges in _LIMITS_DEG.items()
 }
 
+# Per-segment tail limits. Individually modest, but they compound: 5 segments
+# at +/-40 deg of yaw reach +/-200 deg cumulative, which covers curling the
+# tail fully alongside the body. Roll is near-zero (a tail has no meaningful
+# axial articulation for our purposes).
+_TAIL_LIMITS_DEG = ((-10.0, 10.0), (-35.0, 35.0), (-40.0, 40.0))
+TAIL_LIMITS = {
+    name: tuple(_deg(lo, hi) for (lo, hi) in _TAIL_LIMITS_DEG)
+    for name in TAIL_JOINTS
+}
+#: Joint limits including the tail (rendering / fitting with the tail free).
+JOINT_LIMITS_EXT = {**JOINT_LIMITS, **TAIL_LIMITS}
+
 
 # ────────────────────────────────────────────────────────────────────
 #  Rotation helpers
@@ -259,9 +336,9 @@ class RatPose:
 
 
 def _bone_vectors(scale: float) -> dict:
-    """Rest bone vectors scaled by body size."""
+    """Rest bone vectors scaled by body size (includes the tail)."""
     return {b: np.asarray(v, np.float64) * scale
-            for b, v in _REST_BONES_MM.items()}
+            for b, v in _REST_BONES_EXT_MM.items()}
 
 
 def forward_kinematics_transforms(pose: RatPose):
@@ -272,13 +349,18 @@ def forward_kinematics_transforms(pose: RatPose):
     joint name: ``world_rot[joint]`` (3x3) is the frame the joint's CHILD
     bones are expressed in, and ``world_pos[joint]`` (3,) is the joint's
     world position (mm). Used both for keypoints and for mesh skinning.
+
+    The returned dicts include the five tail joints. That is additive and
+    safe — every consumer looks joints up BY NAME, and
+    :func:`forward_kinematics` filters to the rat23 set — but it means the
+    mesh can skin tail bones without a second traversal.
     """
     bones = _bone_vectors(pose.scale)
     R_root = euler_to_R(*pose.root_rot)
     world_pos = {"SpineM": np.asarray(pose.root_pos, np.float64)}
     world_rot = {"SpineM": R_root}
     for child in _topo_order():
-        parent = RAT23_PARENT[child]
+        parent = RAT_PARENT_EXT[child]
         if parent is None:
             continue
         Rp = world_rot[parent]
@@ -306,21 +388,63 @@ def forward_kinematics(pose: RatPose) -> np.ndarray:
 
 
 def _topo_order():
-    """Joint names ordered so every parent precedes its children."""
+    """Joint names ordered so every parent precedes its children.
+
+    Covers the tail chain as well as rat23; see
+    :func:`forward_kinematics_transforms`.
+    """
     order = []
     seen = set()
 
     def visit(n):
-        p = RAT23_PARENT[n]
+        p = RAT_PARENT_EXT[n]
         if p is not None and p not in seen:
             visit(p)
         if n not in seen:
             seen.add(n)
             order.append(n)
 
-    for n in RAT23_JOINTS:
+    for n in RAT_JOINTS_EXT:
         visit(n)
     return order
+
+
+def forward_kinematics_tail(pose: RatPose) -> np.ndarray:
+    """(5, 3) world positions of the tail joints, in ``TAIL_JOINTS`` order."""
+    _, world_pos = forward_kinematics_transforms(pose)
+    return np.stack([world_pos[n] for n in TAIL_JOINTS])
+
+
+def tail_arc(sweep: float = 0.0, lift: float = 0.0, taper: float = 1.0,
+             n: int = None) -> dict:
+    """Joint angles for a smooth tail arc from two shape parameters.
+
+    A rat's tail behaves largely as a passive ball-and-chain: it trails the
+    base, and its segment angles are strongly correlated rather than
+    independent. Fitting 5 segments x 3 Euler angles = 15 free parameters
+    would therefore be badly over-parameterised for the ~1500 px of image
+    evidence the tail provides. This maps the chain onto 2-3 numbers:
+
+    sweep : total horizontal deflection (rad) accumulated tip-to-base, i.e.
+            the tail swinging left/right
+    lift  : total vertical deflection (rad); negative drops the tail toward
+            the floor, which is the common resting posture
+    taper : how curvature distributes along the chain. 1.0 spreads it evenly
+            (a circular arc); >1 concentrates it toward the tip (a whip,
+            which is what inertial lag produces during fast turns); <1
+            concentrates it at the base.
+
+    Use this as the default parameterisation and only free the individual
+    joints if a fit demonstrably needs them.
+    """
+    names = TAIL_JOINTS if n is None else TAIL_JOINTS[:int(n)]
+    k = len(names)
+    if k == 0:
+        return {}
+    w = np.array([(i + 1) ** float(taper) for i in range(k)], dtype=np.float64)
+    w /= w.sum()
+    return {nm: (0.0, float(lift) * float(wi), float(sweep) * float(wi))
+            for nm, wi in zip(names, w)}
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -53,10 +53,14 @@ class TestSkeletonDefinition:
 
     def test_tree_no_cycles_all_reachable(self):
         order = rs._topo_order()
-        assert len(order) == 23
-        assert set(order) == set(rs.RAT23_JOINTS)
+        # _topo_order covers the EXTENDED skeleton (rat23 + the 5 tail
+        # segments); the rat23 keypoint contract is asserted separately in
+        # test_23_joints and by forward_kinematics returning (23, 3).
+        assert len(order) == len(rs.RAT_JOINTS_EXT)
+        assert set(order) == set(rs.RAT_JOINTS_EXT)
+        assert set(rs.RAT23_JOINTS) <= set(order)
         pos = {n: i for i, n in enumerate(order)}
-        for c, p in rs.RAT23_PARENT.items():
+        for c, p in rs.RAT_PARENT_EXT.items():
             if p is not None:
                 assert pos[p] < pos[c]              # parent first
 
@@ -238,3 +242,75 @@ class TestEulerRotation:
         R = rs.euler_to_R(0.3, -0.5, 1.1)
         assert np.allclose(R @ R.T, np.eye(3), atol=1e-9)
         assert np.isclose(np.linalg.det(R), 1.0)
+
+
+class TestTailExtension:
+    """The tail exists to break the head/tail degeneracy in the RENDER.
+
+    Without it a 180 deg flip costs ~1.3% of the appearance energy range
+    (i.e. nothing); with it, ~37%.
+    """
+
+    def test_keypoint_contract_unchanged(self):
+        """rat23 is a trained-model interface (synthetic_dataset emits
+        (23,n,n,n) volumes) — the tail must NOT enter it."""
+        assert len(rs.RAT23_JOINTS) == 23
+        assert not (set(rs.TAIL_JOINTS) & set(rs.RAT23_JOINTS))
+        assert rs.forward_kinematics(rs.RatPose()).shape == (23, 3)
+        flat = [j for js in rs.RAT23_REGIONS.values() for j in js]
+        assert set(flat) == set(rs.RAT23_JOINTS)
+
+    def test_tail_chain_is_serial(self):
+        assert rs.TAIL_PARENT["Tail1"] == "TailBase"
+        for i in range(2, 6):
+            assert rs.TAIL_PARENT[f"Tail{i}"] == f"Tail{i-1}"
+
+    def test_tail_length_matches_body(self):
+        """A rat's tail is about as long as its body."""
+        kp = rs.forward_kinematics(rs.RatPose())
+        tail = rs.forward_kinematics_tail(rs.RatPose())
+        base = kp[rs.RAT23_INDEX["TailBase"]]
+        snout = kp[rs.RAT23_INDEX["Snout"]]
+        tail_len = np.linalg.norm(tail[-1] - base)
+        body_len = np.linalg.norm(snout - base)
+        assert tail_len == pytest.approx(140.0, abs=5.0)
+        assert 0.75 < tail_len / body_len < 1.3
+
+    def test_tail_scales_with_body(self):
+        a = rs.forward_kinematics_tail(rs.RatPose(scale=1.0))
+        b = rs.forward_kinematics_tail(rs.RatPose(scale=2.0))
+        kp_a = rs.forward_kinematics(rs.RatPose(scale=1.0))
+        kp_b = rs.forward_kinematics(rs.RatPose(scale=2.0))
+        base_a = kp_a[rs.RAT23_INDEX["TailBase"]]
+        base_b = kp_b[rs.RAT23_INDEX["TailBase"]]
+        assert (np.linalg.norm(b[-1] - base_b)
+                == pytest.approx(2.0 * np.linalg.norm(a[-1] - base_a), rel=1e-6))
+
+    def test_tail_arc_totals_and_shape(self):
+        """The 2-parameter arc must reproduce the requested TOTAL deflection —
+        the ball-and-chain correlation, not 15 free angles."""
+        a = rs.tail_arc(sweep=np.radians(120.0), lift=np.radians(-30.0))
+        assert set(a) == set(rs.TAIL_JOINTS)
+        assert sum(v[2] for v in a.values()) == pytest.approx(np.radians(120.0))
+        assert sum(v[1] for v in a.values()) == pytest.approx(np.radians(-30.0))
+        assert all(v[0] == 0.0 for v in a.values())      # no axial roll
+
+    def test_tail_arc_taper_moves_curvature(self):
+        even = rs.tail_arc(sweep=1.0, taper=1.0)
+        whip = rs.tail_arc(sweep=1.0, taper=3.0)
+        assert whip["Tail5"][2] > even["Tail5"][2]       # tip bends more
+        assert whip["Tail1"][2] < even["Tail1"][2]       # base bends less
+
+    def test_tail_within_its_limits(self):
+        """A plausible arc must not exceed the per-segment limits."""
+        a = rs.tail_arc(sweep=np.radians(100.0), lift=np.radians(-40.0))
+        for name, (rx, ry, rz) in a.items():
+            (lox, hix), (loy, hiy), (loz, hiz) = rs.TAIL_LIMITS[name]
+            assert lox <= rx <= hix and loy <= ry <= hiy and loz <= rz <= hiz
+
+    def test_mesh_with_tail_is_longer(self):
+        from rpimocap.model.mesh_model import build_rat_mesh
+        body = build_rat_mesh(voxel=5.0, with_tail=False)
+        full = build_rat_mesh(voxel=5.0, with_tail=True)
+        assert np.ptp(full.verts_rest[:, 0]) > 1.7 * np.ptp(body.verts_rest[:, 0])
+        assert len(full.bone_parents) == len(body.bone_parents) + 5

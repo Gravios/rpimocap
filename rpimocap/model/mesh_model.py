@@ -31,7 +31,8 @@ import cv2
 import numpy as np
 
 from .body_model import DEFAULT_RADII
-from .rat_skeleton import (RAT23_BONES, RAT23_INDEX, RatPose,
+from .rat_skeleton import (RAT23_BONES, RAT23_INDEX, RAT23_JOINTS,
+                           RAT_BONES_EXT, RAT_JOINTS_EXT, RatPose,
                            forward_kinematics, forward_kinematics_transforms,
                            project_pose)
 
@@ -71,18 +72,27 @@ class RatMesh:
 
 def build_rat_mesh(radii: dict = DEFAULT_RADII, voxel: float = 2.5,
                    margin: float = 28.0, smooth_k: float = 0.18,
-                   weight_bones: int = 4) -> RatMesh:
+                   weight_bones: int = 4, with_tail: bool = True) -> RatMesh:
     """Build the skinned rat mesh from the rat23 rest skeleton.
 
     ``voxel`` is the marching-cubes grid spacing (mm); ``smooth_k`` sets the
     metaball blend (larger = sharper joints); ``radii`` are the per-bone
     ``(parent, child)`` thicknesses (shared with the capsule model).
+
+    ``with_tail`` adds the five tail segments. It defaults to True because
+    without a tail the body is front/back near-symmetric and NO image
+    objective can orient it — a 180 deg flip costs only ~1.3% of the
+    appearance energy range. The tail is geometry only; the keypoint set
+    returned by ``forward_kinematics`` is unchanged at 23.
     """
     from skimage.measure import marching_cubes
 
-    kp = forward_kinematics(RatPose())
-    segs = [(kp[RAT23_INDEX[p]], kp[RAT23_INDEX[c]], radii.get((p, c), (5.0, 5.0)))
-            for (p, c) in RAT23_BONES]
+    bones = RAT_BONES_EXT if with_tail else RAT23_BONES
+    _, rest_pos = forward_kinematics_transforms(RatPose())
+    segs = [(rest_pos[p], rest_pos[c], radii.get((p, c), (5.0, 5.0)))
+            for (p, c) in bones]
+    kp = np.stack([rest_pos[n] for n in
+                   (RAT_JOINTS_EXT if with_tail else RAT23_JOINTS)])
     lo = kp.min(0) - margin
     hi = kp.max(0) + margin
     xs = np.arange(lo[0], hi[0] + voxel, voxel)
@@ -108,7 +118,7 @@ def build_rat_mesh(radii: dict = DEFAULT_RADII, voxel: float = 2.5,
     W = np.zeros_like(D)
     np.put_along_axis(W, order, wk, axis=1)
 
-    bone_parents = [p for (p, c) in RAT23_BONES]   # bone rides its parent frame
+    bone_parents = [p for (p, c) in bones]        # bone rides its parent frame
     rest_R, rest_t = forward_kinematics_transforms(RatPose())
     return RatMesh(verts.astype(np.float64), faces.astype(np.int32),
                    W.astype(np.float64), bone_parents, rest_R, rest_t)
